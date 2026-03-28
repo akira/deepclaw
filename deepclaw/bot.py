@@ -6,6 +6,7 @@ Streams agent responses by progressively editing a single Telegram message.
 
 import logging
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -363,8 +364,41 @@ async def post_shutdown(application: Application) -> None:
         await checkpointer.__aexit__(None, None, None)
 
 
+def _handle_service_command(args: list[str]) -> None:
+    """Handle 'deepclaw service <subcommand>' CLI commands."""
+    from deepclaw.service import (
+        detect_platform,
+        install_service,
+        service_status,
+        uninstall_service,
+    )
+
+    plat = detect_platform()
+
+    if not args:
+        print("Usage: deepclaw service {install|uninstall|status}")
+        raise SystemExit(1)
+
+    subcommand = args[0]
+    if subcommand == "install":
+        print(install_service(plat))
+    elif subcommand == "uninstall":
+        print(uninstall_service(plat))
+    elif subcommand == "status":
+        print(service_status(plat))
+    else:
+        print(f"Unknown service subcommand: {subcommand}")
+        print("Usage: deepclaw service {install|uninstall|status}")
+        raise SystemExit(1)
+
+
 def main() -> None:
     """Entry point: start the Telegram bot with long-polling."""
+    args = sys.argv[1:]
+    if args and args[0] == "service":
+        _handle_service_command(args[1:])
+        return
+
     config = load_config()
 
     token = config.telegram.bot_token
