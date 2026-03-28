@@ -1,5 +1,8 @@
 """Tests for deepclaw.safety module."""
 
+import socket
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from deepclaw.safety import (
@@ -16,7 +19,11 @@ from deepclaw.safety import (
     CATEGORY_SERVICE_MANAGEMENT,
     CATEGORY_SQL_DESTRUCTION,
     CATEGORY_SYSTEM_CONFIG_WRITE,
+    _extract_hostname,
+    _is_ip_blocked,
     check_command,
+    check_url_safety,
+    check_url_safety_sync,
     format_warning,
     is_dangerous,
 )
@@ -30,6 +37,12 @@ from deepclaw.safety import (
 def _categories(command: str) -> set[str]:
     """Return the set of matched categories for a command."""
     return {m.category for m in check_command(command)}
+
+
+def _fake_addrinfo(ip: str) -> list[tuple]:
+    """Build a minimal getaddrinfo-style result for a single IP."""
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    return [(family, socket.SOCK_STREAM, 0, "", (ip, 0))]
 
 
 # ---------------------------------------------------------------------------
@@ -191,3 +204,197 @@ class TestEdgeCases:
         assert CATEGORY_RECURSIVE_DELETE in categories
         assert CATEGORY_FILESYSTEM_FORMAT in categories
         assert CATEGORY_DEVICE_WRITE in categories
+
+
+# ---------------------------------------------------------------------------
+# SSRF Protection — _is_ip_blocked
+# ---------------------------------------------------------------------------
+
+
+class TestIsIpBlocked:
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.0.1",
+            "192.168.255.255",
+            "127.0.0.1",
+            "127.255.255.255",
+            "169.254.1.1",
+            "0.0.0.0",
+            "0.255.255.255",
+            "100.64.0.1",
+            "100.127.255.255",
+            "224.0.0.1",
+            "239.255.255.255",
+            "240.0.0.1",
+            "255.255.255.254",
+        ],
+        ids=[
+            "10.x start",
+            "10.x end",
+            "172.16.x start",
+            "172.16.x end",
+            "192.168.x start",
+            "192.168.x end",
+            "127.x start",
+            "127.x end",
+            "169.254.x",
+            "0.x start",
+            "0.x end",
+            "100.64.x start",
+            "100.64.x end",
+            "224.x multicast",
+            "224.x multicast end",
+            "240.x reserved start",
+            "240.x reserved end",
+        ],
+    )
+    def test_blocked_ipv4_ranges(self, ip: str):
+        assert _is_ip_blocked(ip) is True
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "::1",
+            "fc00::1",
+            "fdff::1",
+            "fe80::1",
+        ],
+        ids=[
+            "ipv6 loopback",
+            "ipv6 unique local fc00",
+            "ipv6 unique local fdff",
+            "ipv6 link-local",
+        ],
+    )
+    def test_blocked_ipv6_ranges(self, ip: str):
+        assert _is_ip_blocked(ip) is True
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "8.8.8.8",
+            "93.184.216.34",
+            "1.1.1.1",
+        ],
+        ids=["google dns", "example.com ip", "cloudflare dns"],
+    )
+    def test_allowed_public_ips(self, ip: str):
+        assert _is_ip_blocked(ip) is False
+
+    def test_invalid_ip_returns_false(self):
+        assert _is_ip_blocked("not-an-ip") is False
+        assert _is_ip_blocked("") is False
+        assert _is_ip_blocked("999.999.999.999") is False
+
+
+# ---------------------------------------------------------------------------
+# SSRF Protection — _extract_hostname
+# ---------------------------------------------------------------------------
+
+
+class TestExtractHostname:
+    def test_https_url(self):
+        assert _extract_hostname("https://example.com") == "example.com"
+
+    def test_http_url_with_port_and_path(self):
+        assert _extract_hostname("http://foo.bar:8080/path") == "foo.bar"
+
+    def test_empty_string(self):
+        assert _extract_hostname("") is None
+
+    def test_no_scheme(self):
+        assert _extract_hostname("example.com") is None
+
+    def test_relative_path(self):
+        assert _extract_hostname("/foo") is None
+
+
+# ---------------------------------------------------------------------------
+# SSRF Protection — check_url_safety_sync
+# ---------------------------------------------------------------------------
+
+
+class TestCheckUrlSafetySync:
+    @patch("deepclaw.safety.socket.getaddrinfo")
+    def test_blocked_private_ip(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = _fake_addrinfo("10.0.0.1")
+        is_safe, reason = check_url_safety_sync("https://evil.internal")
+        assert is_safe is False
+        assert "10.0.0.1" in reason
+
+    @patch("deepclaw.safety.socket.getaddrinfo")
+    def test_blocked_hostname(self, mock_getaddrinfo):
+        is_safe, reason = check_url_safety_sync("https://metadata.google.internal")
+        assert is_safe is False
+        assert "metadata.google.internal" in reason
+        # DNS should never be called for a blocked hostname
+        mock_getaddrinfo.assert_not_called()
+
+    @patch("deepclaw.safety.socket.getaddrinfo")
+    def test_allowed_public_url(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = _fake_addrinfo("93.184.216.34")
+        is_safe, reason = check_url_safety_sync("https://example.com")
+        assert is_safe is True
+        assert reason == ""
+
+    @patch("deepclaw.safety.socket.getaddrinfo")
+    def test_dns_failure(self, mock_getaddrinfo):
+        mock_getaddrinfo.side_effect = socket.gaierror("Name resolution failed")
+        is_safe, reason = check_url_safety_sync("https://doesnotexist.example")
+        assert is_safe is False
+        assert "DNS" in reason
+
+    def test_invalid_url_no_scheme(self):
+        is_safe, reason = check_url_safety_sync("example.com")
+        assert is_safe is False
+        assert "Invalid" in reason
+
+
+# ---------------------------------------------------------------------------
+# SSRF Protection — check_url_safety (async)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckUrlSafety:
+    @pytest.mark.asyncio
+    @patch("deepclaw.safety.asyncio.to_thread")
+    async def test_blocked_private_ip(self, mock_to_thread):
+        mock_to_thread.return_value = _fake_addrinfo("10.0.0.1")
+        is_safe, reason = await check_url_safety("https://evil.internal")
+        assert is_safe is False
+        assert "10.0.0.1" in reason
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.safety.asyncio.to_thread")
+    async def test_blocked_hostname(self, mock_to_thread):
+        is_safe, reason = await check_url_safety("https://metadata.google.internal")
+        assert is_safe is False
+        assert "metadata.google.internal" in reason
+        mock_to_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.safety.asyncio.to_thread")
+    async def test_allowed_public_url(self, mock_to_thread):
+        mock_to_thread.return_value = _fake_addrinfo("93.184.216.34")
+        is_safe, reason = await check_url_safety("https://example.com")
+        assert is_safe is True
+        assert reason == ""
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.safety.asyncio.to_thread")
+    async def test_dns_failure(self, mock_to_thread):
+        mock_to_thread.side_effect = socket.gaierror("Name resolution failed")
+        is_safe, reason = await check_url_safety("https://doesnotexist.example")
+        assert is_safe is False
+        assert "DNS" in reason
+
+    @pytest.mark.asyncio
+    async def test_invalid_url_no_scheme(self):
+        is_safe, reason = await check_url_safety("example.com")
+        assert is_safe is False
+        assert "Invalid" in reason

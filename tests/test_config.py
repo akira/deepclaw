@@ -85,6 +85,16 @@ class TestParseEnvFile:
         env_file.write_text("KEY=\n", encoding="utf-8")
         assert _parse_env_file(env_file) == {"KEY": ""}
 
+    def test_export_prefix_stripped(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("export FOO=bar\nexport BAZ='qux'\n", encoding="utf-8")
+        assert _parse_env_file(env_file) == {"FOO": "bar", "BAZ": "qux"}
+
+    def test_export_prefix_mixed_with_normal(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("export A=1\nB=2\n# comment\nexport C=3\n", encoding="utf-8")
+        assert _parse_env_file(env_file) == {"A": "1", "B": "2", "C": "3"}
+
 
 # ---------------------------------------------------------------------------
 # _resolve

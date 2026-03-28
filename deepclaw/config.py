@@ -42,7 +42,7 @@ class TelegramConfig:
 
 @dataclass
 class DeepClawConfig:
-    model: str = ""
+    model: str = "anthropic:claude-sonnet-4-6-20250514"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     workspace_root: str = "~/.deepclaw/workspace"
 
@@ -62,6 +62,9 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        # Handle lines prefixed with "export "
+        if line.startswith("export "):
+            line = line[len("export "):]
         eq_pos = line.find("=")
         if eq_pos == -1:
             continue

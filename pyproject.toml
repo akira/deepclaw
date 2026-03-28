@@ -18,6 +18,10 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 deepclaw = "deepclaw.bot:main"
 deepclaw-tui = "deepagents_cli:cli_main"
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [tool.uv.sources]
 deepagents = { path = "../deepagents/libs/deepagents", editable = true }
 deepagents-cli = { path = "../deepagents/libs/cli", editable = true }

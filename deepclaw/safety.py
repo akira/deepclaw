@@ -1,11 +1,17 @@
-"""Dangerous command detection for use with DeepAgents' interrupt_on mechanism.
+"""Dangerous command detection and URL safety for use with DeepAgents' interrupt_on mechanism.
 
 Provides regex-based pattern matching to identify dangerous shell commands,
 destructive SQL statements, and other risky operations before they execute.
+Also provides SSRF protection via URL validation that blocks requests to
+private/internal networks.
 """
 
+import asyncio
+import ipaddress
 import re
+import socket
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -263,3 +269,112 @@ def format_warning(command: str, matches: list[DangerousPattern]) -> str:
     lines.append("")
     lines.append(f"Total: {critical_count} critical, {warning_count} warning")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# SSRF Protection — URL safety validation
+# ---------------------------------------------------------------------------
+
+BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+    # RFC 1918 private ranges
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+    # Loopback
+    ipaddress.IPv4Network("127.0.0.0/8"),
+    # Link-local
+    ipaddress.IPv4Network("169.254.0.0/16"),
+    # Unspecified
+    ipaddress.IPv4Network("0.0.0.0/8"),
+    # CGNAT / RFC 6598
+    ipaddress.IPv4Network("100.64.0.0/10"),
+    # Multicast
+    ipaddress.IPv4Network("224.0.0.0/4"),
+    # Reserved
+    ipaddress.IPv4Network("240.0.0.0/4"),
+    # IPv6 loopback
+    ipaddress.IPv6Network("::1/128"),
+    # IPv6 unique local
+    ipaddress.IPv6Network("fc00::/7"),
+    # IPv6 link-local
+    ipaddress.IPv6Network("fe80::/10"),
+]
+
+BLOCKED_HOSTNAMES: set[str] = {
+    "metadata.google.internal",
+    "metadata.goog",
+    "169.254.169.254",
+}
+
+_REASON_INVALID_URL = "Invalid URL"
+_REASON_DNS_FAILED = "DNS resolution failed"
+
+
+def _is_ip_blocked(ip_str: str) -> bool:
+    """Check whether an IP address falls within any blocked network."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(addr in network for network in BLOCKED_NETWORKS)
+
+
+def _extract_hostname(url: str) -> str | None:
+    """Extract and return the hostname from a URL, or None if invalid."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    return parsed.hostname
+
+
+def check_url_safety_sync(url: str) -> tuple[bool, str]:
+    """Synchronous URL safety check — blocks requests to private/internal networks.
+
+    Returns (is_safe, reason). Fail-closed: DNS failures return unsafe.
+    """
+    hostname = _extract_hostname(url)
+    if hostname is None:
+        return (False, _REASON_INVALID_URL)
+
+    if hostname in BLOCKED_HOSTNAMES:
+        return (False, f"Blocked hostname: {hostname}")
+
+    try:
+        addrinfos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, OSError):
+        return (False, _REASON_DNS_FAILED)
+
+    for addrinfo in addrinfos:
+        ip_str = addrinfo[4][0]
+        if _is_ip_blocked(ip_str):
+            return (False, f"IP {ip_str} is in a blocked network range")
+
+    return (True, "")
+
+
+async def check_url_safety(url: str) -> tuple[bool, str]:
+    """Async URL safety check — blocks requests to private/internal networks.
+
+    Returns (is_safe, reason). Fail-closed: DNS failures return unsafe.
+    """
+    hostname = _extract_hostname(url)
+    if hostname is None:
+        return (False, _REASON_INVALID_URL)
+
+    if hostname in BLOCKED_HOSTNAMES:
+        return (False, f"Blocked hostname: {hostname}")
+
+    try:
+        addrinfos = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
+    except (socket.gaierror, OSError):
+        return (False, _REASON_DNS_FAILED)
+
+    for addrinfo in addrinfos:
+        ip_str = addrinfo[4][0]
+        if _is_ip_blocked(ip_str):
+            return (False, f"IP {ip_str} is in a blocked network range")
+
+    return (True, "")

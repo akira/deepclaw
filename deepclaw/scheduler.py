@@ -190,7 +190,13 @@ class Scheduler:
                 config=config,
             )
             messages = result.get("messages", [])
-            response = messages[-1].content if messages else "(no response)"
+            content = messages[-1].content if messages else "(no response)"
+            if isinstance(content, list):
+                response = "\n".join(
+                    block.get("text", "") for block in content if isinstance(block, dict)
+                )
+            else:
+                response = str(content)
         except Exception:
             logger.exception(f"Cron job {job.name} ({job.id}) agent invocation failed")
             response = f"Cron job '{job.name}' failed to execute."
