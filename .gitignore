@@ -17,5 +17,8 @@ build/
 *.swp
 *.swo
 
+# Docs (design docs kept local, not tracked)
+docs/
+
 # OS
 .DS_Store

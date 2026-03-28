@@ -569,6 +569,9 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
+web = [
+    { name = "tavily-python" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -579,8 +582,9 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-telegram-bot", specifier = ">=22.0,<23.0" },
+    { name = "tavily-python", marker = "extra == 'web'", specifier = ">=0.7.21,<1.0.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["web", "dev"]
 
 [[package]]
 name = "distro"
