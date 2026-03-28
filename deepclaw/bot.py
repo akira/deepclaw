@@ -294,31 +294,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     streaming_cfg = context.bot_data[CONFIG_KEY].telegram.streaming
 
     try:
-        async for event in agent.astream_events(
+        async for chunk in agent.astream(
             {"messages": [{"role": "user", "content": user_text}]},
             config=config,
-            version="v2",
+            stream_mode="messages",
         ):
-            if event["event"] != "on_chat_model_stream":
+            # astream with stream_mode="messages" yields (message, metadata) tuples
+            if not isinstance(chunk, tuple) or len(chunk) != 2:
                 continue
-            chunk = event["data"].get("chunk")
-            if chunk is None:
-                continue
-            content = chunk.content if hasattr(chunk, "content") else ""
-            if not content or not isinstance(content, str):
+            message_obj, _metadata = chunk
+
+            # Only process AI messages (skip tool messages, etc.)
+            if not hasattr(message_obj, "content_blocks"):
                 continue
 
-            accumulated += content
-            chars_since_edit += len(content)
-            now = time.monotonic()
-            elapsed = now - last_edit_time
+            for block in message_obj.content_blocks:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = block.get("text", "")
+                if not text:
+                    continue
 
-            if elapsed >= streaming_cfg.edit_interval or chars_since_edit >= streaming_cfg.buffer_threshold:
-                display = accumulated + CURSOR_INDICATOR
-                if len(display) <= TELEGRAM_MESSAGE_LIMIT:
-                    await _edit_stream_message(stream_msg, display)
-                last_edit_time = time.monotonic()
-                chars_since_edit = 0
+                accumulated += text
+                chars_since_edit += len(text)
+                now = time.monotonic()
+                elapsed = now - last_edit_time
+
+                if elapsed >= streaming_cfg.edit_interval or chars_since_edit >= streaming_cfg.buffer_threshold:
+                    display = accumulated + CURSOR_INDICATOR
+                    if len(display) <= TELEGRAM_MESSAGE_LIMIT:
+                        await _edit_stream_message(stream_msg, display)
+                    last_edit_time = time.monotonic()
+                    chars_since_edit = 0
     except Exception:
         logger.exception("Agent streaming failed")
         accumulated = accumulated or "Sorry, something went wrong processing your message."
