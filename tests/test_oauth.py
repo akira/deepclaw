@@ -3,10 +3,7 @@
 import json
 import os
 import time
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from deepclaw.oauth import (
     _generate_pkce,
@@ -16,7 +13,6 @@ from deepclaw.oauth import (
     is_oauth_token,
     resolve_token,
 )
-
 
 # ---------------------------------------------------------------------------
 # is_oauth_token
@@ -158,7 +154,10 @@ class TestReadClaudeCodeCredentials:
 
 class TestResolveToken:
     def test_anthropic_token_env_first(self):
-        with patch.dict(os.environ, {"ANTHROPIC_TOKEN": "sk-ant-oat01-env", "ANTHROPIC_API_KEY": "sk-ant-api03-key"}):
+        with patch.dict(
+            os.environ,
+            {"ANTHROPIC_TOKEN": "sk-ant-oat01-env", "ANTHROPIC_API_KEY": "sk-ant-api03-key"},
+        ):
             token, is_oauth = resolve_token()
         assert token == "sk-ant-oat01-env"
         assert is_oauth is True

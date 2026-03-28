@@ -39,11 +39,13 @@ _TOKEN_REFRESH_BUFFER_MS = 120_000  # Refresh 2 minutes before expiry
 _REQUEST_TIMEOUT = 15
 
 OAUTH_HEADERS = {
-    "anthropic-beta": ",".join([
-        "interleaved-thinking-2025-05-14",
-        "claude-code-20250219",
-        "oauth-2025-04-20",
-    ]),
+    "anthropic-beta": ",".join(
+        [
+            "interleaved-thinking-2025-05-14",
+            "claude-code-20250219",
+            "oauth-2025-04-20",
+        ]
+    ),
     "user-agent": f"claude-cli/{_CLAUDE_CODE_VERSION} (external, cli)",
     "x-app": "cli",
 }
@@ -53,9 +55,7 @@ def is_oauth_token(key: str) -> bool:
     """Check if the key is an OAuth token (not a regular API key)."""
     if not key:
         return False
-    if key.startswith("sk-ant-api"):
-        return False
-    return True
+    return not key.startswith("sk-ant-api")
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +66,9 @@ def is_oauth_token(key: str) -> bool:
 def _generate_pkce() -> tuple[str, str]:
     """Generate PKCE code_verifier and code_challenge (S256)."""
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()
-    ).rstrip(b"=").decode()
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    )
     return verifier, challenge
 
 
@@ -137,11 +137,13 @@ def _refresh_token(creds: dict, save_fn) -> str | None:
     if not refresh:
         return None
 
-    data = json.dumps({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh,
-        "client_id": _OAUTH_CLIENT_ID,
-    }).encode()
+    data = json.dumps(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": _OAUTH_CLIENT_ID,
+        }
+    ).encode()
 
     req = urllib.request.Request(
         _OAUTH_TOKEN_URL,
@@ -262,14 +264,16 @@ def login() -> str | None:
     state = splits[1] if len(splits) > 1 else ""
 
     # Exchange code for tokens
-    exchange_data = json.dumps({
-        "grant_type": "authorization_code",
-        "client_id": _OAUTH_CLIENT_ID,
-        "code": code,
-        "state": state,
-        "redirect_uri": _OAUTH_REDIRECT_URI,
-        "code_verifier": verifier,
-    }).encode()
+    exchange_data = json.dumps(
+        {
+            "grant_type": "authorization_code",
+            "client_id": _OAUTH_CLIENT_ID,
+            "code": code,
+            "state": state,
+            "redirect_uri": _OAUTH_REDIRECT_URI,
+            "code_verifier": verifier,
+        }
+    ).encode()
 
     req = urllib.request.Request(
         _OAUTH_TOKEN_URL,
