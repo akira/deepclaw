@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
@@ -24,6 +25,14 @@ from telegram.ext import (
 )
 
 from deepclaw.config import load_config
+from deepclaw.scheduler import (
+    Scheduler,
+    add_job,
+    list_jobs,
+    load_jobs,
+    parse_cron_add,
+    remove_job,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -38,6 +47,8 @@ CONFIG_KEY = "deepclaw_config"
 CURSOR_INDICATOR = "▌"
 THINKING_MESSAGE = "Thinking..."
 REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
+SCHEDULER_KEY = "scheduler"
+JOBS_PATH_KEY = "jobs_path"
 
 
 def is_user_allowed(update: Update, allowed_users: set[str]) -> bool:
@@ -132,6 +143,82 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Welcome to DeepClaw! Send me a message and I'll respond using AI.\n"
         "Type /help to see available commands."
     )
+
+
+async def cmd_cron(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cron -- list all cron jobs."""
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    jobs_path = context.bot_data.get(JOBS_PATH_KEY)
+    jobs = list_jobs(jobs_path) if jobs_path else []
+    if not jobs:
+        await update.message.reply_text("No cron jobs configured.")
+        return
+    lines = []
+    for job in jobs:
+        status = "enabled" if job.enabled else "disabled"
+        lines.append(f"- {job.id[:8]} | {job.cron_expr} | {status} | {job.name or job.prompt[:40]}")
+    await update.message.reply_text("Cron jobs:\n" + "\n".join(lines))
+
+
+async def cmd_cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cron_add <cron_expr> | <prompt>."""
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    raw = update.message.text
+    # Strip the /cron_add command prefix
+    prefix = "/cron_add"
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):].strip()
+    if not raw:
+        await update.message.reply_text("Usage: /cron_add <cron_expr> | <prompt>")
+        return
+    try:
+        cron_expr, prompt = parse_cron_add(raw)
+    except ValueError as exc:
+        await update.message.reply_text(f"Error: {exc}")
+        return
+    chat_id = str(update.effective_chat.id)
+    jobs_path = context.bot_data.get(JOBS_PATH_KEY)
+    job = add_job(
+        name=prompt[:50],
+        cron_expr=cron_expr,
+        prompt=prompt,
+        delivery={"channel": "telegram", "chat_id": chat_id},
+        path=jobs_path,
+    )
+    await update.message.reply_text(f"Cron job added: {job.id[:8]}\nSchedule: {cron_expr}\nPrompt: {prompt}")
+
+
+async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cron_rm <job_id_prefix>."""
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    raw = update.message.text
+    prefix = "/cron_rm"
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):].strip()
+    if not raw:
+        await update.message.reply_text("Usage: /cron_rm <job_id_prefix>")
+        return
+    id_prefix = raw.strip()
+    jobs_path = context.bot_data.get(JOBS_PATH_KEY)
+    jobs = load_jobs(jobs_path) if jobs_path else []
+    matches = [j for j in jobs if j.id.startswith(id_prefix)]
+    if len(matches) == 0:
+        await update.message.reply_text(f"No job found matching prefix: {id_prefix}")
+        return
+    if len(matches) > 1:
+        await update.message.reply_text(f"Ambiguous prefix: {id_prefix} matches {len(matches)} jobs. Be more specific.")
+        return
+    removed = remove_job(matches[0].id, jobs_path)
+    if removed:
+        await update.message.reply_text(f"Removed cron job: {matches[0].id[:8]}")
+    else:
+        await update.message.reply_text("Failed to remove job.")
 
 
 async def _edit_stream_message(message, text: str) -> None:
@@ -231,11 +318,25 @@ async def post_init(application: Application) -> None:
     else:
         logger.info("Allowlist inactive — open mode")
 
+    jobs_path = application.bot_data.get(JOBS_PATH_KEY)
+    if jobs_path:
+        scheduler = Scheduler(
+            jobs_path=jobs_path,
+            agent=agent,
+            checkpointer=checkpointer,
+            bot=application.bot,
+        )
+        application.bot_data[SCHEDULER_KEY] = scheduler
+        await scheduler.start()
+
     logger.info("DeepAgents agent initialized")
 
 
 async def post_shutdown(application: Application) -> None:
-    """Clean up the checkpointer on shutdown."""
+    """Clean up the scheduler and checkpointer on shutdown."""
+    scheduler = application.bot_data.get(SCHEDULER_KEY)
+    if scheduler:
+        await scheduler.stop()
     checkpointer = application.bot_data.get("checkpointer")
     if checkpointer:
         await checkpointer.__aexit__(None, None, None)
@@ -260,13 +361,20 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
+    jobs_path = Path(os.path.expanduser("~/.deepclaw/cron/jobs.json"))
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+
     application.bot_data["checkpointer"] = checkpointer
     application.bot_data[CONFIG_KEY] = config
+    application.bot_data[JOBS_PATH_KEY] = jobs_path
 
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("cron", cmd_cron))
+    application.add_handler(CommandHandler("cron_add", cmd_cron_add))
+    application.add_handler(CommandHandler("cron_rm", cmd_cron_rm))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Starting DeepClaw Telegram bot...")
