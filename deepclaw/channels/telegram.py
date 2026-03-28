@@ -276,8 +276,70 @@ async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(format_warning(raw, matches))
 
 
+class TelegramBotChannel:
+    """Long-lived channel adapter using the Bot API directly.
+
+    Used by the scheduler and any code that needs to send messages
+    without an active Update context (proactive messaging).
+    """
+
+    def __init__(self, bot):
+        self._bot = bot
+
+    @property
+    def name(self) -> str:
+        return "telegram"
+
+    @property
+    def supports_edit(self) -> bool:
+        return True
+
+    @property
+    def message_limit(self) -> int:
+        return TELEGRAM_MESSAGE_LIMIT
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def send(self, chat_id: str, text: str) -> str:
+        """Send a message to a chat. Returns message_id as string."""
+        msg = await self._bot.send_message(chat_id=int(chat_id), text=text)
+        msg_id = str(msg.message_id)
+        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return msg_id
+
+    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        """Edit a previously sent message."""
+        msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
+        if msg is not None:
+            try:
+                await msg.edit_text(text)
+            except BadRequest as exc:
+                if "Message is not modified" not in str(exc):
+                    raise
+        else:
+            try:
+                await self._bot.edit_message_text(
+                    text=text, chat_id=int(chat_id), message_id=int(message_id)
+                )
+            except BadRequest as exc:
+                if "Message is not modified" not in str(exc):
+                    raise
+
+    async def send_typing(self, chat_id: str) -> None:
+        """Send a typing indicator."""
+        await self._bot.send_chat_action(chat_id=int(chat_id), action=ChatAction.TYPING)
+
+
 class TelegramChannel:
-    """Channel adapter that bridges the Gateway to Telegram's python-telegram-bot API."""
+    """Per-message channel adapter wrapping an Update context.
+
+    Used during the gateway streaming flow where we have an active
+    Update and want to reply_text rather than send_message.
+    """
 
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self._update = update
@@ -286,6 +348,14 @@ class TelegramChannel:
     @property
     def name(self) -> str:
         return "telegram"
+
+    @property
+    def supports_edit(self) -> bool:
+        return True
+
+    @property
+    def message_limit(self) -> int:
+        return TELEGRAM_MESSAGE_LIMIT
 
     async def start(self) -> None:
         pass
@@ -297,12 +367,11 @@ class TelegramChannel:
         """Send a text message via reply_text. Returns a string message_id."""
         msg = await self._update.message.reply_text(text)
         msg_id = str(msg.message_id)
-        # Store the message object so edit_message can retrieve it later
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
 
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
-        """Edit a previously sent message. Silently ignores 'not modified' errors."""
+        """Edit a previously sent message."""
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
         if msg is None:
             return
@@ -390,13 +459,17 @@ async def post_init(application: Application) -> None:
     logger.info(f"Pairing code: {pairing_code}")
     logger.info("Send /pair %s to your bot in Telegram to pair", pairing_code)
 
+    # Create a long-lived channel for proactive messaging (cron delivery, etc.)
+    bot_channel = TelegramBotChannel(application.bot)
+    application.bot_data["telegram_channel"] = bot_channel
+
     jobs_path = application.bot_data.get(JOBS_PATH_KEY)
     if jobs_path:
         scheduler = Scheduler(
             jobs_path=jobs_path,
             agent=agent,
             checkpointer=application.bot_data["checkpointer_resolved"],
-            bot=application.bot,
+            channels={"telegram": bot_channel},
         )
         application.bot_data[SCHEDULER_KEY] = scheduler
         await scheduler.start()

@@ -47,6 +47,13 @@ class Gateway:
         """Process an inbound message: invoke agent, stream response, deliver via channel."""
         logger.info(f"Received message from chat {message.chat_id}: {message.text[:80]}")
 
+        # Set chat context so tools (e.g., cron) know where to deliver results
+        try:
+            from deepclaw.tools.cron import set_chat_context
+            set_chat_context(channel.name, message.chat_id)
+        except ImportError:
+            pass
+
         await channel.send_typing(message.chat_id)
 
         msg_id = await channel.send(message.chat_id, THINKING_MESSAGE)

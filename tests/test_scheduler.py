@@ -246,13 +246,14 @@ class TestSchedulerTick:
         agent.ainvoke = AsyncMock(return_value={
             "messages": [MagicMock(content="done")]
         })
-        bot = AsyncMock()
+        channel = AsyncMock()
+        channel.name = "telegram"
 
-        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, bot=bot)
+        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel})
         await scheduler.tick()
 
         agent.ainvoke.assert_called_once()
-        bot.send_message.assert_called_once_with(chat_id=12345, text="done")
+        channel.send.assert_called_once_with("12345", "done")
 
     @pytest.mark.asyncio
     async def test_tick_skips_disabled_job(self, tmp_path):
@@ -262,9 +263,8 @@ class TestSchedulerTick:
         save_jobs([job], f)
 
         agent = AsyncMock()
-        bot = AsyncMock()
 
-        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, bot=bot)
+        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None)
         await scheduler.tick()
 
         agent.ainvoke.assert_not_called()
@@ -278,9 +278,8 @@ class TestSchedulerTick:
         save_jobs([job], f)
 
         agent = AsyncMock()
-        bot = AsyncMock()
 
-        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, bot=bot)
+        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None)
         await scheduler.tick()
 
         agent.ainvoke.assert_not_called()
@@ -294,9 +293,10 @@ class TestSchedulerTick:
 
         agent = AsyncMock()
         agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="ok")]})
-        bot = AsyncMock()
+        channel = AsyncMock()
+        channel.name = "telegram"
 
-        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, bot=bot)
+        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel})
         await scheduler.tick()
 
         updated = load_jobs(f)

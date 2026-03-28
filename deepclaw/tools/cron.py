@@ -17,12 +17,24 @@ from deepclaw.scheduler import (
 )
 
 _jobs_path: Path = DEFAULT_JOBS_PATH
+_current_chat_id: str = ""
+_current_channel: str = "telegram"
 
 
 def set_jobs_path(path: Path) -> None:
     """Override the jobs file path (useful for testing and configuration)."""
     global _jobs_path  # noqa: PLW0603
     _jobs_path = path
+
+
+def set_chat_context(channel: str, chat_id: str) -> None:
+    """Set the current chat context so scheduled tasks auto-deliver to the right place.
+
+    Called by the gateway before each agent invocation.
+    """
+    global _current_chat_id, _current_channel  # noqa: PLW0603
+    _current_channel = channel
+    _current_chat_id = chat_id
 
 
 def available() -> bool:
@@ -60,9 +72,13 @@ def schedule_task(
     except Exception as exc:
         return {"error": f"Failed to validate cron expression: {exc}"}
 
-    delivery = {"channel": channel}
-    if chat_id:
-        delivery["chat_id"] = chat_id
+    # Use current chat context as default delivery target
+    resolved_channel = channel or _current_channel
+    resolved_chat_id = chat_id or _current_chat_id
+
+    delivery = {"channel": resolved_channel}
+    if resolved_chat_id:
+        delivery["chat_id"] = resolved_chat_id
 
     job = add_job(
         name=name or prompt[:50],

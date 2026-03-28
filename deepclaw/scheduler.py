@@ -110,13 +110,17 @@ def parse_cron_add(text: str) -> tuple[str, str]:
 
 
 class Scheduler:
-    """In-process asyncio cron scheduler."""
+    """In-process asyncio cron scheduler.
 
-    def __init__(self, jobs_path: Path, agent, checkpointer, bot) -> None:
+    Delivers results through registered Channel instances rather than
+    direct platform references. Channels are keyed by name (e.g., "telegram").
+    """
+
+    def __init__(self, jobs_path: Path, agent, checkpointer, channels: dict | None = None) -> None:
         self._jobs_path = jobs_path
         self._agent = agent
         self._checkpointer = checkpointer
-        self._bot = bot
+        self._channels: dict = channels or {}  # name -> Channel instance
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -201,9 +205,16 @@ class Scheduler:
             logger.exception(f"Cron job {job.name} ({job.id}) agent invocation failed")
             response = f"Cron job '{job.name}' failed to execute."
 
-        chat_id = job.delivery.get("chat_id")
-        if chat_id and self._bot:
+        channel_name = job.delivery.get("channel", "")
+        chat_id = job.delivery.get("chat_id", "")
+        channel = self._channels.get(channel_name)
+
+        if channel and chat_id:
             try:
-                await self._bot.send_message(chat_id=int(chat_id), text=str(response))
+                await channel.send(chat_id, str(response))
             except Exception:
-                logger.exception(f"Failed to deliver cron result to chat {chat_id}")
+                logger.exception(f"Failed to deliver cron result via {channel_name} to {chat_id}")
+        elif chat_id:
+            logger.warning(f"No channel '{channel_name}' registered for delivery")
+        else:
+            logger.info(f"Cron job '{job.name}' completed (no delivery target)")
