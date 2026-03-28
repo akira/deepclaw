@@ -76,6 +76,36 @@ export TAVILY_API_KEY=<your-tavily-key>
 uv sync --extra web
 ```
 
+## Choosing a Model
+
+DeepClaw defaults to `claude-sonnet-4-6` but supports any model via the `provider:model` format.
+
+**Via config file:**
+```yaml
+# ~/.deepclaw/config.yaml
+model: "openai:gpt-4o"
+```
+
+**Via environment variable:**
+```bash
+export DEEPCLAW_MODEL=openai:gpt-4o
+```
+
+Supported providers (requires the provider's API key and langchain package):
+
+| Provider | Model example | API key env var | Package |
+|---|---|---|---|
+| Anthropic | `anthropic:claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | (included) |
+| OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` | `langchain-openai` |
+| Google | `google-genai:gemini-2.5-pro` | `GOOGLE_API_KEY` | `langchain-google-genai` |
+| Groq | `groq:llama-3.3-70b` | `GROQ_API_KEY` | `langchain-groq` |
+| OpenRouter | `openrouter:anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` | `langchain-openrouter` |
+
+Install additional providers as needed:
+```bash
+uv pip install langchain-openai  # for OpenAI models
+```
+
 ## Running as a Daemon
 
 For long-running deployment on macOS (launchd) or Linux (systemd):
