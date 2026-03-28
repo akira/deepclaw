@@ -9,9 +9,9 @@ from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
-    chunk_message,
     get_thread_id,
 )
+from deepclaw.gateway import chunk_message
 
 
 # ---------------------------------------------------------------------------

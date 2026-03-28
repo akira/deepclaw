@@ -33,3 +33,28 @@ class Channel(ABC):
 
     @abstractmethod
     async def stop(self) -> None: ...
+
+    @abstractmethod
+    async def send(self, chat_id: str, text: str) -> str:
+        """Send a text message. Returns a message_id for later editing."""
+        ...
+
+    @abstractmethod
+    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        """Edit a previously sent message. Silently ignore if unsupported."""
+        ...
+
+    @abstractmethod
+    async def send_typing(self, chat_id: str) -> None:
+        """Send a typing indicator."""
+        ...
+
+    @property
+    def supports_edit(self) -> bool:
+        """Whether this channel supports message editing for streaming."""
+        return False
+
+    @property
+    def message_limit(self) -> int:
+        """Max message length for this channel."""
+        return 4096

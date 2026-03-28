@@ -5,10 +5,8 @@ Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
-import time
 import uuid
 
-from langchain_core.messages import ToolMessage
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
@@ -27,6 +25,8 @@ from deepclaw.auth import (
     load_allowed_users,
     save_allowed_users,
 )
+from deepclaw.channels.base import IncomingMessage
+from deepclaw.gateway import Gateway, chunk_message
 from deepclaw.safety import check_command, format_warning
 from deepclaw.scheduler import (
     Scheduler,
@@ -44,28 +44,13 @@ THREAD_IDS_KEY = "thread_ids"
 ALLOWED_USERS_KEY = "allowed_users"
 PAIRING_CODE_KEY = "pairing_code"
 CONFIG_KEY = "deepclaw_config"
-CURSOR_INDICATOR = "\u258c"
-THINKING_MESSAGE = "Thinking..."
 SCHEDULER_KEY = "scheduler"
 JOBS_PATH_KEY = "jobs_path"
+GATEWAY_KEY = "gateway"
 
-
-def chunk_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
-    """Split text into chunks that fit within Telegram's message size limit."""
-    if len(text) <= limit:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        # Try to split at last newline within limit
-        split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
-            split_at = limit
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
+# Map of chat_id -> dict of msg_id -> telegram Message object
+# Used to translate string message IDs back to editable message objects.
+_STREAM_MESSAGES: dict[str, dict[str, object]] = {}
 
 
 def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
@@ -268,7 +253,7 @@ async def cmd_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     config = context.bot_data[CONFIG_KEY]
     checks = await run_checks(config)
     report = format_report(checks)
-    for chunk in chunk_message(report):
+    for chunk in chunk_message(report, TELEGRAM_MESSAGE_LIMIT):
         await update.message.reply_text(chunk)
 
 
@@ -291,13 +276,53 @@ async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(format_warning(raw, matches))
 
 
-async def _edit_stream_message(message, text: str) -> None:
-    """Edit a Telegram message, ignoring errors when content is unchanged."""
-    try:
-        await message.edit_text(text)
-    except BadRequest as exc:
-        if "Message is not modified" not in str(exc):
-            raise
+class TelegramChannel:
+    """Channel adapter that bridges the Gateway to Telegram's python-telegram-bot API."""
+
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self._update = update
+        self._context = context
+
+    @property
+    def name(self) -> str:
+        return "telegram"
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def send(self, chat_id: str, text: str) -> str:
+        """Send a text message via reply_text. Returns a string message_id."""
+        msg = await self._update.message.reply_text(text)
+        msg_id = str(msg.message_id)
+        # Store the message object so edit_message can retrieve it later
+        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return msg_id
+
+    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        """Edit a previously sent message. Silently ignores 'not modified' errors."""
+        msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
+        if msg is None:
+            return
+        try:
+            await msg.edit_text(text)
+        except BadRequest as exc:
+            if "Message is not modified" not in str(exc):
+                raise
+
+    async def send_typing(self, chat_id: str) -> None:
+        """Send a typing indicator."""
+        await self._update.effective_chat.send_action(ChatAction.TYPING)
+
+    @property
+    def supports_edit(self) -> bool:
+        return True
+
+    @property
+    def message_limit(self) -> int:
+        return TELEGRAM_MESSAGE_LIMIT
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -311,87 +336,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_id = str(update.effective_chat.id)
     user_text = update.message.text
-
-    logger.info(f"Received message from chat {chat_id}: {user_text[:80]}")
-
-    await update.effective_chat.send_action(ChatAction.TYPING)
-
-    agent = context.bot_data["agent"]
+    user = update.effective_user
     thread_id = get_thread_id(context, chat_id)
-    config = {"configurable": {"thread_id": thread_id}}
 
-    stream_msg = await update.message.reply_text(THINKING_MESSAGE)
-    accumulated = ""
-    last_edit_time = time.monotonic()
-    chars_since_edit = 0
-    streaming_cfg = context.bot_data[CONFIG_KEY].telegram.streaming
+    incoming = IncomingMessage(
+        text=user_text,
+        chat_id=chat_id,
+        user_id=str(user.id) if user else "",
+        username=user.username if user else None,
+        source="telegram",
+    )
+
+    channel = TelegramChannel(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
 
     try:
-        async for chunk in agent.astream(
-            {"messages": [{"role": "user", "content": user_text}]},
-            config=config,
-            stream_mode="messages",
-        ):
-            # astream with stream_mode="messages" yields (message, metadata) tuples
-            if not isinstance(chunk, tuple) or len(chunk) != 2:
-                continue
-            message_obj, _metadata = chunk
-
-            # Log tool results from ToolMessages
-            if isinstance(message_obj, ToolMessage):
-                tool_name = getattr(message_obj, "name", "unknown")
-                content = message_obj.content
-                preview = str(content)[:200] if content else "(empty)"
-                logger.info(f"Tool result [{tool_name}]: {preview}")
-                continue
-
-            # Only process AI messages with content_blocks
-            if not hasattr(message_obj, "content_blocks"):
-                continue
-
-            for block in message_obj.content_blocks:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-
-                if block_type in ("tool_call", "tool_call_chunk"):
-                    tool_name = block.get("name")
-                    if tool_name:
-                        tool_args = block.get("args", {})
-                        args_preview = str(tool_args)[:200] if tool_args else ""
-                        logger.info(f"Tool call [{tool_name}]: {args_preview}")
-                        tool_line = f"\n\U0001f527 {tool_name}\n"
-                        accumulated += tool_line
-                        chars_since_edit += len(tool_line)
-                elif block_type == "text":
-                    text = block.get("text", "")
-                    if not text:
-                        continue
-                    accumulated += text
-                    chars_since_edit += len(text)
-                else:
-                    continue
-
-                now = time.monotonic()
-                elapsed = now - last_edit_time
-
-                if elapsed >= streaming_cfg.edit_interval or chars_since_edit >= streaming_cfg.buffer_threshold:
-                    display = accumulated + CURSOR_INDICATOR
-                    if len(display) <= TELEGRAM_MESSAGE_LIMIT:
-                        await _edit_stream_message(stream_msg, display)
-                    last_edit_time = time.monotonic()
-                    chars_since_edit = 0
-    except Exception:
-        logger.exception("Agent streaming failed")
-        accumulated = accumulated or "Sorry, something went wrong processing your message."
-
-    response_text = accumulated if accumulated else "(no response)"
-
-    # Final edit: send complete text (possibly chunked)
-    chunks = chunk_message(response_text)
-    await _edit_stream_message(stream_msg, chunks[0])
-    for extra_chunk in chunks[1:]:
-        await update.message.reply_text(extra_chunk)
+        await gateway.handle_message(channel, incoming, thread_id)
+    finally:
+        # Clean up stored message objects for this chat
+        _STREAM_MESSAGES.pop(chat_id, None)
 
 
 async def post_init(application: Application) -> None:
@@ -405,6 +368,10 @@ async def post_init(application: Application) -> None:
 
     agent = create_agent(config, checkpointer)
     application.bot_data["agent"] = agent
+
+    # Create the shared gateway
+    gateway = Gateway(agent=agent, streaming_config=config.telegram.streaming)
+    application.bot_data[GATEWAY_KEY] = gateway
 
     # Load allowed users: config + persisted file
     allowed_users = set(config.telegram.allowed_users)
