@@ -13,6 +13,7 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
+from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from telegram import Update
 from telegram.constants import ChatAction
@@ -304,19 +305,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 continue
             message_obj, _metadata = chunk
 
-            # Only process AI messages (skip tool messages, etc.)
+            # Log tool results from ToolMessages
+            if isinstance(message_obj, ToolMessage):
+                tool_name = getattr(message_obj, "name", "unknown")
+                logger.info(f"Tool result: {tool_name}")
+                continue
+
+            # Only process AI messages with content_blocks
             if not hasattr(message_obj, "content_blocks"):
                 continue
 
             for block in message_obj.content_blocks:
-                if not isinstance(block, dict) or block.get("type") != "text":
+                if not isinstance(block, dict):
                     continue
-                text = block.get("text", "")
-                if not text:
+                block_type = block.get("type")
+
+                if block_type in ("tool_call", "tool_call_chunk"):
+                    tool_name = block.get("name")
+                    if tool_name:
+                        logger.info(f"Tool call: {tool_name}")
+                        tool_line = f"\n🔧 {tool_name}\n"
+                        accumulated += tool_line
+                        chars_since_edit += len(tool_line)
+                elif block_type == "text":
+                    text = block.get("text", "")
+                    if not text:
+                        continue
+                    accumulated += text
+                    chars_since_edit += len(text)
+                else:
                     continue
 
-                accumulated += text
-                chars_since_edit += len(text)
                 now = time.monotonic()
                 elapsed = now - last_edit_time
 
