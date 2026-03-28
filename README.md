@@ -87,10 +87,12 @@ The agent has full DeepAgents capabilities out of the box:
 
 ## Safety
 
-DeepClaw includes a safety module that detects dangerous commands before they execute:
+DeepClaw includes a layered safety system that actively gates tool execution via `SafetyMiddleware`:
 
-- **Dangerous command detection** — regex-based pattern matching for destructive shell commands (`rm -rf`, `mkfs`, `dd`), SQL statements (`DROP TABLE`, `TRUNCATE`), system config writes, fork bombs, piped remote execution, and more. Each pattern is categorized and assigned a severity level (critical/warning).
-- **SSRF protection** — URL validation that blocks requests to private/internal networks (RFC 1918, loopback, link-local, cloud metadata endpoints).
+- **Shell command gating** — every `execute` tool call is checked against 34+ dangerous patterns across 14 categories. Critical severity commands (`rm -rf`, `mkfs`, `dd`, `DROP TABLE`, fork bombs, piped remote execution) are **hard-blocked**. Warning severity commands (`git push --force`, `chmod -R`, `bash -c`) trigger a **human-in-the-loop interrupt** for approval via Telegram.
+- **Write path deny list** — `write_file` and `edit_file` calls are blocked for sensitive paths: `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.kube/`, shell configs (`~/.bashrc`, `~/.zshrc`), and system files (`/etc/passwd`, `/etc/shadow`, `/etc/sudoers`).
+- **SSRF protection** — URL fetches are validated against private/internal network ranges (RFC 1918, loopback, link-local, CGNAT, cloud metadata endpoints). DNS failures are fail-closed.
+- **Credential redaction** — tool output is scanned for 11 secret patterns (GitHub PATs, AWS keys, Slack tokens, OpenAI/Anthropic keys, Bearer tokens, generic `api_key=` assignments) and redacted with `[REDACTED]` before being sent to the LLM or streamed to Telegram.
 - **Access control** — optional allowlist restricts bot usage to specific Telegram user IDs or usernames.
 
 ## Cron Scheduler
@@ -123,13 +125,15 @@ deepclaw/
     __init__.py
     bot.py              # Telegram bot with streaming responses
     config.py           # Layered config loader (env > .env > yaml)
-    safety.py           # Dangerous command detection and SSRF protection
+    safety.py           # Dangerous command detection, path deny list, credential redaction, SSRF protection
+    middleware.py       # SafetyMiddleware — gates tool calls through safety checks
     scheduler.py        # Application-level cron scheduler
     service.py          # systemd/launchd service management
   tests/
     test_bot.py
     test_config.py
     test_safety.py
+    test_middleware.py
     test_scheduler.py
     test_service.py
   docs/
