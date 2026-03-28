@@ -336,8 +336,10 @@ async def post_init(application: Application) -> None:
     """Create the DeepAgents agent after the application is initialized."""
     config = application.bot_data[CONFIG_KEY]
 
-    checkpointer = application.bot_data["checkpointer"]
-    await checkpointer.__aenter__()
+    checkpointer_cm = application.bot_data["checkpointer"]
+    checkpointer = await checkpointer_cm.__aenter__()
+    application.bot_data["checkpointer_cm"] = checkpointer_cm
+    application.bot_data["checkpointer_resolved"] = checkpointer
 
     backend = LocalShellBackend(virtual_mode=False, inherit_env=True)
 
@@ -360,7 +362,7 @@ async def post_init(application: Application) -> None:
         scheduler = Scheduler(
             jobs_path=jobs_path,
             agent=agent,
-            checkpointer=checkpointer,
+            checkpointer=application.bot_data["checkpointer_resolved"],
             bot=application.bot,
         )
         application.bot_data[SCHEDULER_KEY] = scheduler
@@ -372,11 +374,12 @@ async def post_init(application: Application) -> None:
 async def post_shutdown(application: Application) -> None:
     """Clean up the scheduler and checkpointer on shutdown."""
     scheduler = application.bot_data.get(SCHEDULER_KEY)
+
     if scheduler:
         await scheduler.stop()
-    checkpointer = application.bot_data.get("checkpointer")
-    if checkpointer:
-        await checkpointer.__aexit__(None, None, None)
+    checkpointer_cm = application.bot_data.get("checkpointer_cm")
+    if checkpointer_cm:
+        await checkpointer_cm.__aexit__(None, None, None)
 
 
 def _handle_doctor_command() -> None:
