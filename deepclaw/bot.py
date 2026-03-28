@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 
 from deepclaw.config import load_config
+from deepclaw.safety import check_command, format_warning
 from deepclaw.scheduler import (
     Scheduler,
     add_job,
@@ -115,6 +116,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Available commands:\n"
         "/new — Start a fresh conversation thread\n"
         "/status — Show current thread ID and model info\n"
+        "/safety_test <cmd> — Check a command for dangerous patterns\n"
         "/help — Show this help message\n"
         "/start — Welcome message"
     )
@@ -219,6 +221,25 @@ async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Removed cron job: {matches[0].id[:8]}")
     else:
         await update.message.reply_text("Failed to remove job.")
+
+
+async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /safety_test <command> — check a command for dangerous patterns."""
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    raw = update.message.text
+    prefix = "/safety_test"
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):].strip()
+    if not raw:
+        await update.message.reply_text("Usage: /safety_test <command>")
+        return
+    matches = check_command(raw)
+    if not matches:
+        await update.message.reply_text(f"No dangerous patterns detected in: {raw}")
+        return
+    await update.message.reply_text(format_warning(raw, matches))
 
 
 async def _edit_stream_message(message, text: str) -> None:
@@ -375,6 +396,7 @@ def main() -> None:
     application.add_handler(CommandHandler("cron", cmd_cron))
     application.add_handler(CommandHandler("cron_add", cmd_cron_add))
     application.add_handler(CommandHandler("cron_rm", cmd_cron_rm))
+    application.add_handler(CommandHandler("safety_test", cmd_safety_test))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Starting DeepClaw Telegram bot...")
