@@ -1,18 +1,20 @@
 """Telegram bot that wires DeepAgents to python-telegram-bot.
 
-Prototype phase 0.1: single-script blocking request/response loop.
 Uses Telegram chat_id as LangGraph thread_id for conversation persistence.
+Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
 import os
+import time
 import uuid
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
-from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from telegram import Update
+from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,14 +31,10 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 THREAD_IDS_KEY = "thread_ids"
-
-
-def get_agent_text(result: dict) -> str:
-    """Extract the final text response from an agent invocation result."""
-    last_message = result["messages"][-1]
-    if isinstance(last_message, AIMessage):
-        return last_message.text or ""
-    return str(last_message.content)
+STREAM_EDIT_INTERVAL = 1.0  # minimum seconds between message edits
+STREAM_CHAR_THRESHOLD = 100  # characters accumulated before forcing an edit
+CURSOR_INDICATOR = "▌"
+THINKING_MESSAGE = "Thinking..."
 
 
 def chunk_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
@@ -101,8 +99,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _edit_stream_message(message, text: str) -> None:
+    """Edit a Telegram message, ignoring errors when content is unchanged."""
+    try:
+        await message.edit_text(text)
+    except BadRequest as exc:
+        if "Message is not modified" not in str(exc):
+            raise
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle an incoming Telegram message by passing it to the DeepAgents agent."""
+    """Handle an incoming Telegram message by streaming the agent response."""
     if not update.message or not update.message.text:
         return
 
@@ -111,25 +118,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     logger.info(f"Received message from chat {chat_id}: {user_text[:80]}")
 
+    await update.effective_chat.send_action(ChatAction.TYPING)
+
     agent = context.bot_data["agent"]
     thread_id = get_thread_id(context, chat_id)
     config = {"configurable": {"thread_id": thread_id}}
 
+    stream_msg = await update.message.reply_text(THINKING_MESSAGE)
+    accumulated = ""
+    last_edit_time = time.monotonic()
+    chars_since_edit = 0
+
     try:
-        result = await agent.ainvoke(
+        async for event in agent.astream_events(
             {"messages": [{"role": "user", "content": user_text}]},
             config=config,
-        )
-        response_text = get_agent_text(result)
+            version="v2",
+        ):
+            if event["event"] != "on_chat_model_stream":
+                continue
+            chunk = event["data"].get("chunk")
+            if chunk is None:
+                continue
+            content = chunk.content if hasattr(chunk, "content") else ""
+            if not content or not isinstance(content, str):
+                continue
+
+            accumulated += content
+            chars_since_edit += len(content)
+            now = time.monotonic()
+            elapsed = now - last_edit_time
+
+            if elapsed >= STREAM_EDIT_INTERVAL or chars_since_edit >= STREAM_CHAR_THRESHOLD:
+                display = accumulated + CURSOR_INDICATOR
+                if len(display) <= TELEGRAM_MESSAGE_LIMIT:
+                    await _edit_stream_message(stream_msg, display)
+                last_edit_time = time.monotonic()
+                chars_since_edit = 0
     except Exception:
-        logger.exception("Agent invocation failed")
-        response_text = "Sorry, something went wrong processing your message."
+        logger.exception("Agent streaming failed")
+        accumulated = accumulated or "Sorry, something went wrong processing your message."
 
-    if not response_text:
-        response_text = "(no response)"
+    response_text = accumulated if accumulated else "(no response)"
 
-    for chunk in chunk_message(response_text):
-        await update.message.reply_text(chunk)
+    # Final edit: send complete text (possibly chunked)
+    chunks = chunk_message(response_text)
+    await _edit_stream_message(stream_msg, chunks[0])
+    for extra_chunk in chunks[1:]:
+        await update.message.reply_text(extra_chunk)
 
 
 async def post_init(application: Application) -> None:
