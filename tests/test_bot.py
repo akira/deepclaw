@@ -111,9 +111,10 @@ class TestGetThreadId:
 
 
 class TestIsUserAllowed:
-    def test_open_mode_empty_set(self):
+    def test_locked_mode_empty_set(self):
+        """Empty allowlist means no users are paired — deny all."""
         update = _make_update(user_id=1)
-        assert is_user_allowed(update, set()) is True
+        assert is_user_allowed(update, set()) is False
 
     def test_allowed_by_id(self):
         update = _make_update(user_id=42)

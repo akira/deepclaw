@@ -46,21 +46,44 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MESSAGE_LIMIT = 4096
 THREAD_IDS_KEY = "thread_ids"
 ALLOWED_USERS_KEY = "allowed_users"
+PAIRING_CODE_KEY = "pairing_code"
 CONFIG_KEY = "deepclaw_config"
 CURSOR_INDICATOR = "▌"
 THINKING_MESSAGE = "Thinking..."
-REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
+REJECTION_MESSAGE = "You are not authorized to use this bot. Send /pair <code> to pair."
 SCHEDULER_KEY = "scheduler"
 JOBS_PATH_KEY = "jobs_path"
+ALLOWED_USERS_FILE = "~/.deepclaw/allowed_users.json"
+
+
+def _load_allowed_users_file() -> set[str]:
+    """Load allowed users from the persistent JSON file."""
+    path = Path(os.path.expanduser(ALLOWED_USERS_FILE))
+    if not path.exists():
+        return set()
+    try:
+        import json
+        return set(json.loads(path.read_text()))
+    except Exception:
+        logger.warning(f"Failed to read {path}, starting with empty allowlist")
+        return set()
+
+
+def _save_allowed_users_file(users: set[str]) -> None:
+    """Save allowed users to the persistent JSON file."""
+    import json
+    path = Path(os.path.expanduser(ALLOWED_USERS_FILE))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(users), indent=2))
 
 
 def is_user_allowed(update: Update, allowed_users: set[str]) -> bool:
     """Check if the effective user is in the allowlist.
 
-    Returns True if the allowlist is empty (open mode) or the user matches.
+    Always rejects if no users are paired (no open mode).
     """
     if not allowed_users:
-        return True
+        return False
     user = update.effective_user
     if user is None:
         return False
@@ -119,11 +142,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/new — Start a fresh conversation thread\n"
         "/status — Show current thread ID and model info\n"
         "/safety_test <cmd> — Check a command for dangerous patterns\n"
-        "/help — Show this help message\n"
-        "/start — Welcome message"
+        "/cron — List scheduled jobs\n"
+        "/cron_add <expr> | <prompt> — Add a scheduled job\n"
+        "/cron_rm <id_prefix> — Remove a scheduled job\n"
+        "/doctor — Run system diagnostics\n"
+        "/help — Show this help message"
     )
-    if allowed_users:
-        text += "\n\nAccess control is active. Only approved users can interact with this bot."
+    text += f"\n\n{len(allowed_users)} paired user(s)."
     await update.message.reply_text(text)
 
 
@@ -143,9 +168,61 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — Telegram's default start command."""
+    allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
+    if is_user_allowed(update, allowed_users):
+        await update.message.reply_text(
+            "Welcome to DeepClaw! Send me a message and I'll respond using AI.\n"
+            "Type /help to see available commands."
+        )
+    else:
+        await update.message.reply_text(
+            "Welcome to DeepClaw! This bot requires pairing.\n"
+            "Send /pair <code> with the pairing code shown in the server terminal."
+        )
+
+
+async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /pair <code> — pair a new user with the bot."""
+    user = update.effective_user
+    if user is None:
+        return
+
+    # Already paired?
+    allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
+    if is_user_allowed(update, allowed_users):
+        await update.message.reply_text("You are already paired with this bot.")
+        return
+
+    # Check the pairing code
+    raw = update.message.text
+    parts = raw.split(maxsplit=1)
+    provided_code = parts[1].strip() if len(parts) > 1 else ""
+    expected_code = context.bot_data.get(PAIRING_CODE_KEY, "")
+
+    if not provided_code:
+        await update.message.reply_text("Usage: /pair <code>\nCheck the server terminal for the pairing code.")
+        return
+
+    if provided_code != expected_code:
+        logger.warning(f"Failed pairing attempt from user id={user.id} username={user.username}")
+        await update.message.reply_text("Invalid pairing code. Check the server terminal and try again.")
+        return
+
+    # Pair the user
+    user_id = str(user.id)
+    allowed_users.add(user_id)
+    context.bot_data[ALLOWED_USERS_KEY] = allowed_users
+    _save_allowed_users_file(allowed_users)
+
+    # Generate a new pairing code so the old one can't be reused
+    new_code = uuid.uuid4().hex[:8]
+    context.bot_data[PAIRING_CODE_KEY] = new_code
+
+    username_str = f" (@{user.username})" if user.username else ""
+    logger.info(f"Paired user id={user_id}{username_str}")
     await update.message.reply_text(
-        "Welcome to DeepClaw! Send me a message and I'll respond using AI.\n"
-        "Type /help to see available commands."
+        f"Paired successfully! You now have full access to DeepClaw.\n"
+        f"Type /help to see available commands."
     )
 
 
@@ -308,7 +385,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # Log tool results from ToolMessages
             if isinstance(message_obj, ToolMessage):
                 tool_name = getattr(message_obj, "name", "unknown")
-                logger.info(f"Tool result: {tool_name}")
+                content = message_obj.content
+                preview = str(content)[:200] if content else "(empty)"
+                logger.info(f"Tool result [{tool_name}]: {preview}")
                 continue
 
             # Only process AI messages with content_blocks
@@ -323,7 +402,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if block_type in ("tool_call", "tool_call_chunk"):
                     tool_name = block.get("name")
                     if tool_name:
-                        logger.info(f"Tool call: {tool_name}")
+                        tool_args = block.get("args", {})
+                        args_preview = str(tool_args)[:200] if tool_args else ""
+                        logger.info(f"Tool call [{tool_name}]: {args_preview}")
                         tool_line = f"\n🔧 {tool_name}\n"
                         accumulated += tool_line
                         chars_since_edit += len(tool_line)
@@ -376,12 +457,22 @@ async def post_init(application: Application) -> None:
     )
     application.bot_data["agent"] = agent
 
+    # Load allowed users: config + persisted file
     allowed_users = set(config.telegram.allowed_users)
+    allowed_users.update(_load_allowed_users_file())
     application.bot_data[ALLOWED_USERS_KEY] = allowed_users
+
+    # Generate pairing code for new user onboarding
+    pairing_code = uuid.uuid4().hex[:8]
+    application.bot_data[PAIRING_CODE_KEY] = pairing_code
+
     if allowed_users:
-        logger.info(f"Allowlist active with {len(allowed_users)} users")
+        logger.info(f"Allowlist active with {len(allowed_users)} paired users")
     else:
-        logger.info("Allowlist inactive — open mode")
+        logger.info("No users paired yet")
+
+    logger.info(f"Pairing code: {pairing_code}")
+    logger.info("Send /pair %s to your bot in Telegram to pair", pairing_code)
 
     jobs_path = application.bot_data.get(JOBS_PATH_KEY)
     if jobs_path:
@@ -481,6 +572,7 @@ def main() -> None:
     application.bot_data[CONFIG_KEY] = config
     application.bot_data[JOBS_PATH_KEY] = jobs_path
 
+    application.add_handler(CommandHandler("pair", cmd_pair))
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
