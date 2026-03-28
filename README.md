@@ -109,6 +109,7 @@ DeepClaw includes a layered safety system that actively gates tool execution via
 - **Write path deny list** — `write_file` and `edit_file` calls are blocked for sensitive paths: `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.kube/`, shell configs (`~/.bashrc`, `~/.zshrc`), and system files (`/etc/passwd`, `/etc/shadow`, `/etc/sudoers`).
 - **SSRF protection** — URL fetches are validated against private/internal network ranges (RFC 1918, loopback, link-local, CGNAT, cloud metadata endpoints). DNS failures are fail-closed.
 - **Credential redaction** — tool output is scanned for 11 secret patterns (GitHub PATs, AWS keys, Slack tokens, OpenAI/Anthropic keys, Bearer tokens, generic `api_key=` assignments) and redacted with `[REDACTED]` before being sent to the LLM or streamed to Telegram.
+- **Environment variable scrubbing** — child processes spawned by the agent receive a filtered environment. Only safe variables (`PATH`, `HOME`, `LANG`, toolchain paths, etc.) pass through. Any variable whose name contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, or `PRIVATE` is stripped, preventing credential leakage via shell commands.
 - **Access control** — optional allowlist restricts bot usage to specific Telegram user IDs or usernames.
 
 ## Cron Scheduler
