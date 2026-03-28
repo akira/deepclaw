@@ -74,12 +74,19 @@ def _load_soul() -> str | None:
     return content
 
 
+DEFAULT_MEMORY_SEED = """\
+# DeepClaw Memory
+
+This file is your persistent memory. Update it as you learn from conversations.
+"""
+
+
 def _setup_memory() -> list[str]:
-    """Ensure AGENTS.md exists and return memory source paths."""
+    """Ensure AGENTS.md exists with seed content and return memory source paths."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not MEMORY_FILE.exists():
-        MEMORY_FILE.touch()
-        logger.info("Created empty AGENTS.md at %s", MEMORY_FILE)
+        MEMORY_FILE.write_text(DEFAULT_MEMORY_SEED, encoding="utf-8")
+        logger.info("Seeded AGENTS.md at %s", MEMORY_FILE)
     return [str(MEMORY_FILE)]
 
 
