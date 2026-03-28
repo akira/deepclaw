@@ -224,6 +224,21 @@ async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Failed to remove job.")
 
 
+async def cmd_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /doctor — run diagnostic checks and report results."""
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+
+    from deepclaw.doctor import format_report, run_checks
+
+    config = context.bot_data[CONFIG_KEY]
+    checks = await run_checks(config)
+    report = format_report(checks)
+    for chunk in chunk_message(report):
+        await update.message.reply_text(chunk)
+
+
 async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /safety_test <command> — check a command for dangerous patterns."""
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
@@ -364,6 +379,17 @@ async def post_shutdown(application: Application) -> None:
         await checkpointer.__aexit__(None, None, None)
 
 
+def _handle_doctor_command() -> None:
+    """Handle 'deepclaw doctor' CLI command."""
+    import asyncio
+
+    from deepclaw.doctor import format_report, run_checks
+
+    config = load_config()
+    checks = asyncio.run(run_checks(config))
+    print(format_report(checks))
+
+
 def _handle_service_command(args: list[str]) -> None:
     """Handle 'deepclaw service <subcommand>' CLI commands."""
     from deepclaw.service import (
@@ -398,6 +424,9 @@ def main() -> None:
     if args and args[0] == "service":
         _handle_service_command(args[1:])
         return
+    if args and args[0] == "doctor":
+        _handle_doctor_command()
+        return
 
     config = load_config()
 
@@ -431,6 +460,7 @@ def main() -> None:
     application.add_handler(CommandHandler("cron_add", cmd_cron_add))
     application.add_handler(CommandHandler("cron_rm", cmd_cron_rm))
     application.add_handler(CommandHandler("safety_test", cmd_safety_test))
+    application.add_handler(CommandHandler("doctor", cmd_doctor))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Starting DeepClaw Telegram bot...")
