@@ -7,6 +7,7 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEEPCLAW_DIR = Path("~/.deepclaw").expanduser()
 SOUL_FILE = DEEPCLAW_DIR / "SOUL.md"
+MEMORY_FILE = DEEPCLAW_DIR / "AGENTS.md"
 SKILLS_DIR = DEEPCLAW_DIR / "skills"
 
 DEFAULT_SOUL = """\
@@ -73,6 +75,15 @@ def _load_soul() -> str | None:
     return content
 
 
+def _setup_memory() -> list[str]:
+    """Ensure AGENTS.md exists and return memory source paths."""
+    DEEPCLAW_DIR.mkdir(parents=True, exist_ok=True)
+    if not MEMORY_FILE.exists():
+        MEMORY_FILE.touch()
+        logger.info("Created empty AGENTS.md at %s", MEMORY_FILE)
+    return [str(MEMORY_FILE)]
+
+
 def _setup_skills() -> list[str]:
     """Ensure skills directory exists and return source paths."""
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,11 +106,22 @@ def create_agent(config, checkpointer):
     if SafetyMiddleware is not None:
         middleware.append(SafetyMiddleware())
 
+    fs_backend = FilesystemBackend()
+
+    # Memory (AGENTS.md — agent learns and persists across sessions)
+    memory_sources = _setup_memory()
+    middleware.append(
+        MemoryMiddleware(
+            backend=fs_backend,
+            sources=memory_sources,
+        )
+    )
+
     # Skills
     skills_sources = _setup_skills()
     middleware.append(
         SkillsMiddleware(
-            backend=FilesystemBackend(),
+            backend=fs_backend,
             sources=skills_sources,
         )
     )

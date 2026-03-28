@@ -86,6 +86,19 @@ A default SOUL.md is seeded on first run. Edit it to customize your agent's voic
 $EDITOR ~/.deepclaw/SOUL.md
 ```
 
+## Memory
+
+DeepClaw has persistent memory via `~/.deepclaw/AGENTS.md`. The agent learns from your interactions and writes observations back to this file — preferences, corrections, project context, workflow patterns.
+
+Memory is loaded into the system prompt at session start and persists across conversations. The agent decides what's worth remembering based on built-in guidelines (e.g., user preferences yes, transient small talk no, credentials never).
+
+You can view or edit it directly:
+
+```bash
+cat ~/.deepclaw/AGENTS.md
+$EDITOR ~/.deepclaw/AGENTS.md
+```
+
 ## Skills
 
 DeepClaw supports skills via SKILL.md files in `~/.deepclaw/skills/`. Skills are specialized workflows the agent discovers and uses when relevant.
