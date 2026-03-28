@@ -9,6 +9,7 @@ from deepclaw.tools.cron import (
     list_scheduled_tasks,
     remove_scheduled_task,
     schedule_task,
+    set_chat_context,
     set_jobs_path,
 )
 from deepclaw.scheduler import load_jobs
@@ -16,14 +17,16 @@ from deepclaw.scheduler import load_jobs
 
 @pytest.fixture(autouse=True)
 def _use_tmp_jobs(tmp_path):
-    """Point all cron tool operations at a temp directory."""
+    """Point all cron tool operations at a temp directory and set a default chat context."""
     jobs_file = tmp_path / "jobs.json"
     set_jobs_path(jobs_file)
+    set_chat_context("telegram", "99999")
     yield
     # Reset isn't strictly needed since each test gets its own tmp_path,
     # but set_jobs_path is module-global so be tidy
     from deepclaw.scheduler import DEFAULT_JOBS_PATH
     set_jobs_path(DEFAULT_JOBS_PATH)
+    set_chat_context("telegram", "")
 
 
 class TestAvailable:
@@ -40,17 +43,16 @@ class TestGetTools:
 
 
 class TestScheduleTask:
-    def test_schedule_valid_job(self, tmp_path):
+    def test_schedule_valid_job(self):
         result = schedule_task(
             prompt="Check deploy health",
             cron_expr="0 9 * * *",
             name="health check",
-            channel="telegram",
-            chat_id="12345",
         )
         assert result["status"] == "scheduled"
         assert result["cron_expr"] == "0 9 * * *"
         assert result["prompt"] == "Check deploy health"
+        assert result["delivery"] == {"channel": "telegram", "chat_id": "99999"}
         assert "job_id" in result
 
     def test_schedule_invalid_cron(self):
@@ -61,6 +63,12 @@ class TestScheduleTask:
         result = schedule_task(prompt="Do something important", cron_expr="*/5 * * * *")
         assert result["status"] == "scheduled"
         assert result["name"] == "Do something important"
+
+    def test_schedule_without_chat_context_errors(self):
+        set_chat_context("telegram", "")
+        result = schedule_task(prompt="will fail", cron_expr="0 9 * * *")
+        assert "error" in result
+        assert "chat context" in result["error"].lower()
 
 
 class TestListScheduledTasks:

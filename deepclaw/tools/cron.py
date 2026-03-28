@@ -46,21 +46,17 @@ def schedule_task(
     prompt: str,
     cron_expr: str,
     name: str = "",
-    channel: str = "telegram",
-    chat_id: str = "",
 ) -> dict[str, Any]:
     """Schedule a recurring task that runs on a cron schedule.
 
     The agent will be invoked with the given prompt at each scheduled time,
-    and the result delivered to the specified channel/chat.
+    and the result delivered back to this conversation automatically.
 
     Args:
         prompt: The instruction to execute on each run (e.g., "Check if the deploy is healthy").
         cron_expr: Standard 5-field cron expression (e.g., "0 9 * * *" for daily at 9am,
                    "*/30 * * * *" for every 30 minutes).
         name: Optional human-readable name for the job.
-        channel: Delivery channel — "telegram" or "local" (default: "telegram").
-        chat_id: Chat ID for delivery. Required for telegram channel.
 
     Returns:
         Confirmation with job ID, schedule, and delivery target.
@@ -72,13 +68,10 @@ def schedule_task(
     except Exception as exc:
         return {"error": f"Failed to validate cron expression: {exc}"}
 
-    # Use current chat context as default delivery target
-    resolved_channel = channel or _current_channel
-    resolved_chat_id = chat_id or _current_chat_id
+    if not _current_chat_id:
+        return {"error": "No chat context available — cannot determine delivery target."}
 
-    delivery = {"channel": resolved_channel}
-    if resolved_chat_id:
-        delivery["chat_id"] = resolved_chat_id
+    delivery = {"channel": _current_channel, "chat_id": _current_chat_id}
 
     job = add_job(
         name=name or prompt[:50],
