@@ -342,7 +342,7 @@ async def post_init(application: Application) -> None:
     backend = LocalShellBackend(virtual_mode=False, inherit_env=True)
 
     agent = create_deep_agent(
-        model=config.model,
+        model=config.model or None,
         backend=backend,
         checkpointer=checkpointer,
     )
