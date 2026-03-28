@@ -10,6 +10,7 @@ import time
 from langchain_core.messages import ToolMessage
 
 from deepclaw.channels.base import Channel, IncomingMessage
+from deepclaw.safety import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ class Gateway:
             accumulated = accumulated or "Sorry, something went wrong processing your message."
 
         response_text = accumulated if accumulated else "(no response)"
+        response_text = redact_secrets(response_text)
 
         # Final delivery: send complete text (possibly chunked)
         chunks = chunk_message(response_text, limit)

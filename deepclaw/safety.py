@@ -1,13 +1,16 @@
-"""Dangerous command detection and URL safety for use with DeepAgents' interrupt_on mechanism.
+"""Safety checks for DeepClaw: dangerous command detection, path validation,
+credential redaction, and SSRF protection.
 
 Provides regex-based pattern matching to identify dangerous shell commands,
 destructive SQL statements, and other risky operations before they execute.
 Also provides SSRF protection via URL validation that blocks requests to
-private/internal networks.
+private/internal networks, a write deny list for sensitive filesystem paths,
+and credential leak redaction for tool output.
 """
 
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 from dataclasses import dataclass
@@ -269,6 +272,104 @@ def format_warning(command: str, matches: list[DangerousPattern]) -> str:
     lines.append("")
     lines.append(f"Total: {critical_count} critical, {warning_count} warning")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Write path safety — deny list for sensitive filesystem paths
+# ---------------------------------------------------------------------------
+
+WRITE_DENIED_PREFIXES: list[str] = [
+    "~/.ssh/",
+    "~/.aws/",
+    "~/.gnupg/",
+    "~/.kube/",
+    "/etc/sudoers.d/",
+    "/etc/systemd/",
+]
+
+WRITE_DENIED_PATHS: list[str] = [
+    "~/.ssh/id_rsa",
+    "~/.ssh/id_ed25519",
+    "~/.ssh/authorized_keys",
+    "~/.ssh/config",
+    "~/.bashrc",
+    "~/.zshrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "~/.zprofile",
+    "~/.npmrc",
+    "~/.pypirc",
+    "~/.pgpass",
+    "~/.netrc",
+    "~/.docker/config.json",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/hosts",
+]
+
+_RESOLVED_DENIED_PREFIXES: list[str] | None = None
+_RESOLVED_DENIED_PATHS: set[str] | None = None
+
+
+def _resolve_denied_paths() -> tuple[list[str], set[str]]:
+    """Lazily resolve ~ in deny lists. Cached after first call."""
+    global _RESOLVED_DENIED_PREFIXES, _RESOLVED_DENIED_PATHS  # noqa: PLW0603
+    if _RESOLVED_DENIED_PREFIXES is None:
+        _RESOLVED_DENIED_PREFIXES = [os.path.expanduser(p) for p in WRITE_DENIED_PREFIXES]
+        _RESOLVED_DENIED_PATHS = {os.path.expanduser(p) for p in WRITE_DENIED_PATHS}
+    return _RESOLVED_DENIED_PREFIXES, _RESOLVED_DENIED_PATHS
+
+
+def check_write_path(path: str) -> tuple[bool, str]:
+    """Check whether a file path is safe to write to.
+
+    Returns (is_safe, reason). Blocks writes to sensitive system and credential paths.
+    """
+    resolved = os.path.normpath(os.path.expanduser(path))
+    prefixes, exact_paths = _resolve_denied_paths()
+
+    if resolved in exact_paths:
+        return (False, f"Write denied: {path} is a protected path")
+
+    for prefix in prefixes:
+        if resolved.startswith(prefix):
+            return (False, f"Write denied: {path} is under protected directory {prefix}")
+
+    return (True, "")
+
+
+# ---------------------------------------------------------------------------
+# Credential leak redaction
+# ---------------------------------------------------------------------------
+
+SECRET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"ghp_[A-Za-z0-9_]{36,}"),                        # GitHub PAT
+    re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),                 # GitHub fine-grained PAT
+    re.compile(r"gho_[A-Za-z0-9_]{36,}"),                        # GitHub OAuth token
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),                           # OpenAI / Anthropic key
+    re.compile(r"sk-ant-[A-Za-z0-9\-]{20,}"),                    # Anthropic API key
+    re.compile(r"AKIA[A-Z0-9]{16}"),                              # AWS access key ID
+    re.compile(r"xoxb-[A-Za-z0-9\-]{20,}"),                      # Slack bot token
+    re.compile(r"xoxp-[A-Za-z0-9\-]{20,}"),                      # Slack user token
+    re.compile(r"glpat-[A-Za-z0-9\-_]{20,}"),                    # GitLab PAT
+    re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}=*"),           # Bearer token
+    re.compile(r"(?i)(?:api[_-]?key|secret|token|password)\s*[=:]\s*['\"]?[A-Za-z0-9\-._~+/]{16,}"),
+]
+
+_REDACTED = "[REDACTED]"
+
+
+def redact_secrets(text: str) -> str:
+    """Replace detected credential patterns in text with [REDACTED]."""
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(_REDACTED, text)
+    return text
+
+
+def has_secrets(text: str) -> bool:
+    """Return True if any credential pattern is found in text."""
+    return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
 
 # ---------------------------------------------------------------------------

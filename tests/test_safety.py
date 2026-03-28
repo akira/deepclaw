@@ -1,5 +1,6 @@
 """Tests for deepclaw.safety module."""
 
+import os
 import socket
 from unittest.mock import AsyncMock, patch
 
@@ -24,8 +25,11 @@ from deepclaw.safety import (
     check_command,
     check_url_safety,
     check_url_safety_sync,
+    check_write_path,
     format_warning,
+    has_secrets,
     is_dangerous,
+    redact_secrets,
 )
 
 
@@ -398,3 +402,189 @@ class TestCheckUrlSafety:
         is_safe, reason = await check_url_safety("example.com")
         assert is_safe is False
         assert "Invalid" in reason
+
+
+# ---------------------------------------------------------------------------
+# Write path safety — check_write_path
+# ---------------------------------------------------------------------------
+
+
+class TestCheckWritePath:
+    def test_ssh_private_key_blocked(self):
+        is_safe, reason = check_write_path("~/.ssh/id_rsa")
+        assert is_safe is False
+        assert "protected" in reason.lower()
+
+    def test_ssh_authorized_keys_blocked(self):
+        is_safe, reason = check_write_path("~/.ssh/authorized_keys")
+        assert is_safe is False
+
+    def test_ssh_config_blocked(self):
+        is_safe, reason = check_write_path("~/.ssh/config")
+        assert is_safe is False
+
+    def test_ssh_directory_prefix_blocked(self):
+        is_safe, reason = check_write_path("~/.ssh/new_key")
+        assert is_safe is False
+        assert "protected directory" in reason.lower()
+
+    def test_aws_credentials_blocked(self):
+        is_safe, reason = check_write_path("~/.aws/credentials")
+        assert is_safe is False
+
+    def test_bashrc_blocked(self):
+        is_safe, reason = check_write_path("~/.bashrc")
+        assert is_safe is False
+
+    def test_zshrc_blocked(self):
+        is_safe, reason = check_write_path("~/.zshrc")
+        assert is_safe is False
+
+    def test_etc_passwd_blocked(self):
+        is_safe, reason = check_write_path("/etc/passwd")
+        assert is_safe is False
+
+    def test_etc_shadow_blocked(self):
+        is_safe, reason = check_write_path("/etc/shadow")
+        assert is_safe is False
+
+    def test_etc_sudoers_blocked(self):
+        is_safe, reason = check_write_path("/etc/sudoers")
+        assert is_safe is False
+
+    def test_etc_systemd_prefix_blocked(self):
+        is_safe, reason = check_write_path("/etc/systemd/system/evil.service")
+        assert is_safe is False
+
+    def test_gnupg_blocked(self):
+        is_safe, reason = check_write_path("~/.gnupg/pubring.kbx")
+        assert is_safe is False
+
+    def test_kube_config_blocked(self):
+        is_safe, reason = check_write_path("~/.kube/config")
+        assert is_safe is False
+
+    def test_npmrc_blocked(self):
+        is_safe, reason = check_write_path("~/.npmrc")
+        assert is_safe is False
+
+    def test_netrc_blocked(self):
+        is_safe, reason = check_write_path("~/.netrc")
+        assert is_safe is False
+
+    def test_docker_config_blocked(self):
+        is_safe, reason = check_write_path("~/.docker/config.json")
+        assert is_safe is False
+
+    def test_safe_workspace_path(self):
+        is_safe, reason = check_write_path("/tmp/workspace/output.txt")
+        assert is_safe is True
+        assert reason == ""
+
+    def test_safe_home_path(self):
+        is_safe, reason = check_write_path("~/projects/myapp/main.py")
+        assert is_safe is True
+
+    def test_absolute_path_resolution(self):
+        home = os.path.expanduser("~")
+        is_safe, reason = check_write_path(f"{home}/.ssh/id_rsa")
+        assert is_safe is False
+
+    def test_dotdot_traversal_to_ssh(self):
+        # Normpath resolves .. so this should still be blocked
+        home = os.path.expanduser("~")
+        is_safe, reason = check_write_path(f"{home}/projects/../.ssh/id_rsa")
+        assert is_safe is False
+
+
+# ---------------------------------------------------------------------------
+# Credential leak redaction
+# ---------------------------------------------------------------------------
+
+
+class TestRedactSecrets:
+    def test_github_pat(self):
+        text = "token: ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+        result = redact_secrets(text)
+        assert "ghp_" not in result
+        assert "[REDACTED]" in result
+
+    def test_github_fine_grained_pat(self):
+        text = "github_pat_abcdefghijklmnopqrstuv1234567890"
+        result = redact_secrets(text)
+        assert "github_pat_" not in result
+
+    def test_github_oauth(self):
+        text = "gho_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+        result = redact_secrets(text)
+        assert "gho_" not in result
+
+    def test_openai_key(self):
+        text = "sk-abcdefghijklmnopqrstuvwxyz12345678901234"
+        result = redact_secrets(text)
+        assert "sk-" not in result
+
+    def test_anthropic_key(self):
+        text = "sk-ant-abcdefghij-klmnopqrstuvwxyz"
+        result = redact_secrets(text)
+        assert "sk-ant-" not in result
+
+    def test_aws_access_key(self):
+        text = "AKIAIOSFODNN7EXAMPLE"
+        result = redact_secrets(text)
+        assert "AKIA" not in result
+
+    def test_slack_bot_token(self):
+        text = "xoxb-1234567890-abcdefghijklmnopqrstuvwxyz"
+        result = redact_secrets(text)
+        assert "xoxb-" not in result
+
+    def test_slack_user_token(self):
+        text = "xoxp-1234567890-abcdefghijklmnopqrstuvwxyz"
+        result = redact_secrets(text)
+        assert "xoxp-" not in result
+
+    def test_gitlab_pat(self):
+        text = "glpat-abcdefghijklmnopqrstuvwxyz"
+        result = redact_secrets(text)
+        assert "glpat-" not in result
+
+    def test_bearer_token(self):
+        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc123"
+        result = redact_secrets(text)
+        assert "eyJhbG" not in result
+
+    def test_generic_api_key_assignment(self):
+        text = "api_key=supersecretapikey12345678"
+        result = redact_secrets(text)
+        assert "supersecret" not in result
+
+    def test_generic_secret_colon(self):
+        text = "secret: my_very_long_secret_value_here"
+        result = redact_secrets(text)
+        assert "my_very_long" not in result
+
+    def test_safe_text_unchanged(self):
+        text = "Hello world, this is a normal log message with no secrets."
+        assert redact_secrets(text) == text
+
+    def test_multiple_secrets_redacted(self):
+        text = "key1=ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789 key2=AKIAIOSFODNN7EXAMPLE"
+        result = redact_secrets(text)
+        assert "ghp_" not in result
+        assert "AKIA" not in result
+        assert result.count("[REDACTED]") == 2
+
+    def test_empty_string(self):
+        assert redact_secrets("") == ""
+
+
+class TestHasSecrets:
+    def test_detects_github_pat(self):
+        assert has_secrets("ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789") is True
+
+    def test_no_secrets(self):
+        assert has_secrets("just a normal string") is False
+
+    def test_detects_aws_key(self):
+        assert has_secrets("AKIAIOSFODNN7EXAMPLE") is True
