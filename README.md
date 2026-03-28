@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="DeepClawLogo-github.jpg" alt="DeepClaw Logo" width="600">
+</p>
+
 # DeepClaw
 
 A self-hosted AI assistant you talk to over Telegram. It can read your files, run shell commands, search the web, schedule tasks, and remember your preferences across conversations. Built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents).
