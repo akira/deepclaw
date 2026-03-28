@@ -8,6 +8,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.middleware import SafetyMiddleware
 from deepclaw.safety import scrub_env
+from deepclaw.tools import discover_tools
 
 
 def create_checkpointer():
@@ -23,9 +24,11 @@ def create_agent(config, checkpointer):
     middleware = []
     if SafetyMiddleware is not None:
         middleware.append(SafetyMiddleware())
+    tools = discover_tools()
     return create_deep_agent(
         model=config.model or None,
         backend=backend,
         checkpointer=checkpointer,
         middleware=middleware,
+        tools=tools or None,
     )

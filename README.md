@@ -12,6 +12,9 @@ export ANTHROPIC_API_KEY=<your-anthropic-key>
 # Install and run the Telegram bot
 uv sync
 uv run deepclaw
+
+# Optional: install web search tools
+uv sync --extra web
 ```
 
 To use the interactive TUI instead (or alongside):
@@ -39,6 +42,7 @@ DeepClaw loads configuration from three layers (highest precedence first):
 | `OPENAI_API_KEY` | No | OpenAI API key (if using OpenAI models) |
 | `DEEPCLAW_MODEL` | No | Model override, e.g. `openai:gpt-4o` (defaults to `claude-sonnet-4-6`) |
 | `DEEPCLAW_ALLOWED_USERS` | No | Comma-separated list of Telegram user IDs or usernames for access control |
+| `TAVILY_API_KEY` | No | Tavily API key for web search and extract tools |
 
 *Or whichever provider API key matches your chosen model.
 
@@ -71,6 +75,18 @@ The agent has full DeepAgents capabilities out of the box:
 - Sub-agent spawning
 - Context compression when conversations get long
 - Skills and memory (AGENTS.md / SKILL.md)
+
+## Tool Plugins
+
+DeepClaw uses a plugin system for optional tools. Each plugin in `deepclaw/tools/` is auto-discovered at startup. A plugin loads only if its dependencies are installed and required env vars are set.
+
+| Plugin | Install | Env Var | Tools |
+|---|---|---|---|
+| `web_search` | `uv sync --extra web` | `TAVILY_API_KEY` | `web_search`, `web_extract` |
+
+To add a new tool plugin, create a module in `deepclaw/tools/` that exports:
+- `available() -> bool` — checks if deps and env vars are present
+- `get_tools() -> list` — returns tool callables
 
 ## Telegram Commands
 
@@ -127,6 +143,9 @@ deepclaw/
     config.py           # Layered config loader (env > .env > yaml)
     safety.py           # Dangerous command detection, path deny list, credential redaction, SSRF protection
     middleware.py       # SafetyMiddleware — gates tool calls through safety checks
+    tools/
+      __init__.py       # Plugin discovery (discover_tools)
+      web_search.py     # Tavily web search + extract plugin
     scheduler.py        # Application-level cron scheduler
     service.py          # systemd/launchd service management
   tests/

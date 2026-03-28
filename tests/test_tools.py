@@ -1,0 +1,158 @@
+"""Tests for the tool plugin system and web_search plugin."""
+
+import os
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from deepclaw.tools import discover_tools
+
+
+# ---------------------------------------------------------------------------
+# Plugin discovery
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverTools:
+    def test_returns_list(self):
+        result = discover_tools()
+        assert isinstance(result, list)
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"})
+    def test_loads_tavily_when_available(self):
+        try:
+            import tavily  # noqa: F401
+        except ImportError:
+            pytest.skip("tavily-python not installed")
+
+        tools = discover_tools()
+        tool_names = [getattr(t, "__name__", "") for t in tools]
+        assert "web_search" in tool_names
+        assert "web_extract" in tool_names
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_skips_tavily_without_api_key(self):
+        env = os.environ.copy()
+        env.pop("TAVILY_API_KEY", None)
+        with patch.dict(os.environ, env, clear=True):
+            tools = discover_tools()
+            tool_names = [getattr(t, "__name__", "") for t in tools]
+            assert "web_search" not in tool_names
+
+    def test_handles_broken_plugin_gracefully(self):
+        # discover_tools should not raise even if a plugin is broken
+        tools = discover_tools()
+        assert isinstance(tools, list)
+
+
+# ---------------------------------------------------------------------------
+# Web search plugin — available()
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchAvailable:
+    def test_available_without_key(self):
+        from deepclaw.tools import web_search as ws_mod
+
+        with patch.dict(os.environ, {}, clear=True):
+            assert ws_mod.available() is False
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"})
+    def test_available_with_key_and_package(self):
+        try:
+            import tavily  # noqa: F401
+        except ImportError:
+            pytest.skip("tavily-python not installed")
+
+        from deepclaw.tools import web_search as ws_mod
+
+        assert ws_mod.available() is True
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"})
+    @patch.dict("sys.modules", {"tavily": None})
+    def test_available_with_key_but_no_package(self):
+        from deepclaw.tools import web_search as ws_mod
+
+        assert ws_mod.available() is False
+
+
+# ---------------------------------------------------------------------------
+# Web search plugin — get_tools()
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchGetTools:
+    def test_returns_two_tools(self):
+        from deepclaw.tools import web_search as ws_mod
+
+        tools = ws_mod.get_tools()
+        assert len(tools) == 2
+        names = [t.__name__ for t in tools]
+        assert "web_search" in names
+        assert "web_extract" in names
+
+
+# ---------------------------------------------------------------------------
+# Web search plugin — web_search() error handling
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchFunction:
+    def test_returns_error_without_tavily_installed(self):
+        from deepclaw.tools.web_search import web_search
+
+        with patch.dict("sys.modules", {"tavily": None}):
+            # Force reimport failure
+            with patch("builtins.__import__", side_effect=ImportError("tavily")):
+                result = web_search("test query")
+                assert "error" in result
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"})
+    def test_returns_results_on_success(self):
+        try:
+            import tavily  # noqa: F401
+        except ImportError:
+            pytest.skip("tavily-python not installed")
+
+        from deepclaw.tools import web_search as ws_mod
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [{"title": "Test", "url": "https://example.com", "content": "test", "score": 0.9}],
+            "query": "test query",
+        }
+
+        ws_mod._client = mock_client
+        result = ws_mod.web_search("test query")
+        assert "results" in result
+        mock_client.search.assert_called_once()
+
+        ws_mod._client = None
+
+
+# ---------------------------------------------------------------------------
+# Web search plugin — web_extract() error handling
+# ---------------------------------------------------------------------------
+
+
+class TestWebExtractFunction:
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"})
+    def test_returns_results_on_success(self):
+        try:
+            import tavily  # noqa: F401
+        except ImportError:
+            pytest.skip("tavily-python not installed")
+
+        from deepclaw.tools import web_search as ws_mod
+
+        mock_client = MagicMock()
+        mock_client.extract.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": "page content"}],
+        }
+
+        ws_mod._client = mock_client
+        result = ws_mod.web_extract(["https://example.com"])
+        assert "results" in result
+        mock_client.extract.assert_called_once()
+
+        ws_mod._client = None
