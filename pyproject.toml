@@ -1,0 +1,19 @@
+[project]
+name = "deepclaw"
+version = "0.1.0"
+description = "Multi-platform AI agent gateway built on DeepAgents"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "deepagents",
+    "deepagents-cli",
+    "python-telegram-bot>=22.0,<23.0",
+    "langgraph-checkpoint-sqlite>=3.0.0,<4.0.0",
+]
+
+[project.scripts]
+deepclaw = "deepclaw.bot:main"
+deepclaw-tui = "deepagents_cli:cli_main"
+
+[tool.uv.sources]
+deepagents = { path = "../deepagents/libs/deepagents", editable = true }
+deepagents-cli = { path = "../deepagents/libs/cli", editable = true }
