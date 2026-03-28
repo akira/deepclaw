@@ -20,7 +20,7 @@ def discover_tools() -> list:
     tools = []
     package = importlib.import_module(__name__)
 
-    for finder, module_name, is_pkg in pkgutil.iter_modules(package.__path__):
+    for _finder, module_name, _is_pkg in pkgutil.iter_modules(package.__path__):
         if module_name.startswith("_"):
             continue
         fqn = f"{__name__}.{module_name}"

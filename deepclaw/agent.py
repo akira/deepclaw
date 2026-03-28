@@ -1,8 +1,6 @@
 """Agent factory for DeepClaw."""
 
 import logging
-import os
-from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
@@ -11,16 +9,16 @@ from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR
 from deepclaw.middleware import SafetyMiddleware
 from deepclaw.safety import scrub_env
 from deepclaw.tools import discover_tools
 
 logger = logging.getLogger(__name__)
 
-DEEPCLAW_DIR = Path("~/.deepclaw").expanduser()
-SOUL_FILE = DEEPCLAW_DIR / "SOUL.md"
-MEMORY_FILE = DEEPCLAW_DIR / "AGENTS.md"
-SKILLS_DIR = DEEPCLAW_DIR / "skills"
+SOUL_FILE = CONFIG_DIR / "SOUL.md"
+MEMORY_FILE = CONFIG_DIR / "AGENTS.md"
+SKILLS_DIR = CONFIG_DIR / "skills"
 
 DEFAULT_SOUL = """\
 You are DeepClaw — a sharp, resourceful AI that lives in the terminal and gets things done.
@@ -62,7 +60,7 @@ def _load_soul() -> str | None:
     Seeds a default SOUL.md on first run. Returns None if the file
     is empty or missing after seeding.
     """
-    DEEPCLAW_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not SOUL_FILE.exists():
         SOUL_FILE.write_text(DEFAULT_SOUL, encoding="utf-8")
         logger.info("Seeded default SOUL.md at %s", SOUL_FILE)
@@ -77,7 +75,7 @@ def _load_soul() -> str | None:
 
 def _setup_memory() -> list[str]:
     """Ensure AGENTS.md exists and return memory source paths."""
-    DEEPCLAW_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not MEMORY_FILE.exists():
         MEMORY_FILE.touch()
         logger.info("Created empty AGENTS.md at %s", MEMORY_FILE)
@@ -92,9 +90,8 @@ def _setup_skills() -> list[str]:
 
 def create_checkpointer():
     """Create and return an async SQLite checkpointer context manager."""
-    db_path = os.path.expanduser("~/.deepagents/checkpoints.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    return AsyncSqliteSaver.from_conn_string(db_path)
+    CHECKPOINTER_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return AsyncSqliteSaver.from_conn_string(str(CHECKPOINTER_DB_PATH))
 
 
 def create_agent(config, checkpointer):
@@ -105,6 +102,8 @@ def create_agent(config, checkpointer):
     middleware = []
     if SafetyMiddleware is not None:
         middleware.append(SafetyMiddleware())
+    else:
+        logger.warning("SafetyMiddleware is not available — safety checks disabled")
 
     fs_backend = FilesystemBackend()
 

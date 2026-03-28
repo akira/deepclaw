@@ -19,7 +19,7 @@ def load_allowed_users() -> set[str]:
     try:
         return set(json.loads(path.read_text()))
     except Exception:
-        logger.warning(f"Failed to read {path}, starting with empty allowlist")
+        logger.warning("Failed to read %s, starting with empty allowlist", path)
         return set()
 
 
@@ -44,5 +44,5 @@ def is_user_allowed(update, allowed_users: set[str]) -> bool:
         return True
     if user.username and user.username in allowed_users:
         return True
-    logger.info(f"Rejected user id={user.id} username={user.username}")
+    logger.info("Rejected user id=%s username=%s", user.id, user.username)
     return False

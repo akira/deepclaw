@@ -12,7 +12,6 @@ from deepclaw.middleware import (
     _check_write_path,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -161,17 +160,13 @@ class TestCheckWritePath:
 class TestCheckUrl:
     @patch("deepclaw.safety.socket.getaddrinfo")
     def test_safe_url_returns_none(self, mock_getaddrinfo):
-        mock_getaddrinfo.return_value = [
-            (2, 1, 0, "", ("93.184.216.34", 0))
-        ]
+        mock_getaddrinfo.return_value = [(2, 1, 0, "", ("93.184.216.34", 0))]
         tc = _make_tool_call("web_fetch", {"url": "https://example.com"})
         assert _check_url(tc) is None
 
     @patch("deepclaw.safety.socket.getaddrinfo")
     def test_private_ip_blocked(self, mock_getaddrinfo):
-        mock_getaddrinfo.return_value = [
-            (2, 1, 0, "", ("10.0.0.1", 0))
-        ]
+        mock_getaddrinfo.return_value = [(2, 1, 0, "", ("10.0.0.1", 0))]
         tc = _make_tool_call("web_fetch", {"url": "https://internal.corp"})
         result = _check_url(tc)
         assert result is not None
@@ -203,6 +198,7 @@ class TestSafetyMiddlewareIntegration:
     @pytest.fixture
     def middleware(self):
         from deepclaw.middleware import SafetyMiddleware
+
         if SafetyMiddleware is None:
             pytest.skip("langchain middleware types not available")
         return SafetyMiddleware()
@@ -248,7 +244,7 @@ class TestSafetyMiddlewareIntegration:
         request = self._make_request("edit_file", {"path": "~/.bashrc"})
         handler = AsyncMock()
 
-        result = await middleware.awrap_tool_call(request, handler)
+        await middleware.awrap_tool_call(request, handler)
         handler.assert_not_awaited()
 
     @pytest.mark.asyncio

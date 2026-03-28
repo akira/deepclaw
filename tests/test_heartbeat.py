@@ -13,7 +13,6 @@ from deepclaw.heartbeat import (
     is_quiet_hours,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -62,6 +61,7 @@ class TestIsChecklistEmpty:
 
     def test_template_seed(self):
         from deepclaw.heartbeat import DEFAULT_HEARTBEAT_SEED
+
         assert is_checklist_empty(DEFAULT_HEARTBEAT_SEED) is True
 
     def test_headers_and_comments_mixed(self):
@@ -127,6 +127,7 @@ class TestIsQuietHours:
     def test_simple_range_inside(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         mock_dt.now.return_value = datetime(2026, 3, 28, 3, 0, tzinfo=ZoneInfo("UTC"))
         cfg = _config(quiet_hours_start=1, quiet_hours_end=6)
         assert is_quiet_hours(cfg) is True
@@ -135,6 +136,7 @@ class TestIsQuietHours:
     def test_simple_range_outside(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         mock_dt.now.return_value = datetime(2026, 3, 28, 10, 0, tzinfo=ZoneInfo("UTC"))
         cfg = _config(quiet_hours_start=1, quiet_hours_end=6)
         assert is_quiet_hours(cfg) is False
@@ -143,6 +145,7 @@ class TestIsQuietHours:
     def test_midnight_wrap_inside_late(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         mock_dt.now.return_value = datetime(2026, 3, 28, 23, 30, tzinfo=ZoneInfo("UTC"))
         cfg = _config(quiet_hours_start=23, quiet_hours_end=8)
         assert is_quiet_hours(cfg) is True
@@ -151,6 +154,7 @@ class TestIsQuietHours:
     def test_midnight_wrap_inside_early(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         mock_dt.now.return_value = datetime(2026, 3, 28, 5, 0, tzinfo=ZoneInfo("UTC"))
         cfg = _config(quiet_hours_start=23, quiet_hours_end=8)
         assert is_quiet_hours(cfg) is True
@@ -159,6 +163,7 @@ class TestIsQuietHours:
     def test_midnight_wrap_outside(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         mock_dt.now.return_value = datetime(2026, 3, 28, 12, 0, tzinfo=ZoneInfo("UTC"))
         cfg = _config(quiet_hours_start=23, quiet_hours_end=8)
         assert is_quiet_hours(cfg) is False
@@ -167,6 +172,7 @@ class TestIsQuietHours:
     def test_invalid_timezone_defaults_to_utc(self, mock_dt):
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         mock_dt.now.return_value = datetime(2026, 3, 28, 3, 0, tzinfo=ZoneInfo("UTC"))
         cfg = _config(quiet_hours_start=1, quiet_hours_end=6, timezone="Invalid/Zone")
         assert is_quiet_hours(cfg) is True
@@ -210,9 +216,7 @@ class TestHeartbeatRunner:
 
     @pytest.mark.asyncio
     async def test_tick_heartbeat_ok_no_notification(self, runner):
-        runner._agent.ainvoke.return_value = {
-            "messages": [MagicMock(content=HEARTBEAT_OK)]
-        }
+        runner._agent.ainvoke.return_value = {"messages": [MagicMock(content=HEARTBEAT_OK)]}
         with (
             patch("deepclaw.heartbeat._load_checklist", return_value="- Check disk usage"),
             patch("deepclaw.heartbeat.is_quiet_hours", return_value=False),
@@ -265,9 +269,7 @@ class TestHeartbeatRunner:
     @pytest.mark.asyncio
     async def test_tick_success_resets_failure_counter(self, runner):
         runner._consecutive_failures = 2
-        runner._agent.ainvoke.return_value = {
-            "messages": [MagicMock(content=HEARTBEAT_OK)]
-        }
+        runner._agent.ainvoke.return_value = {"messages": [MagicMock(content=HEARTBEAT_OK)]}
         with (
             patch("deepclaw.heartbeat._load_checklist", return_value="- Check disk"),
             patch("deepclaw.heartbeat.is_quiet_hours", return_value=False),
@@ -280,9 +282,7 @@ class TestHeartbeatRunner:
     async def test_tick_no_notify_chat_id(self):
         cfg = _config(enabled=True, notify_chat_id="")
         agent = AsyncMock()
-        agent.ainvoke.return_value = {
-            "messages": [MagicMock(content="Something is wrong")]
-        }
+        agent.ainvoke.return_value = {"messages": [MagicMock(content="Something is wrong")]}
         channel = AsyncMock()
         runner = HeartbeatRunner(cfg, agent, {"telegram": channel})
 

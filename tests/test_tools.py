@@ -7,7 +7,6 @@ import pytest
 
 from deepclaw.tools import discover_tools
 
-
 # ---------------------------------------------------------------------------
 # Plugin discovery
 # ---------------------------------------------------------------------------
@@ -101,11 +100,12 @@ class TestWebSearchFunction:
     def test_returns_error_without_tavily_installed(self):
         from deepclaw.tools.web_search import web_search
 
-        with patch.dict("sys.modules", {"tavily": None}):
-            # Force reimport failure
-            with patch("builtins.__import__", side_effect=ImportError("tavily")):
-                result = web_search("test query")
-                assert "error" in result
+        with (
+            patch.dict("sys.modules", {"tavily": None}),
+            patch("builtins.__import__", side_effect=ImportError("tavily")),
+        ):
+            result = web_search("test query")
+            assert "error" in result
 
     @patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"})
     def test_returns_results_on_success(self):
@@ -118,7 +118,9 @@ class TestWebSearchFunction:
 
         mock_client = MagicMock()
         mock_client.search.return_value = {
-            "results": [{"title": "Test", "url": "https://example.com", "content": "test", "score": 0.9}],
+            "results": [
+                {"title": "Test", "url": "https://example.com", "content": "test", "score": 0.9}
+            ],
             "query": "test query",
         }
 

@@ -23,6 +23,34 @@ deepclaw-tui = "deepagents_cli:cli_main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "PIE",  # flake8-pie
+    "RET",  # flake8-return
+    "LOG",  # flake8-logging
+    "G",    # flake8-logging-format
+    "T20",  # flake8-print
+    "PLW",  # pylint warnings
+]
+ignore = [
+    "E501",   # line too long (formatter handles this)
+    "RET504", # unnecessary assignment before return
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["deepclaw"]
+
 [tool.uv.sources]
 deepagents = { path = "../deepagents/libs/deepagents", editable = true }
 deepagents-cli = { path = "../deepagents/libs/cli", editable = true }

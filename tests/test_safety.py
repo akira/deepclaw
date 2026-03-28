@@ -2,7 +2,7 @@
 
 import os
 import socket
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,7 +33,6 @@ from deepclaw.safety import (
     redact_secrets,
     scrub_env,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -2,8 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from deepclaw.service import (
     detect_platform,
     generate_service_file,
@@ -12,7 +10,6 @@ from deepclaw.service import (
     service_status,
     uninstall_service,
 )
-
 
 # --- helpers ---
 

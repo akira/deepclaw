@@ -31,15 +31,17 @@ _EDIT_FILE_TOOL = "edit_file"
 _WEB_FETCH_TOOLS = frozenset({"web_fetch", "http_request", "fetch_url"})
 
 # Tools whose output should be scanned for credential leaks
-_REDACT_OUTPUT_TOOLS = frozenset({
-    _EXECUTE_TOOL,
-    _WRITE_FILE_TOOL,
-    "read_file",
-    "grep",
-    "glob",
-    "ls",
-    *_WEB_FETCH_TOOLS,
-})
+_REDACT_OUTPUT_TOOLS = frozenset(
+    {
+        _EXECUTE_TOOL,
+        _WRITE_FILE_TOOL,
+        "read_file",
+        "grep",
+        "glob",
+        "ls",
+        *_WEB_FETCH_TOOLS,
+    }
+)
 
 
 def _blocked_tool_message(tool_call: dict, reason: str) -> ToolMessage:
@@ -76,13 +78,15 @@ def _check_execute(tool_call: dict) -> ToolMessage | None:
 
     # Warning-level: ask the human
     logger.info("Requesting approval for command: %s", command)
-    decision = interrupt({
-        "type": "safety_review",
-        "tool": tool_call["name"],
-        "command": command,
-        "warning": warning_text,
-        "message": f"⚠️ Potentially dangerous command:\n\n```\n{command}\n```\n\n{warning_text}\n\nApprove or deny?",
-    })
+    decision = interrupt(
+        {
+            "type": "safety_review",
+            "tool": tool_call["name"],
+            "command": command,
+            "warning": warning_text,
+            "message": f"⚠️ Potentially dangerous command:\n\n```\n{command}\n```\n\n{warning_text}\n\nApprove or deny?",
+        }
+    )
 
     if isinstance(decision, dict) and decision.get("type") == "approve":
         return None  # Proceed with execution
@@ -122,13 +126,20 @@ def _check_url(tool_call: dict) -> ToolMessage | None:
 
 
 try:
-    from langchain.agents.middleware.types import (
+    from langchain.agents.middleware.types import (  # type: ignore[import-untyped]
         AgentMiddleware,
         ContextT,
         ResponseT,
     )
-    from langgraph.prebuilt.tool_node import ToolCallRequest
+except ImportError:
+    AgentMiddleware = None  # type: ignore[assignment, misc]
 
+try:
+    from langgraph.prebuilt.tool_node import ToolCallRequest  # noqa: F401
+except ImportError:
+    ToolCallRequest = None  # type: ignore[assignment, misc]
+
+if AgentMiddleware is not None and ToolCallRequest is not None:
     StateT = Any
 
     class SafetyMiddleware(AgentMiddleware[StateT, ContextT, ResponseT]):
@@ -184,7 +195,6 @@ try:
                         )
 
             return result
-
-except ImportError:
-    # Graceful degradation if langchain middleware types are unavailable
+else:
     SafetyMiddleware = None  # type: ignore[assignment, misc]
+    logger.warning("SafetyMiddleware unavailable — langchain middleware types not installed")

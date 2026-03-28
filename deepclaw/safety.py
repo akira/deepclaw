@@ -251,10 +251,7 @@ def check_command(command: str) -> list[DangerousPattern]:
 
 def is_dangerous(command: str) -> bool:
     """Return True if any dangerous pattern matches the command."""
-    for dp in DANGEROUS_PATTERNS:
-        if dp.pattern.search(command):
-            return True
-    return False
+    return any(dp.pattern.search(command) for dp in DANGEROUS_PATTERNS)
 
 
 def format_warning(command: str, matches: list[DangerousPattern]) -> str:
@@ -344,16 +341,16 @@ def check_write_path(path: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 SECRET_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"ghp_[A-Za-z0-9_]{36,}"),                        # GitHub PAT
-    re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),                 # GitHub fine-grained PAT
-    re.compile(r"gho_[A-Za-z0-9_]{36,}"),                        # GitHub OAuth token
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),                           # OpenAI / Anthropic key
-    re.compile(r"sk-ant-[A-Za-z0-9\-]{20,}"),                    # Anthropic API key
-    re.compile(r"AKIA[A-Z0-9]{16}"),                              # AWS access key ID
-    re.compile(r"xoxb-[A-Za-z0-9\-]{20,}"),                      # Slack bot token
-    re.compile(r"xoxp-[A-Za-z0-9\-]{20,}"),                      # Slack user token
-    re.compile(r"glpat-[A-Za-z0-9\-_]{20,}"),                    # GitLab PAT
-    re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}=*"),           # Bearer token
+    re.compile(r"ghp_[A-Za-z0-9_]{36,}"),  # GitHub PAT
+    re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),  # GitHub fine-grained PAT
+    re.compile(r"gho_[A-Za-z0-9_]{36,}"),  # GitHub OAuth token
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI / Anthropic key
+    re.compile(r"sk-ant-[A-Za-z0-9\-]{20,}"),  # Anthropic API key
+    re.compile(r"AKIA[A-Z0-9]{16}"),  # AWS access key ID
+    re.compile(r"xoxb-[A-Za-z0-9\-]{20,}"),  # Slack bot token
+    re.compile(r"xoxp-[A-Za-z0-9\-]{20,}"),  # Slack user token
+    re.compile(r"glpat-[A-Za-z0-9\-_]{20,}"),  # GitLab PAT
+    re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}=*"),  # Bearer token
     re.compile(r"(?i)(?:api[_-]?key|secret|token|password)\s*[=:]\s*['\"]?[A-Za-z0-9\-._~+/]{16,}"),
 ]
 
@@ -376,82 +373,84 @@ def has_secrets(text: str) -> bool:
 # Environment variable scrubbing
 # ---------------------------------------------------------------------------
 
-SAFE_ENV_VARS: frozenset[str] = frozenset({
-    # System essentials
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "TERM",
-    "TERM_PROGRAM",
-    "TMPDIR",
-    "PWD",
-    "OLDPWD",
-    "HOSTNAME",
-    "SHLVL",
-    # Locale
-    "LANG",
-    "LANGUAGE",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "LC_COLLATE",
-    "LC_TIME",
-    "LC_NUMERIC",
-    "LC_MONETARY",
-    # XDG directories
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_RUNTIME_DIR",
-    "XDG_STATE_HOME",
-    # Editor / pager
-    "EDITOR",
-    "VISUAL",
-    "PAGER",
-    "LESS",
-    "LESSOPEN",
-    # Toolchains — safe path/config vars, no secrets
-    "CARGO_HOME",
-    "RUSTUP_HOME",
-    "GOPATH",
-    "GOROOT",
-    "GOBIN",
-    "NODE_PATH",
-    "NVM_DIR",
-    "PYENV_ROOT",
-    "VIRTUAL_ENV",
-    "CONDA_PREFIX",
-    "CONDA_DEFAULT_ENV",
-    "JAVA_HOME",
-    "SDKMAN_DIR",
-    "RBENV_ROOT",
-    "GEM_HOME",
-    "GEM_PATH",
-    "BUNDLE_PATH",
-    # Build / CI metadata (non-secret)
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITHUB_REPOSITORY",
-    "GITHUB_REF",
-    "GITHUB_SHA",
-    "GITHUB_RUN_ID",
-    # Misc safe vars
-    "COLORTERM",
-    "CLICOLOR",
-    "FORCE_COLOR",
-    "NO_COLOR",
-    "COLUMNS",
-    "LINES",
-    "TZ",
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "SSH_AUTH_SOCK",
-    "GPG_TTY",
-    "MANPATH",
-    "INFOPATH",
-})
+SAFE_ENV_VARS: frozenset[str] = frozenset(
+    {
+        # System essentials
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TERM_PROGRAM",
+        "TMPDIR",
+        "PWD",
+        "OLDPWD",
+        "HOSTNAME",
+        "SHLVL",
+        # Locale
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_COLLATE",
+        "LC_TIME",
+        "LC_NUMERIC",
+        "LC_MONETARY",
+        # XDG directories
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+        # Editor / pager
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "LESS",
+        "LESSOPEN",
+        # Toolchains — safe path/config vars, no secrets
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "GOPATH",
+        "GOROOT",
+        "GOBIN",
+        "NODE_PATH",
+        "NVM_DIR",
+        "PYENV_ROOT",
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+        "JAVA_HOME",
+        "SDKMAN_DIR",
+        "RBENV_ROOT",
+        "GEM_HOME",
+        "GEM_PATH",
+        "BUNDLE_PATH",
+        # Build / CI metadata (non-secret)
+        "CI",
+        "GITHUB_ACTIONS",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REF",
+        "GITHUB_SHA",
+        "GITHUB_RUN_ID",
+        # Misc safe vars
+        "COLORTERM",
+        "CLICOLOR",
+        "FORCE_COLOR",
+        "NO_COLOR",
+        "COLUMNS",
+        "LINES",
+        "TZ",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "SSH_AUTH_SOCK",
+        "GPG_TTY",
+        "MANPATH",
+        "INFOPATH",
+    }
+)
 
 _SENSITIVE_SUBSTRINGS: tuple[str, ...] = (
     "KEY",

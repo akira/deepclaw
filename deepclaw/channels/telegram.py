@@ -25,7 +25,7 @@ from deepclaw.auth import (
     load_allowed_users,
     save_allowed_users,
 )
-from deepclaw.channels.base import IncomingMessage
+from deepclaw.channels.base import Channel, IncomingMessage
 from deepclaw.gateway import Gateway, chunk_message
 from deepclaw.heartbeat import HeartbeatRunner
 from deepclaw.safety import check_command, format_warning
@@ -69,7 +69,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     new_thread = str(uuid.uuid4())
     context.bot_data.setdefault(THREAD_IDS_KEY, {})[chat_id] = new_thread
-    logger.info(f"New thread for chat {chat_id}: {new_thread}")
+    logger.info("New thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text(f"Started a new conversation thread.\nThread ID: {new_thread}")
 
 
@@ -103,8 +103,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     thread_id = get_thread_id(context, chat_id)
     model = context.bot_data[CONFIG_KEY].model or "not set"
     allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
-    allowlist_status = f"active ({len(allowed_users)} users)" if allowed_users else "inactive (open mode)"
-    text = f"Chat ID: {chat_id}\nThread ID: {thread_id}\nModel: {model}\nAllowlist: {allowlist_status}"
+    allowlist_status = (
+        f"active ({len(allowed_users)} users)" if allowed_users else "inactive (open mode)"
+    )
+    text = (
+        f"Chat ID: {chat_id}\nThread ID: {thread_id}\nModel: {model}\nAllowlist: {allowlist_status}"
+    )
     await update.message.reply_text(text)
 
 
@@ -142,12 +146,16 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     expected_code = context.bot_data.get(PAIRING_CODE_KEY, "")
 
     if not provided_code:
-        await update.message.reply_text("Usage: /pair <code>\nCheck the server terminal for the pairing code.")
+        await update.message.reply_text(
+            "Usage: /pair <code>\nCheck the server terminal for the pairing code."
+        )
         return
 
     if provided_code != expected_code:
-        logger.warning(f"Failed pairing attempt from user id={user.id} username={user.username}")
-        await update.message.reply_text("Invalid pairing code. Check the server terminal and try again.")
+        logger.warning("Failed pairing attempt from user id=%s username=%s", user.id, user.username)
+        await update.message.reply_text(
+            "Invalid pairing code. Check the server terminal and try again."
+        )
         return
 
     # Pair the user
@@ -161,10 +169,10 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data[PAIRING_CODE_KEY] = new_code
 
     username_str = f" (@{user.username})" if user.username else ""
-    logger.info(f"Paired user id={user_id}{username_str}")
+    logger.info("Paired user id=%s%s", user_id, username_str)
     await update.message.reply_text(
-        f"Paired successfully! You now have full access to DeepClaw.\n"
-        f"Type /help to see available commands."
+        "Paired successfully! You now have full access to DeepClaw.\n"
+        "Type /help to see available commands."
     )
 
 
@@ -194,7 +202,7 @@ async def cmd_cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Strip the /cron_add command prefix
     prefix = "/cron_add"
     if raw.startswith(prefix):
-        raw = raw[len(prefix):].strip()
+        raw = raw[len(prefix) :].strip()
     if not raw:
         await update.message.reply_text("Usage: /cron_add <cron_expr> | <prompt>")
         return
@@ -212,7 +220,9 @@ async def cmd_cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         delivery={"channel": "telegram", "chat_id": chat_id},
         path=jobs_path,
     )
-    await update.message.reply_text(f"Cron job added: {job.id[:8]}\nSchedule: {cron_expr}\nPrompt: {prompt}")
+    await update.message.reply_text(
+        f"Cron job added: {job.id[:8]}\nSchedule: {cron_expr}\nPrompt: {prompt}"
+    )
 
 
 async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -223,7 +233,7 @@ async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     raw = update.message.text
     prefix = "/cron_rm"
     if raw.startswith(prefix):
-        raw = raw[len(prefix):].strip()
+        raw = raw[len(prefix) :].strip()
     if not raw:
         await update.message.reply_text("Usage: /cron_rm <job_id_prefix>")
         return
@@ -235,7 +245,9 @@ async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"No job found matching prefix: {id_prefix}")
         return
     if len(matches) > 1:
-        await update.message.reply_text(f"Ambiguous prefix: {id_prefix} matches {len(matches)} jobs. Be more specific.")
+        await update.message.reply_text(
+            f"Ambiguous prefix: {id_prefix} matches {len(matches)} jobs. Be more specific."
+        )
         return
     removed = remove_job(matches[0].id, jobs_path)
     if removed:
@@ -267,7 +279,7 @@ async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     raw = update.message.text
     prefix = "/safety_test"
     if raw.startswith(prefix):
-        raw = raw[len(prefix):].strip()
+        raw = raw[len(prefix) :].strip()
     if not raw:
         await update.message.reply_text("Usage: /safety_test <command>")
         return
@@ -278,7 +290,7 @@ async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(format_warning(raw, matches))
 
 
-class TelegramBotChannel:
+class TelegramBotChannel(Channel):
     """Long-lived channel adapter using the Bot API directly.
 
     Used by the scheduler and any code that needs to send messages
@@ -336,7 +348,7 @@ class TelegramBotChannel:
         await self._bot.send_chat_action(chat_id=int(chat_id), action=ChatAction.TYPING)
 
 
-class TelegramChannel:
+class TelegramChannel(Channel):
     """Per-message channel adapter wrapping an Update context.
 
     Used during the gateway streaming flow where we have an active
@@ -386,14 +398,6 @@ class TelegramChannel:
     async def send_typing(self, chat_id: str) -> None:
         """Send a typing indicator."""
         await self._update.effective_chat.send_action(ChatAction.TYPING)
-
-    @property
-    def supports_edit(self) -> bool:
-        return True
-
-    @property
-    def message_limit(self) -> int:
-        return TELEGRAM_MESSAGE_LIMIT
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -454,11 +458,11 @@ async def post_init(application: Application) -> None:
     application.bot_data[PAIRING_CODE_KEY] = pairing_code
 
     if allowed_users:
-        logger.info(f"Allowlist active with {len(allowed_users)} paired users")
+        logger.info("Allowlist active with %d paired users", len(allowed_users))
     else:
         logger.info("No users paired yet")
 
-    logger.info(f"Pairing code: {pairing_code}")
+    logger.info("Pairing code: %s", pairing_code)
     logger.info("Send /pair %s to your bot in Telegram to pair", pairing_code)
 
     # Create a long-lived channel for proactive messaging (cron delivery, etc.)
@@ -505,7 +509,7 @@ async def post_shutdown(application: Application) -> None:
 
 def run_telegram(config) -> None:
     """Build and run the Telegram bot with long-polling."""
-    from pathlib import Path
+    from deepclaw.config import CONFIG_DIR
 
     token = config.telegram.bot_token
     if not token:
@@ -514,13 +518,9 @@ def run_telegram(config) -> None:
     checkpointer = create_checkpointer()
 
     application = (
-        Application.builder()
-        .token(token)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
+        Application.builder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
     )
-    jobs_path = Path(__import__("os").path.expanduser("~/.deepclaw/cron/jobs.json"))
+    jobs_path = CONFIG_DIR / "cron" / "jobs.json"
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
 
     application.bot_data["checkpointer"] = checkpointer

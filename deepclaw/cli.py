@@ -19,7 +19,7 @@ def _handle_doctor_command() -> None:
 
     config = load_config()
     checks = asyncio.run(run_checks(config))
-    print(format_report(checks))
+    print(format_report(checks))  # noqa: T201
 
 
 def _handle_service_command(args: list[str]) -> None:
@@ -34,19 +34,19 @@ def _handle_service_command(args: list[str]) -> None:
     plat = detect_platform()
 
     if not args:
-        print("Usage: deepclaw service {install|uninstall|status}")
+        print("Usage: deepclaw service {install|uninstall|status}")  # noqa: T201
         raise SystemExit(1)
 
     subcommand = args[0]
     if subcommand == "install":
-        print(install_service(plat))
+        print(install_service(plat))  # noqa: T201
     elif subcommand == "uninstall":
-        print(uninstall_service(plat))
+        print(uninstall_service(plat))  # noqa: T201
     elif subcommand == "status":
-        print(service_status(plat))
+        print(service_status(plat))  # noqa: T201
     else:
-        print(f"Unknown service subcommand: {subcommand}")
-        print("Usage: deepclaw service {install|uninstall|status}")
+        print(f"Unknown service subcommand: {subcommand}")  # noqa: T201
+        print("Usage: deepclaw service {install|uninstall|status}")  # noqa: T201
         raise SystemExit(1)
 
 

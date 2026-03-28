@@ -5,18 +5,27 @@ Jobs are stored in ~/.deepclaw/cron/jobs.json.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 
 from croniter import croniter
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_JOBS_PATH = Path("~/.deepclaw/cron/jobs.json").expanduser()
+
+
+class DeliveryTarget(TypedDict, total=False):
+    """Where to deliver cron job results."""
+
+    channel: str
+    chat_id: str
 
 
 @dataclass
@@ -26,7 +35,7 @@ class CronJob:
     cron_expr: str = "* * * * *"
     prompt: str = ""
     enabled: bool = True
-    delivery: dict = field(default_factory=dict)
+    delivery: DeliveryTarget = field(default_factory=dict)
     last_run: str | None = None
 
 
@@ -43,7 +52,7 @@ def load_jobs(path: Path = DEFAULT_JOBS_PATH) -> list[CronJob]:
             return []
         return [CronJob(**entry) for entry in raw]
     except (json.JSONDecodeError, TypeError, OSError) as exc:
-        logger.warning(f"Could not load jobs from {path}: {exc}")
+        logger.warning("Could not load jobs from %s: %s", path, exc)
         return []
 
 
@@ -58,7 +67,7 @@ def add_job(
     name: str,
     cron_expr: str,
     prompt: str,
-    delivery: dict,
+    delivery: DeliveryTarget,
     path: Path = DEFAULT_JOBS_PATH,
 ) -> CronJob:
     """Create a new CronJob, append it to the jobs file, and return it."""
@@ -116,10 +125,11 @@ class Scheduler:
     direct platform references. Channels are keyed by name (e.g., "telegram").
     """
 
-    def __init__(self, jobs_path: Path, agent, checkpointer, channels: dict | None = None) -> None:
+    def __init__(
+        self, jobs_path: Path, agent, checkpointer=None, channels: dict | None = None
+    ) -> None:
         self._jobs_path = jobs_path
         self._agent = agent
-        self._checkpointer = checkpointer
         self._channels: dict = channels or {}  # name -> Channel instance
         self._task: asyncio.Task | None = None
 
@@ -134,10 +144,8 @@ class Scheduler:
         """Cancel the tick loop."""
         if self._task is not None:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
             logger.info("Scheduler stopped")
 
@@ -153,14 +161,14 @@ class Scheduler:
     async def tick(self) -> None:
         """Check each enabled job and run those that are due."""
         jobs = load_jobs(self._jobs_path)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         modified = False
 
         for job in jobs:
             if not job.enabled:
                 continue
             if self._is_due(job, now):
-                logger.info(f"Running due cron job: {job.name} ({job.id})")
+                logger.info("Running due cron job: %s (%s)", job.name, job.id)
                 await self.run_job(job)
                 job.last_run = now.isoformat()
                 modified = True
@@ -180,7 +188,7 @@ class Scheduler:
         next_run = cron.get_next(datetime)
         # Make next_run timezone-aware if it isn't
         if next_run.tzinfo is None:
-            next_run = next_run.replace(tzinfo=timezone.utc)
+            next_run = next_run.replace(tzinfo=UTC)
         return next_run <= now
 
     async def run_job(self, job: CronJob) -> None:
@@ -202,7 +210,7 @@ class Scheduler:
             else:
                 response = str(content)
         except Exception:
-            logger.exception(f"Cron job {job.name} ({job.id}) agent invocation failed")
+            logger.exception("Cron job %s (%s) agent invocation failed", job.name, job.id)
             response = f"Cron job '{job.name}' failed to execute."
 
         channel_name = job.delivery.get("channel", "")
@@ -213,8 +221,10 @@ class Scheduler:
             try:
                 await channel.send(chat_id, str(response))
             except Exception:
-                logger.exception(f"Failed to deliver cron result via {channel_name} to {chat_id}")
+                logger.exception(
+                    "Failed to deliver cron result via %s to %s", channel_name, chat_id
+                )
         elif chat_id:
-            logger.warning(f"No channel '{channel_name}' registered for delivery")
+            logger.warning("No channel '%s' registered for delivery", channel_name)
         else:
-            logger.info(f"Cron job '{job.name}' completed (no delivery target)")
+            logger.info("Cron job '%s' completed (no delivery target)", job.name)

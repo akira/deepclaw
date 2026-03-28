@@ -1,6 +1,5 @@
 """Tests for deepclaw.doctor module."""
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -23,7 +22,6 @@ from deepclaw.doctor import (
     format_report,
     run_checks,
 )
-
 
 # --- helpers ---
 

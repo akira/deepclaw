@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 CONFIG_DIR = Path("~/.deepclaw").expanduser()
 ENV_FILE = CONFIG_DIR / ".env"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
+CHECKPOINTER_DB_PATH = Path("~/.deepagents/checkpoints.db").expanduser()
 
 # Env var names matching the original bot.py conventions
 ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
@@ -67,21 +68,21 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        logger.warning(f"Could not read env file: {path}")
+        logger.warning("Could not read env file: %s", path)
         return env_vars
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
         # Handle lines prefixed with "export "
-        if line.startswith("export "):
-            line = line[len("export "):]
-        eq_pos = line.find("=")
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :]
+        eq_pos = stripped.find("=")
         if eq_pos == -1:
             continue
-        key = line[:eq_pos].strip()
-        value = line[eq_pos + 1 :].strip()
+        key = stripped[:eq_pos].strip()
+        value = stripped[eq_pos + 1 :].strip()
         # Strip matching surrounding quotes
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
@@ -122,7 +123,7 @@ def load_config() -> DeepClawConfig:
                 if isinstance(loaded, dict):
                     yaml_data = loaded
         except Exception:
-            logger.warning(f"Could not parse config file: {CONFIG_FILE}", exc_info=True)
+            logger.warning("Could not parse config file: %s", CONFIG_FILE, exc_info=True)
 
     # Extract yaml sections
     yaml_telegram: dict = yaml_data.get("telegram", {}) or {}
@@ -132,8 +133,12 @@ def load_config() -> DeepClawConfig:
     # Build streaming config
     streaming = TelegramStreamingConfig(
         enabled=yaml_streaming.get("enabled", TelegramStreamingConfig.enabled),
-        edit_interval=float(yaml_streaming.get("edit_interval", TelegramStreamingConfig.edit_interval)),
-        buffer_threshold=int(yaml_streaming.get("buffer_threshold", TelegramStreamingConfig.buffer_threshold)),
+        edit_interval=float(
+            yaml_streaming.get("edit_interval", TelegramStreamingConfig.edit_interval)
+        ),
+        buffer_threshold=int(
+            yaml_streaming.get("buffer_threshold", TelegramStreamingConfig.buffer_threshold)
+        ),
     )
 
     # Resolve bot_token
@@ -169,7 +174,9 @@ def load_config() -> DeepClawConfig:
     yaml_heartbeat: dict = yaml_data.get("heartbeat", {}) or {}
     heartbeat = HeartbeatConfig(
         enabled=yaml_heartbeat.get("enabled", HeartbeatConfig.enabled),
-        interval_minutes=int(yaml_heartbeat.get("interval_minutes", HeartbeatConfig.interval_minutes)),
+        interval_minutes=int(
+            yaml_heartbeat.get("interval_minutes", HeartbeatConfig.interval_minutes)
+        ),
         quiet_hours_start=yaml_heartbeat.get("quiet_hours_start"),
         quiet_hours_end=yaml_heartbeat.get("quiet_hours_end"),
         timezone=yaml_heartbeat.get("timezone", HeartbeatConfig.timezone),
@@ -184,5 +191,9 @@ def load_config() -> DeepClawConfig:
         workspace_root=str(workspace_root),
     )
 
-    logger.info(f"Config loaded: model={config.model}, allowed_users={len(config.telegram.allowed_users)}")
+    logger.info(
+        "Config loaded: model=%s, allowed_users=%d",
+        config.model,
+        len(config.telegram.allowed_users),
+    )
     return config

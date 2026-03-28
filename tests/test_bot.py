@@ -13,7 +13,6 @@ from deepclaw.channels.telegram import (
 )
 from deepclaw.gateway import chunk_message
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

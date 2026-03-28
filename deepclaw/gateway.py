@@ -43,13 +43,16 @@ class Gateway:
         self.agent = agent
         self.streaming_config = streaming_config
 
-    async def handle_message(self, channel: Channel, message: IncomingMessage, thread_id: str) -> None:
+    async def handle_message(
+        self, channel: Channel, message: IncomingMessage, thread_id: str
+    ) -> None:
         """Process an inbound message: invoke agent, stream response, deliver via channel."""
-        logger.info(f"Received message from chat {message.chat_id}: {message.text[:80]}")
+        logger.info("Received message from chat %s: %s", message.chat_id, message.text[:80])
 
         # Set chat context so tools (e.g., cron) know where to deliver results
         try:
             from deepclaw.tools.cron import set_chat_context
+
             set_chat_context(channel.name, message.chat_id)
         except ImportError:
             pass
@@ -79,7 +82,7 @@ class Gateway:
                     tool_name = getattr(message_obj, "name", "unknown")
                     content = message_obj.content
                     preview = str(content)[:200] if content else "(empty)"
-                    logger.info(f"Tool result [{tool_name}]: {preview}")
+                    logger.info("Tool result [%s]: %s", tool_name, preview)
                     continue
 
                 # Only process AI messages with content_blocks
@@ -96,7 +99,7 @@ class Gateway:
                         if tool_name:
                             tool_args = block.get("args", {})
                             args_preview = str(tool_args)[:200] if tool_args else ""
-                            logger.info(f"Tool call [{tool_name}]: {args_preview}")
+                            logger.info("Tool call [%s]: %s", tool_name, args_preview)
                             tool_line = f"\n\U0001f527 {tool_name}\n"
                             accumulated += tool_line
                             chars_since_edit += len(tool_line)
@@ -112,7 +115,10 @@ class Gateway:
                     now = time.monotonic()
                     elapsed = now - last_edit_time
 
-                    if elapsed >= self.streaming_config.edit_interval or chars_since_edit >= self.streaming_config.buffer_threshold:
+                    if (
+                        elapsed >= self.streaming_config.edit_interval
+                        or chars_since_edit >= self.streaming_config.buffer_threshold
+                    ):
                         display = accumulated + CURSOR_INDICATOR
                         if len(display) <= limit:
                             await channel.edit_message(message.chat_id, msg_id, display)

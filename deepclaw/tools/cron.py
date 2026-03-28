@@ -4,8 +4,10 @@ Allows the agent to schedule, list, and remove recurring tasks.
 Always available (no external dependencies).
 
 The jobs_path can be overridden via set_jobs_path() for testing.
+Chat context uses contextvars so concurrent async handlers don't collide.
 """
 
+import contextvars
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +19,12 @@ from deepclaw.scheduler import (
 )
 
 _jobs_path: Path = DEFAULT_JOBS_PATH
-_current_chat_id: str = ""
-_current_channel: str = "telegram"
+_current_chat_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_chat_id", default=""
+)
+_current_channel: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_channel", default="telegram"
+)
 
 
 def set_jobs_path(path: Path) -> None:
@@ -30,11 +36,11 @@ def set_jobs_path(path: Path) -> None:
 def set_chat_context(channel: str, chat_id: str) -> None:
     """Set the current chat context so scheduled tasks auto-deliver to the right place.
 
-    Called by the gateway before each agent invocation.
+    Called by the gateway before each agent invocation. Uses contextvars
+    so each concurrent async task gets its own isolated context.
     """
-    global _current_chat_id, _current_channel  # noqa: PLW0603
-    _current_channel = channel
-    _current_chat_id = chat_id
+    _current_channel.set(channel)
+    _current_chat_id.set(chat_id)
 
 
 def available() -> bool:
@@ -63,15 +69,19 @@ def schedule_task(
     """
     try:
         from croniter import croniter
+
         if not croniter.is_valid(cron_expr):
             return {"error": f"Invalid cron expression: {cron_expr}"}
     except Exception as exc:
         return {"error": f"Failed to validate cron expression: {exc}"}
 
-    if not _current_chat_id:
+    chat_id = _current_chat_id.get()
+    channel = _current_channel.get()
+
+    if not chat_id:
         return {"error": "No chat context available — cannot determine delivery target."}
 
-    delivery = {"channel": _current_channel, "chat_id": _current_chat_id}
+    delivery = {"channel": channel, "chat_id": chat_id}
 
     job = add_job(
         name=name or prompt[:50],

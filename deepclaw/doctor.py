@@ -3,8 +3,9 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from deepclaw.config import CONFIG_DIR, CONFIG_FILE, ENV_FILE, DeepClawConfig
+from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, CONFIG_FILE, ENV_FILE, DeepClawConfig
 from deepclaw.service import detect_platform, get_service_path
 
 STATUS_OK = "ok"
@@ -15,14 +16,16 @@ MARKER_OK = "\u2713"
 MARKER_WARN = "\u26a0"
 MARKER_FAIL = "\u2717"
 
-CHECKPOINTER_DB_PATH = Path("~/.deepagents/checkpoints.db").expanduser()
 CRON_DIR = CONFIG_DIR / "cron"
+
+
+CheckStatus = Literal["ok", "warn", "fail"]
 
 
 @dataclass
 class Check:
     name: str
-    status: str  # "ok" | "warn" | "fail"
+    status: CheckStatus
     message: str
 
 

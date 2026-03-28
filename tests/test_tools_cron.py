@@ -1,7 +1,6 @@
 """Tests for the cron tool plugin."""
 
 import pytest
-from pathlib import Path
 
 from deepclaw.tools.cron import (
     available,
@@ -12,7 +11,6 @@ from deepclaw.tools.cron import (
     set_chat_context,
     set_jobs_path,
 )
-from deepclaw.scheduler import load_jobs
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +23,7 @@ def _use_tmp_jobs(tmp_path):
     # Reset isn't strictly needed since each test gets its own tmp_path,
     # but set_jobs_path is module-global so be tidy
     from deepclaw.scheduler import DEFAULT_JOBS_PATH
+
     set_jobs_path(DEFAULT_JOBS_PATH)
     set_chat_context("telegram", "")
 

@@ -6,18 +6,17 @@ Silent when everything is OK.
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from deepclaw.config import HeartbeatConfig
+from deepclaw.config import CONFIG_DIR, HeartbeatConfig
 
 logger = logging.getLogger(__name__)
 
-DEEPCLAW_DIR = Path("~/.deepclaw").expanduser()
-HEARTBEAT_FILE = DEEPCLAW_DIR / "HEARTBEAT.md"
+HEARTBEAT_FILE = CONFIG_DIR / "HEARTBEAT.md"
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
 
@@ -97,14 +96,13 @@ def is_quiet_hours(config: HeartbeatConfig) -> bool:
     if start <= end:
         # Simple range, e.g. 1-6
         return start <= hour < end
-    else:
-        # Midnight-wrapping range, e.g. 23-8
-        return hour >= start or hour < end
+    # Midnight-wrapping range, e.g. 23-8
+    return hour >= start or hour < end
 
 
 def _seed_heartbeat() -> None:
     """Create default HEARTBEAT.md if it doesn't exist."""
-    DEEPCLAW_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not HEARTBEAT_FILE.exists():
         HEARTBEAT_FILE.write_text(DEFAULT_HEARTBEAT_SEED, encoding="utf-8")
         logger.info("Seeded default HEARTBEAT.md at %s", HEARTBEAT_FILE)
@@ -144,10 +142,8 @@ class HeartbeatRunner:
         """Cancel the heartbeat loop."""
         if self._task is not None:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
             logger.info("Heartbeat stopped")
 
@@ -192,10 +188,15 @@ class HeartbeatRunner:
             self._consecutive_failures = 0
         except Exception:
             self._consecutive_failures += 1
-            logger.exception("Heartbeat agent invocation failed (%d/%d)",
-                             self._consecutive_failures, self._config.max_failures)
+            logger.exception(
+                "Heartbeat agent invocation failed (%d/%d)",
+                self._consecutive_failures,
+                self._config.max_failures,
+            )
             if self._consecutive_failures >= self._config.max_failures:
-                logger.error("Heartbeat disabled after %d consecutive failures", self._config.max_failures)
+                logger.error(
+                    "Heartbeat disabled after %d consecutive failures", self._config.max_failures
+                )
                 await self.stop()
             return
 
@@ -214,9 +215,10 @@ class HeartbeatRunner:
             logger.warning("Heartbeat has findings but no notify_chat_id configured")
             return
 
-        channel = self._channels.get("telegram")
+        # Use the first available channel for notification delivery
+        channel = next(iter(self._channels.values()), None)
         if channel is None:
-            logger.warning("No telegram channel available for heartbeat notification")
+            logger.warning("No channel available for heartbeat notification")
             return
 
         formatted = f"\U0001f514 *Heartbeat*\n\n{message}"

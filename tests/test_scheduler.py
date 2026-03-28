@@ -1,7 +1,7 @@
 """Tests for deepclaw.scheduler module."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,7 +17,6 @@ from deepclaw.scheduler import (
     remove_job,
     save_jobs,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,17 +89,20 @@ class TestLoadJobs:
 
     def test_valid_file_loads_jobs(self, tmp_path):
         f = tmp_path / "jobs.json"
-        _write_jobs_file(f, [
-            {
-                "id": "abc-123",
-                "name": "daily",
-                "cron_expr": "0 9 * * *",
-                "prompt": "hello",
-                "enabled": True,
-                "delivery": {},
-                "last_run": None,
-            }
-        ])
+        _write_jobs_file(
+            f,
+            [
+                {
+                    "id": "abc-123",
+                    "name": "daily",
+                    "cron_expr": "0 9 * * *",
+                    "prompt": "hello",
+                    "enabled": True,
+                    "delivery": {},
+                    "last_run": None,
+                }
+            ],
+        )
         jobs = load_jobs(f)
         assert len(jobs) == 1
         assert jobs[0].id == "abc-123"
@@ -238,18 +240,18 @@ class TestSchedulerTick:
     async def test_tick_runs_due_job(self, tmp_path):
         f = tmp_path / "jobs.json"
         # Create a job that last ran 2 minutes ago with every-minute schedule
-        past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
         job = _make_job(cron_expr="* * * * *", last_run=past)
         save_jobs([job], f)
 
         agent = AsyncMock()
-        agent.ainvoke = AsyncMock(return_value={
-            "messages": [MagicMock(content="done")]
-        })
+        agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="done")]})
         channel = AsyncMock()
         channel.name = "telegram"
 
-        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel})
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
         await scheduler.tick()
 
         agent.ainvoke.assert_called_once()
@@ -258,7 +260,7 @@ class TestSchedulerTick:
     @pytest.mark.asyncio
     async def test_tick_skips_disabled_job(self, tmp_path):
         f = tmp_path / "jobs.json"
-        past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
         job = _make_job(cron_expr="* * * * *", last_run=past, enabled=False)
         save_jobs([job], f)
 
@@ -273,7 +275,7 @@ class TestSchedulerTick:
     async def test_tick_skips_not_yet_due_job(self, tmp_path):
         f = tmp_path / "jobs.json"
         # Job last ran just now with a daily schedule — not due yet
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         job = _make_job(cron_expr="0 0 1 1 *", last_run=now_iso)  # once a year
         save_jobs([job], f)
 
@@ -287,7 +289,7 @@ class TestSchedulerTick:
     @pytest.mark.asyncio
     async def test_tick_updates_last_run(self, tmp_path):
         f = tmp_path / "jobs.json"
-        past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        past = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
         job = _make_job(cron_expr="* * * * *", last_run=past)
         save_jobs([job], f)
 
@@ -296,7 +298,9 @@ class TestSchedulerTick:
         channel = AsyncMock()
         channel.name = "telegram"
 
-        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel})
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
         await scheduler.tick()
 
         updated = load_jobs(f)
