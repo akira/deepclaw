@@ -127,6 +127,32 @@ description: Structured approach to conducting thorough web research
 
 The agent sees skill names and descriptions in its system prompt, and reads the full SKILL.md content on demand (progressive disclosure).
 
+## Heartbeat
+
+DeepClaw can run periodic proactive checks via a `HEARTBEAT.md` checklist. The agent reviews the checklist on a schedule and **only notifies you when something needs attention** — silent when everything is OK.
+
+A default (commented-out) `HEARTBEAT.md` is seeded at `~/.deepclaw/HEARTBEAT.md`. Uncomment or add your own checks:
+
+```markdown
+# Heartbeat Checklist
+- Check if any git repos in ~/projects have uncommitted changes
+- Check disk usage and warn if any partition is above 90%
+- Review and tidy up MEMORY.md if it's getting long
+```
+
+Enable and configure in `~/.deepclaw/config.yaml`:
+
+```yaml
+heartbeat:
+  enabled: true
+  interval_minutes: 30
+  notify_chat_id: "123456789"   # Telegram chat ID for notifications
+  quiet_hours_start: 23          # Don't check 11 PM - 8 AM
+  quiet_hours_end: 8
+  timezone: "America/Los_Angeles"
+  max_failures: 3                # Auto-disable after 3 consecutive errors
+```
+
 ## Tool Plugins
 
 DeepClaw uses a plugin system for optional tools. Each plugin in `deepclaw/tools/` is auto-discovered at startup. A plugin loads only if its dependencies are installed and required env vars are set.

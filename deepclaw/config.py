@@ -41,9 +41,21 @@ class TelegramConfig:
 
 
 @dataclass
+class HeartbeatConfig:
+    enabled: bool = False
+    interval_minutes: int = 30
+    quiet_hours_start: int | None = None  # 0-23, e.g. 23 for 11 PM
+    quiet_hours_end: int | None = None  # 0-23, e.g. 8 for 8 AM
+    timezone: str = "UTC"
+    max_failures: int = 3
+    notify_chat_id: str = ""
+
+
+@dataclass
 class DeepClawConfig:
     model: str = "anthropic:claude-sonnet-4-6-20250514"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     workspace_root: str = "~/.deepclaw/workspace"
 
 
@@ -153,9 +165,22 @@ def load_config() -> DeepClawConfig:
     # Workspace root
     workspace_root = yaml_workspace.get("root", DeepClawConfig.workspace_root)
 
+    # Build heartbeat config
+    yaml_heartbeat: dict = yaml_data.get("heartbeat", {}) or {}
+    heartbeat = HeartbeatConfig(
+        enabled=yaml_heartbeat.get("enabled", HeartbeatConfig.enabled),
+        interval_minutes=int(yaml_heartbeat.get("interval_minutes", HeartbeatConfig.interval_minutes)),
+        quiet_hours_start=yaml_heartbeat.get("quiet_hours_start"),
+        quiet_hours_end=yaml_heartbeat.get("quiet_hours_end"),
+        timezone=yaml_heartbeat.get("timezone", HeartbeatConfig.timezone),
+        max_failures=int(yaml_heartbeat.get("max_failures", HeartbeatConfig.max_failures)),
+        notify_chat_id=str(yaml_heartbeat.get("notify_chat_id", "")),
+    )
+
     config = DeepClawConfig(
         model=model,
         telegram=telegram,
+        heartbeat=heartbeat,
         workspace_root=str(workspace_root),
     )
 

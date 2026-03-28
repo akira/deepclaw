@@ -27,6 +27,7 @@ from deepclaw.auth import (
 )
 from deepclaw.channels.base import IncomingMessage
 from deepclaw.gateway import Gateway, chunk_message
+from deepclaw.heartbeat import HeartbeatRunner
 from deepclaw.safety import check_command, format_warning
 from deepclaw.scheduler import (
     Scheduler,
@@ -45,6 +46,7 @@ ALLOWED_USERS_KEY = "allowed_users"
 PAIRING_CODE_KEY = "pairing_code"
 CONFIG_KEY = "deepclaw_config"
 SCHEDULER_KEY = "scheduler"
+HEARTBEAT_KEY = "heartbeat_runner"
 JOBS_PATH_KEY = "jobs_path"
 GATEWAY_KEY = "gateway"
 
@@ -474,15 +476,28 @@ async def post_init(application: Application) -> None:
         application.bot_data[SCHEDULER_KEY] = scheduler
         await scheduler.start()
 
+    # Start heartbeat runner
+    heartbeat_runner = HeartbeatRunner(
+        config=config.heartbeat,
+        agent=agent,
+        channels={"telegram": bot_channel},
+    )
+    application.bot_data[HEARTBEAT_KEY] = heartbeat_runner
+    await heartbeat_runner.start()
+
     logger.info("DeepAgents agent initialized")
 
 
 async def post_shutdown(application: Application) -> None:
-    """Clean up the scheduler and checkpointer on shutdown."""
-    scheduler = application.bot_data.get(SCHEDULER_KEY)
+    """Clean up the heartbeat, scheduler, and checkpointer on shutdown."""
+    heartbeat_runner = application.bot_data.get(HEARTBEAT_KEY)
+    if heartbeat_runner:
+        await heartbeat_runner.stop()
 
+    scheduler = application.bot_data.get(SCHEDULER_KEY)
     if scheduler:
         await scheduler.stop()
+
     checkpointer_cm = application.bot_data.get("checkpointer_cm")
     if checkpointer_cm:
         await checkpointer_cm.__aexit__(None, None, None)
