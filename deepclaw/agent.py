@@ -12,6 +12,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR
 from deepclaw.middleware import SafetyMiddleware
 from deepclaw.safety import scrub_env
+from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
 
 logger = logging.getLogger(__name__)
@@ -138,4 +139,5 @@ def create_agent(config, checkpointer):
         middleware=middleware,
         system_prompt=system_prompt,
         tools=tools or None,
+        subagents=DEFAULT_SUBAGENTS,
     )

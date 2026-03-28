@@ -11,6 +11,7 @@ A self-hosted AI assistant you talk to over Telegram. It can read your files, ru
 - **Cron scheduling** — run agent prompts on a schedule ("summarize my todos every morning at 9am")
 - **Heartbeat monitoring** — periodic proactive checks that only notify you when something needs attention
 - **Customizable personality** — define your agent's voice and behavior via SOUL.md
+- **Subagent delegation** — specialized agents for research, coding, and sysadmin tasks
 
 ## Quick Start
 
@@ -117,6 +118,21 @@ description: Structured approach to conducting thorough web research
 ```
 
 The agent sees skill names and descriptions in its system prompt and reads the full content on demand.
+
+## Subagents
+
+The main agent can delegate tasks to specialized subagents via the `task` tool. Each subagent runs in an isolated conversation with its own system prompt, handles the work, and returns a clean summary.
+
+Built-in subagents:
+
+| Name | When the agent delegates to it |
+|---|---|
+| `researcher` | Thorough investigation, comparing sources, synthesizing information |
+| `coder` | Focused coding jobs — writing functions, fixing tests, refactoring |
+| `sysadmin` | System health checks, disk usage, process monitoring, log analysis |
+| `general-purpose` | Anything that doesn't fit the specialists (provided by DeepAgents) |
+
+The main agent decides when to delegate based on the task. You don't need to specify which subagent to use — just describe what you need and the agent routes it.
 
 ## Heartbeat
 
