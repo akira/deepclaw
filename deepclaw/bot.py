@@ -23,6 +23,8 @@ from telegram.ext import (
     filters,
 )
 
+from deepclaw.config import load_config
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -32,19 +34,10 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MESSAGE_LIMIT = 4096
 THREAD_IDS_KEY = "thread_ids"
 ALLOWED_USERS_KEY = "allowed_users"
-STREAM_EDIT_INTERVAL = 1.0  # minimum seconds between message edits
-STREAM_CHAR_THRESHOLD = 100  # characters accumulated before forcing an edit
+CONFIG_KEY = "deepclaw_config"
 CURSOR_INDICATOR = "▌"
 THINKING_MESSAGE = "Thinking..."
 REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
-
-
-def _parse_allowed_users() -> set[str]:
-    """Parse DEEPCLAW_ALLOWED_USERS env var into a set of user IDs/usernames."""
-    raw = os.environ.get("DEEPCLAW_ALLOWED_USERS", "").strip()
-    if not raw:
-        return set()
-    return {u.strip() for u in raw.split(",") if u.strip()}
 
 
 def is_user_allowed(update: Update, allowed_users: set[str]) -> bool:
@@ -126,7 +119,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     chat_id = str(update.effective_chat.id)
     thread_id = get_thread_id(context, chat_id)
-    model = os.environ.get("DEEPCLAW_MODEL", "not set")
+    model = context.bot_data[CONFIG_KEY].model or "not set"
     allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
     allowlist_status = f"active ({len(allowed_users)} users)" if allowed_users else "inactive (open mode)"
     text = f"Chat ID: {chat_id}\nThread ID: {thread_id}\nModel: {model}\nAllowlist: {allowlist_status}"
@@ -174,6 +167,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     accumulated = ""
     last_edit_time = time.monotonic()
     chars_since_edit = 0
+    streaming_cfg = context.bot_data[CONFIG_KEY].telegram.streaming
 
     try:
         async for event in agent.astream_events(
@@ -195,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             now = time.monotonic()
             elapsed = now - last_edit_time
 
-            if elapsed >= STREAM_EDIT_INTERVAL or chars_since_edit >= STREAM_CHAR_THRESHOLD:
+            if elapsed >= streaming_cfg.edit_interval or chars_since_edit >= streaming_cfg.buffer_threshold:
                 display = accumulated + CURSOR_INDICATOR
                 if len(display) <= TELEGRAM_MESSAGE_LIMIT:
                     await _edit_stream_message(stream_msg, display)
@@ -216,20 +210,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def post_init(application: Application) -> None:
     """Create the DeepAgents agent after the application is initialized."""
+    config = application.bot_data[CONFIG_KEY]
+
     checkpointer = application.bot_data["checkpointer"]
     await checkpointer.__aenter__()
 
-    model = os.environ.get("DEEPCLAW_MODEL")
     backend = LocalShellBackend(virtual_mode=False, inherit_env=True)
 
     agent = create_deep_agent(
-        model=model,
+        model=config.model,
         backend=backend,
         checkpointer=checkpointer,
     )
     application.bot_data["agent"] = agent
 
-    allowed_users = _parse_allowed_users()
+    allowed_users = set(config.telegram.allowed_users)
     application.bot_data[ALLOWED_USERS_KEY] = allowed_users
     if allowed_users:
         logger.info(f"Allowlist active with {len(allowed_users)} users")
@@ -248,9 +243,11 @@ async def post_shutdown(application: Application) -> None:
 
 def main() -> None:
     """Entry point: start the Telegram bot with long-polling."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    config = load_config()
+
+    token = config.telegram.bot_token
     if not token:
-        raise SystemExit("TELEGRAM_BOT_TOKEN environment variable is required")
+        raise SystemExit("TELEGRAM_BOT_TOKEN is required (set via env var, .env, or config.yaml)")
 
     db_path = os.path.expanduser("~/.deepagents/checkpoints.db")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -264,6 +261,7 @@ def main() -> None:
         .build()
     )
     application.bot_data["checkpointer"] = checkpointer
+    application.bot_data[CONFIG_KEY] = config
 
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("help", cmd_help))
