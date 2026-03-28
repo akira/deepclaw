@@ -10,6 +10,9 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=3.0.0,<4.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 deepclaw = "deepclaw.bot:main"
 deepclaw-tui = "deepagents_cli:cli_main"
