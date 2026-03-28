@@ -76,6 +76,44 @@ The agent has full DeepAgents capabilities out of the box:
 - Context compression when conversations get long
 - Skills and memory (AGENTS.md / SKILL.md)
 
+## SOUL.md — Agent Identity
+
+DeepClaw loads a `SOUL.md` file from `~/.deepclaw/SOUL.md` to define the agent's personality, communication style, and working behavior. This is prepended to the system prompt on every conversation.
+
+A default SOUL.md is seeded on first run. Edit it to customize your agent's voice:
+
+```bash
+$EDITOR ~/.deepclaw/SOUL.md
+```
+
+## Skills
+
+DeepClaw supports skills via SKILL.md files in `~/.deepclaw/skills/`. Skills are specialized workflows the agent discovers and uses when relevant.
+
+To add a skill, create a subdirectory with a SKILL.md:
+
+```
+~/.deepclaw/skills/
+└── web-research/
+    └── SKILL.md
+```
+
+SKILL.md format:
+```markdown
+---
+name: web-research
+description: Structured approach to conducting thorough web research
+---
+
+# Web Research Skill
+
+## When to Use
+- User asks you to research a topic
+...
+```
+
+The agent sees skill names and descriptions in its system prompt, and reads the full SKILL.md content on demand (progressive disclosure).
+
 ## Tool Plugins
 
 DeepClaw uses a plugin system for optional tools. Each plugin in `deepclaw/tools/` is auto-discovered at startup. A plugin loads only if its dependencies are installed and required env vars are set.
