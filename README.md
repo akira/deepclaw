@@ -19,11 +19,24 @@ A self-hosted AI assistant you talk to over Telegram. It can read your files, ru
 
 Message [@BotFather](https://t.me/BotFather) on Telegram and create a new bot. Copy the token.
 
-### 2. Set your environment
+### 2. Authenticate
 
+**Option A: Claude Pro/Max subscription (OAuth)**
+```bash
+uv run deepclaw login
+```
+Opens your browser for Claude authorization. Tokens are saved to `~/.deepclaw/.anthropic_oauth.json` and auto-refreshed.
+
+**Option B: API key**
+```bash
+export ANTHROPIC_API_KEY=<your-anthropic-key>
+```
+
+DeepClaw also auto-detects Claude Code credentials from `~/.claude/.credentials.json` if you're already logged in there.
+
+Set your Telegram bot token:
 ```bash
 export TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
-export ANTHROPIC_API_KEY=<your-anthropic-key>
 ```
 
 ### 3. Install and run

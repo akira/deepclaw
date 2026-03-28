@@ -1,6 +1,7 @@
 """Agent factory for DeepClaw."""
 
 import logging
+import os
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
@@ -11,6 +12,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR
 from deepclaw.middleware import SafetyMiddleware
+from deepclaw.oauth import OAUTH_HEADERS, resolve_token
 from deepclaw.safety import scrub_env
 from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
@@ -102,8 +104,22 @@ def create_checkpointer():
     return AsyncSqliteSaver.from_conn_string(str(CHECKPOINTER_DB_PATH))
 
 
+def _setup_auth() -> None:
+    """Resolve OAuth/API credentials and set ANTHROPIC_API_KEY for the SDK."""
+    token, is_oauth = resolve_token()
+    if not token:
+        return
+
+    os.environ["ANTHROPIC_API_KEY"] = token
+    if is_oauth:
+        logger.info("Using OAuth token for authentication")
+    else:
+        logger.info("Using API key for authentication")
+
+
 def create_agent(config, checkpointer):
     """Create a DeepAgents agent with the given config and checkpointer."""
+    _setup_auth()
     backend = LocalShellBackend(virtual_mode=False, env=scrub_env())
 
     # Middleware stack
