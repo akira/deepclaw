@@ -19,40 +19,35 @@ A self-hosted AI assistant you talk to over Telegram. It can read your files, ru
 
 ## Quick Start
 
-### 1. Create a Telegram bot
+### 1. Install
+
+```bash
+uv sync
+```
+
+### 2. Create a Telegram bot
 
 Message [@BotFather](https://t.me/BotFather) on Telegram and create a new bot. Copy the token.
 
-### 2. Authenticate
-
-**Option A: Claude Pro/Max subscription (OAuth)**
-```bash
-uv run deepclaw login
-```
-Opens your browser for Claude authorization. Tokens are saved to `~/.deepclaw/.anthropic_oauth.json` and auto-refreshed.
-
-**Option B: API key**
-```bash
-export ANTHROPIC_API_KEY=<your-anthropic-key>
-```
-
-DeepClaw also auto-detects Claude Code credentials from `~/.claude/.credentials.json` if you're already logged in there.
-
-Set your Telegram bot token:
 ```bash
 export TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
 ```
 
-### 3. Install and run
+### 3. Set your API key
 
 ```bash
-uv sync
+export ANTHROPIC_API_KEY=<your-anthropic-key>
+```
+
+### 4. Run
+
+```bash
 uv run deepclaw
 ```
 
-This starts the Telegram bot with long-polling. You should see log output confirming the bot is running.
+You should see log output confirming the bot is running.
 
-### 4. Pair with your bot
+### 5. Pair with your bot
 
 On first launch, DeepClaw prints a **pairing code** to the terminal:
 
@@ -62,7 +57,7 @@ Pairing code: A1B2C3 — send /pair A1B2C3 to the bot on Telegram
 
 Open your bot in Telegram and send `/pair A1B2C3`. You're now paired and the bot will respond to your messages. The pairing persists across restarts.
 
-### 5. Start chatting
+### 6. Start chatting
 
 Send any message to the bot. Try:
 - "What files are in my home directory?"
