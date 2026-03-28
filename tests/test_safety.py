@@ -20,6 +20,7 @@ from deepclaw.safety import (
     CATEGORY_SERVICE_MANAGEMENT,
     CATEGORY_SQL_DESTRUCTION,
     CATEGORY_SYSTEM_CONFIG_WRITE,
+    SAFE_ENV_VARS,
     _extract_hostname,
     _is_ip_blocked,
     check_command,
@@ -30,6 +31,7 @@ from deepclaw.safety import (
     has_secrets,
     is_dangerous,
     redact_secrets,
+    scrub_env,
 )
 
 
@@ -588,3 +590,109 @@ class TestHasSecrets:
 
     def test_detects_aws_key(self):
         assert has_secrets("AKIAIOSFODNN7EXAMPLE") is True
+
+
+# ---------------------------------------------------------------------------
+# Environment variable scrubbing — scrub_env
+# ---------------------------------------------------------------------------
+
+
+class TestScrubEnv:
+    def test_keeps_safe_vars(self):
+        env = {"PATH": "/usr/bin", "HOME": "/home/user", "LANG": "en_US.UTF-8"}
+        result = scrub_env(env)
+        assert result == env
+
+    def test_strips_api_keys(self):
+        env = {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "sk-ant-secret",
+            "OPENAI_API_KEY": "sk-openai-secret",
+        }
+        result = scrub_env(env)
+        assert "PATH" in result
+        assert "ANTHROPIC_API_KEY" not in result
+        assert "OPENAI_API_KEY" not in result
+
+    def test_strips_tokens(self):
+        env = {
+            "HOME": "/home/user",
+            "TELEGRAM_BOT_TOKEN": "123:ABC",
+            "GITHUB_TOKEN": "ghp_abc123",
+            "SLACK_TOKEN": "xoxb-abc",
+        }
+        result = scrub_env(env)
+        assert "HOME" in result
+        assert "TELEGRAM_BOT_TOKEN" not in result
+        assert "GITHUB_TOKEN" not in result
+        assert "SLACK_TOKEN" not in result
+
+    def test_strips_secrets(self):
+        env = {
+            "PATH": "/usr/bin",
+            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI",
+            "DATABASE_PASSWORD": "hunter2",
+            "MY_SECRET": "shhh",
+        }
+        result = scrub_env(env)
+        assert "PATH" in result
+        assert "AWS_SECRET_ACCESS_KEY" not in result
+        assert "DATABASE_PASSWORD" not in result
+        assert "MY_SECRET" not in result
+
+    def test_strips_credential_and_auth_vars(self):
+        env = {
+            "HOME": "/home/user",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/creds.json",
+            "AUTH_HEADER": "Bearer xyz",
+            "PRIVATE_KEY_PATH": "/path/to/key",
+        }
+        result = scrub_env(env)
+        assert "HOME" in result
+        assert "GOOGLE_APPLICATION_CREDENTIALS" not in result
+        assert "AUTH_HEADER" not in result
+        assert "PRIVATE_KEY_PATH" not in result
+
+    def test_keeps_non_sensitive_custom_vars(self):
+        env = {
+            "PATH": "/usr/bin",
+            "MY_APP_DEBUG": "true",
+            "LOG_LEVEL": "info",
+            "COLUMNS": "120",
+        }
+        result = scrub_env(env)
+        assert result == env
+
+    def test_case_insensitive_sensitive_detection(self):
+        env = {
+            "my_api_key": "should_be_stripped",
+            "Some_Token": "also_stripped",
+            "db_password": "stripped_too",
+        }
+        result = scrub_env(env)
+        assert "my_api_key" not in result
+        assert "Some_Token" not in result
+        assert "db_password" not in result
+
+    def test_defaults_to_os_environ(self):
+        result = scrub_env()
+        # PATH should always be present
+        assert "PATH" in result
+        # If ANTHROPIC_API_KEY is set in the real env, it should be stripped
+        if "ANTHROPIC_API_KEY" in os.environ:
+            assert "ANTHROPIC_API_KEY" not in result
+
+    def test_empty_env(self):
+        assert scrub_env({}) == {}
+
+    def test_ssh_auth_sock_kept(self):
+        env = {"SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"}
+        result = scrub_env(env)
+        assert "SSH_AUTH_SOCK" in result
+
+    def test_safe_env_vars_allowlist_overrides_sensitive_substring(self):
+        # SSH_AUTH_SOCK contains "AUTH" but is in the allowlist
+        assert "SSH_AUTH_SOCK" in SAFE_ENV_VARS
+        env = {"SSH_AUTH_SOCK": "/tmp/agent.sock"}
+        result = scrub_env(env)
+        assert "SSH_AUTH_SOCK" in result

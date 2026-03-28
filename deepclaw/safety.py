@@ -373,6 +373,120 @@ def has_secrets(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Environment variable scrubbing
+# ---------------------------------------------------------------------------
+
+SAFE_ENV_VARS: frozenset[str] = frozenset({
+    # System essentials
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "TERM_PROGRAM",
+    "TMPDIR",
+    "PWD",
+    "OLDPWD",
+    "HOSTNAME",
+    "SHLVL",
+    # Locale
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_COLLATE",
+    "LC_TIME",
+    "LC_NUMERIC",
+    "LC_MONETARY",
+    # XDG directories
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME",
+    # Editor / pager
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "LESS",
+    "LESSOPEN",
+    # Toolchains — safe path/config vars, no secrets
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "GOPATH",
+    "GOROOT",
+    "GOBIN",
+    "NODE_PATH",
+    "NVM_DIR",
+    "PYENV_ROOT",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "JAVA_HOME",
+    "SDKMAN_DIR",
+    "RBENV_ROOT",
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_PATH",
+    # Build / CI metadata (non-secret)
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITHUB_REPOSITORY",
+    "GITHUB_REF",
+    "GITHUB_SHA",
+    "GITHUB_RUN_ID",
+    # Misc safe vars
+    "COLORTERM",
+    "CLICOLOR",
+    "FORCE_COLOR",
+    "NO_COLOR",
+    "COLUMNS",
+    "LINES",
+    "TZ",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "SSH_AUTH_SOCK",
+    "GPG_TTY",
+    "MANPATH",
+    "INFOPATH",
+})
+
+_SENSITIVE_SUBSTRINGS: tuple[str, ...] = (
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "AUTH",
+    "PRIVATE",
+)
+
+
+def scrub_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a filtered copy of environment variables safe for child processes.
+
+    Starts from ``env`` (defaults to ``os.environ``) and keeps only variables
+    that are in the ``SAFE_ENV_VARS`` allowlist OR whose names do not contain
+    any sensitive substring. Variables containing KEY, TOKEN, SECRET, PASSWORD,
+    etc. in their name are always stripped unless explicitly allowlisted.
+    """
+    source = env if env is not None else os.environ
+    filtered: dict[str, str] = {}
+    for name, value in source.items():
+        if name in SAFE_ENV_VARS:
+            filtered[name] = value
+            continue
+        upper = name.upper()
+        if any(s in upper for s in _SENSITIVE_SUBSTRINGS):
+            continue
+        filtered[name] = value
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # SSRF Protection — URL safety validation
 # ---------------------------------------------------------------------------
 

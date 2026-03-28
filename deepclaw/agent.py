@@ -7,6 +7,7 @@ from deepagents.backends import LocalShellBackend
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.middleware import SafetyMiddleware
+from deepclaw.safety import scrub_env
 
 
 def create_checkpointer():
@@ -18,7 +19,7 @@ def create_checkpointer():
 
 def create_agent(config, checkpointer):
     """Create a DeepAgents agent with the given config and checkpointer."""
-    backend = LocalShellBackend(virtual_mode=False, inherit_env=True)
+    backend = LocalShellBackend(virtual_mode=False, env=scrub_env())
     middleware = []
     if SafetyMiddleware is not None:
         middleware.append(SafetyMiddleware())
