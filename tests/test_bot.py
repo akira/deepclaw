@@ -1,16 +1,16 @@
-"""Tests for deepclaw.bot module."""
+"""Tests for deepclaw bot modules (auth, channels.telegram)."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from deepclaw.bot import (
+from deepclaw.auth import is_user_allowed
+from deepclaw.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
     chunk_message,
     get_thread_id,
-    is_user_allowed,
 )
 
 
