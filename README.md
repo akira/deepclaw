@@ -1,29 +1,162 @@
 # DeepClaw
 
-A multi-platform AI agent built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents). DeepClaw extends DeepAgents with a messaging gateway, starting with Telegram and the terminal, so you can interact with your agent from anywhere.
+A self-hosted AI assistant you talk to over Telegram. It can read your files, run shell commands, search the web, schedule tasks, and remember your preferences across conversations. Built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents).
+
+## What It Can Do
+
+- **File operations** — read, write, edit, search (glob/grep) files on your machine
+- **Shell commands** — execute commands with a layered safety system that blocks dangerous operations
+- **Web search** — search the web and extract content from URLs (via Tavily)
+- **Persistent memory** — learns your preferences and remembers context across conversations
+- **Cron scheduling** — run agent prompts on a schedule ("summarize my todos every morning at 9am")
+- **Heartbeat monitoring** — periodic proactive checks that only notify you when something needs attention
+- **Customizable personality** — define your agent's voice and behavior via SOUL.md
 
 ## Quick Start
 
+### 1. Create a Telegram bot
+
+Message [@BotFather](https://t.me/BotFather) on Telegram and create a new bot. Copy the token.
+
+### 2. Set your environment
+
 ```bash
-# Required
 export TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
 export ANTHROPIC_API_KEY=<your-anthropic-key>
+```
 
-# Install and run the Telegram bot
+### 3. Install and run
+
+```bash
 uv sync
 uv run deepclaw
+```
 
-# Optional: install web search tools
+This starts the Telegram bot with long-polling. You should see log output confirming the bot is running.
+
+### 4. Pair with your bot
+
+On first launch, DeepClaw prints a **pairing code** to the terminal:
+
+```
+Pairing code: A1B2C3 — send /pair A1B2C3 to the bot on Telegram
+```
+
+Open your bot in Telegram and send `/pair A1B2C3`. You're now paired and the bot will respond to your messages. The pairing persists across restarts.
+
+### 5. Start chatting
+
+Send any message to the bot. Try:
+- "What files are in my home directory?"
+- "Search the web for today's top tech news"
+- "Check if any of my git repos have uncommitted changes"
+
+### Optional: web search tools
+
+```bash
+export TAVILY_API_KEY=<your-tavily-key>
 uv sync --extra web
 ```
 
-To use the interactive TUI instead (or alongside):
+## Running as a Daemon
+
+For long-running deployment on macOS (launchd) or Linux (systemd):
 
 ```bash
-uv run deepclaw-tui
+uv run deepclaw service install   # install the service file
+uv run deepclaw service status    # check status
+uv run deepclaw service uninstall # remove it
 ```
 
-Both share the same `~/.deepagents/` workspace, so memory and skills persist across interfaces.
+Logs are written to `~/.deepclaw/logs/`.
+
+## SOUL.md — Agent Personality
+
+DeepClaw loads `~/.deepclaw/SOUL.md` to define your agent's personality. A default is seeded on first run. Edit it to make the agent yours:
+
+```bash
+$EDITOR ~/.deepclaw/SOUL.md
+```
+
+The default personality is direct, concise, and warm with a dry sense of humor — it matches your energy, shares opinions, and avoids filler. Change it to whatever you want: formal, playful, terse, verbose, domain-specific.
+
+## Memory
+
+DeepClaw has persistent memory via `~/.deepclaw/AGENTS.md`. The agent learns from your interactions — preferences, corrections, project context, workflow patterns — and writes observations back to this file.
+
+Memory loads into the system prompt at session start and persists across conversations. The agent decides what's worth remembering (user preferences yes, small talk no, credentials never).
+
+```bash
+cat ~/.deepclaw/AGENTS.md    # see what it's learned
+$EDITOR ~/.deepclaw/AGENTS.md # edit or clear it
+```
+
+## Skills
+
+Skills are specialized workflows the agent discovers and uses when relevant. Add a skill by creating a subdirectory with a SKILL.md:
+
+```
+~/.deepclaw/skills/
+└── web-research/
+    └── SKILL.md
+```
+
+SKILL.md format:
+
+```markdown
+---
+name: web-research
+description: Structured approach to conducting thorough web research
+---
+
+# Web Research Skill
+
+## When to Use
+- User asks you to research a topic
+...
+```
+
+The agent sees skill names and descriptions in its system prompt and reads the full content on demand.
+
+## Heartbeat
+
+DeepClaw can run periodic proactive checks via a `HEARTBEAT.md` checklist. The agent reviews the checklist on a schedule and **only notifies you when something needs attention** — silent when everything is OK.
+
+A default (commented-out) `HEARTBEAT.md` is seeded at `~/.deepclaw/HEARTBEAT.md`. Uncomment or add your own checks:
+
+```markdown
+# Heartbeat Checklist
+- Check if any git repos in ~/projects have uncommitted changes
+- Check disk usage and warn if any partition is above 90%
+```
+
+Enable in `~/.deepclaw/config.yaml` (see [Configuration](#configuration)).
+
+## Cron Scheduler
+
+Schedule agent prompts to run automatically and deliver results to Telegram:
+
+```
+/cron_add 0 9 * * * | Summarize my todo list and calendar for today
+/cron_add */30 * * * * | Check if the staging deploy succeeded
+```
+
+Jobs are stored in `~/.deepclaw/cron/jobs.json` and managed via Telegram commands.
+
+## Telegram Commands
+
+| Command | Description |
+|---|---|
+| `/start` | Welcome message and pairing instructions |
+| `/pair <code>` | Pair with the bot using the code from the server terminal |
+| `/new` | Start a fresh conversation thread |
+| `/status` | Show current thread ID, model, and allowlist info |
+| `/help` | List available commands |
+| `/cron` | List all scheduled jobs |
+| `/cron_add <expr> \| <prompt>` | Add a scheduled job |
+| `/cron_rm <id_prefix>` | Remove a scheduled job by ID prefix |
+| `/safety_test <cmd>` | Check a shell command for dangerous patterns |
+| `/doctor` | Run system diagnostics |
 
 ## Configuration
 
@@ -41,7 +174,7 @@ DeepClaw loads configuration from three layers (highest precedence first):
 | `ANTHROPIC_API_KEY` | Yes* | Anthropic API key (default provider) |
 | `OPENAI_API_KEY` | No | OpenAI API key (if using OpenAI models) |
 | `DEEPCLAW_MODEL` | No | Model override, e.g. `openai:gpt-4o` (defaults to `claude-sonnet-4-6`) |
-| `DEEPCLAW_ALLOWED_USERS` | No | Comma-separated list of Telegram user IDs or usernames for access control |
+| `DEEPCLAW_ALLOWED_USERS` | No | Comma-separated Telegram user IDs or usernames for access control |
 | `TAVILY_API_KEY` | No | Tavily API key for web search and extract tools |
 
 *Or whichever provider API key matches your chosen model.
@@ -60,102 +193,34 @@ telegram:
     enabled: true
     edit_interval: 1.0
     buffer_threshold: 100
+heartbeat:
+  enabled: true
+  interval_minutes: 30
+  notify_chat_id: "123456789"
+  quiet_hours_start: 23
+  quiet_hours_end: 8
+  timezone: "America/Los_Angeles"
+  max_failures: 3
 workspace:
   root: "~/.deepclaw/workspace"
 ```
 
-## How It Works
+## Safety
 
-DeepClaw wires a DeepAgents agent to Telegram via long-polling. Each Telegram chat gets its own persistent conversation thread (using `chat_id` as the LangGraph `thread_id`), backed by SQLite checkpointing at `~/.deepagents/checkpoints.db`.
+DeepClaw includes a layered safety system that gates tool execution:
 
-The agent has full DeepAgents capabilities out of the box:
-- File operations (read, write, edit, glob, grep)
-- Shell command execution
-- Task planning (write_todos)
-- Sub-agent spawning
-- Context compression when conversations get long
-- Skills and memory (AGENTS.md / SKILL.md)
+- **Shell command gating** — every command is checked against 34+ dangerous patterns. Critical commands (`rm -rf`, `mkfs`, `dd`, `DROP TABLE`, fork bombs) are **hard-blocked**. Warning-level commands (`git push --force`, `chmod -R`) trigger a **human-in-the-loop** approval via Telegram.
+- **Write path deny list** — blocks writes to sensitive paths: `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, shell configs, system files.
+- **SSRF protection** — URL fetches are validated against private/internal network ranges. DNS failures are fail-closed.
+- **Credential redaction** — tool output is scanned for secret patterns (API keys, tokens, passwords) and redacted before reaching the LLM or Telegram.
+- **Environment scrubbing** — child processes receive a filtered environment. Variables containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, etc. are stripped.
+- **Access control** — bot is locked by default. Users must pair via a one-time code before the agent responds.
 
-## SOUL.md — Agent Identity
-
-DeepClaw loads a `SOUL.md` file from `~/.deepclaw/SOUL.md` to define the agent's personality, communication style, and working behavior. This is prepended to the system prompt on every conversation.
-
-A default SOUL.md is seeded on first run. Edit it to customize your agent's voice:
-
-```bash
-$EDITOR ~/.deepclaw/SOUL.md
-```
-
-## Memory
-
-DeepClaw has persistent memory via `~/.deepclaw/AGENTS.md`. The agent learns from your interactions and writes observations back to this file — preferences, corrections, project context, workflow patterns.
-
-Memory is loaded into the system prompt at session start and persists across conversations. The agent decides what's worth remembering based on built-in guidelines (e.g., user preferences yes, transient small talk no, credentials never).
-
-You can view or edit it directly:
-
-```bash
-cat ~/.deepclaw/AGENTS.md
-$EDITOR ~/.deepclaw/AGENTS.md
-```
-
-## Skills
-
-DeepClaw supports skills via SKILL.md files in `~/.deepclaw/skills/`. Skills are specialized workflows the agent discovers and uses when relevant.
-
-To add a skill, create a subdirectory with a SKILL.md:
-
-```
-~/.deepclaw/skills/
-└── web-research/
-    └── SKILL.md
-```
-
-SKILL.md format:
-```markdown
----
-name: web-research
-description: Structured approach to conducting thorough web research
----
-
-# Web Research Skill
-
-## When to Use
-- User asks you to research a topic
-...
-```
-
-The agent sees skill names and descriptions in its system prompt, and reads the full SKILL.md content on demand (progressive disclosure).
-
-## Heartbeat
-
-DeepClaw can run periodic proactive checks via a `HEARTBEAT.md` checklist. The agent reviews the checklist on a schedule and **only notifies you when something needs attention** — silent when everything is OK.
-
-A default (commented-out) `HEARTBEAT.md` is seeded at `~/.deepclaw/HEARTBEAT.md`. Uncomment or add your own checks:
-
-```markdown
-# Heartbeat Checklist
-- Check if any git repos in ~/projects have uncommitted changes
-- Check disk usage and warn if any partition is above 90%
-- Review and tidy up MEMORY.md if it's getting long
-```
-
-Enable and configure in `~/.deepclaw/config.yaml`:
-
-```yaml
-heartbeat:
-  enabled: true
-  interval_minutes: 30
-  notify_chat_id: "123456789"   # Telegram chat ID for notifications
-  quiet_hours_start: 23          # Don't check 11 PM - 8 AM
-  quiet_hours_end: 8
-  timezone: "America/Los_Angeles"
-  max_failures: 3                # Auto-disable after 3 consecutive errors
-```
+This is defense-in-depth, not a sandbox. The safety patterns catch common dangerous commands but cannot prevent all possible destructive actions (e.g., a Python script calling `shutil.rmtree`). Run DeepClaw in an environment you're comfortable giving an AI agent access to.
 
 ## Tool Plugins
 
-DeepClaw uses a plugin system for optional tools. Each plugin in `deepclaw/tools/` is auto-discovered at startup. A plugin loads only if its dependencies are installed and required env vars are set.
+DeepClaw auto-discovers tool plugins from `deepclaw/tools/` at startup. A plugin loads only if its dependencies are installed and required env vars are set.
 
 | Plugin | Install | Env Var | Tools |
 |---|---|---|---|
@@ -165,50 +230,9 @@ To add a new tool plugin, create a module in `deepclaw/tools/` that exports:
 - `available() -> bool` — checks if deps and env vars are present
 - `get_tools() -> list` — returns tool callables
 
-## Telegram Commands
+## Diagnostics
 
-| Command | Description |
-|---|---|
-| `/start` | Welcome message |
-| `/new` | Start a fresh conversation thread |
-| `/status` | Show current thread ID, model, and allowlist status |
-| `/help` | List available commands |
-| `/cron` | List all scheduled cron jobs |
-| `/cron_add <expr> \| <prompt>` | Add a scheduled job, e.g. `/cron_add 0 9 * * * \| Summarize my todo list` |
-| `/cron_rm <id_prefix>` | Remove a scheduled job by ID prefix |
-| `/safety_test <cmd>` | Check a shell command for dangerous patterns |
-
-## Safety
-
-DeepClaw includes a layered safety system that actively gates tool execution via `SafetyMiddleware`:
-
-- **Shell command gating** — every `execute` tool call is checked against 34+ dangerous patterns across 14 categories. Critical severity commands (`rm -rf`, `mkfs`, `dd`, `DROP TABLE`, fork bombs, piped remote execution) are **hard-blocked**. Warning severity commands (`git push --force`, `chmod -R`, `bash -c`) trigger a **human-in-the-loop interrupt** for approval via Telegram.
-- **Write path deny list** — `write_file` and `edit_file` calls are blocked for sensitive paths: `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.kube/`, shell configs (`~/.bashrc`, `~/.zshrc`), and system files (`/etc/passwd`, `/etc/shadow`, `/etc/sudoers`).
-- **SSRF protection** — URL fetches are validated against private/internal network ranges (RFC 1918, loopback, link-local, CGNAT, cloud metadata endpoints). DNS failures are fail-closed.
-- **Credential redaction** — tool output is scanned for 11 secret patterns (GitHub PATs, AWS keys, Slack tokens, OpenAI/Anthropic keys, Bearer tokens, generic `api_key=` assignments) and redacted with `[REDACTED]` before being sent to the LLM or streamed to Telegram.
-- **Environment variable scrubbing** — child processes spawned by the agent receive a filtered environment. Only safe variables (`PATH`, `HOME`, `LANG`, toolchain paths, etc.) pass through. Any variable whose name contains `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, or `PRIVATE` is stripped, preventing credential leakage via shell commands.
-- **Access control** — optional allowlist restricts bot usage to specific Telegram user IDs or usernames.
-
-## Cron Scheduler
-
-DeepClaw includes an in-process cron scheduler that runs agent prompts on a schedule and delivers results to Telegram. Jobs are stored in `~/.deepclaw/cron/jobs.json` and can be managed via the `/cron`, `/cron_add`, and `/cron_rm` Telegram commands.
-
-## Daemon Deployment
-
-Run DeepClaw as a background service on macOS (launchd) or Linux (systemd):
-
-```bash
-# Install the service file
-deepclaw service install
-
-# Check status
-deepclaw service status
-
-# Uninstall
-deepclaw service uninstall
-```
-
-Logs are written to `~/.deepclaw/logs/`.
+Run `uv run deepclaw doctor` to check your setup — config files, API keys, workspace, checkpointer, service installation, and more.
 
 ## Project Structure
 
@@ -216,29 +240,31 @@ Logs are written to `~/.deepclaw/logs/`.
 deepclaw/
   pyproject.toml        # Dependencies and entry points
   deepclaw/
-    __init__.py
-    bot.py              # Telegram bot with streaming responses
+    cli.py              # CLI entry point (bot, doctor, service)
+    agent.py            # Agent factory, SOUL/memory/skills setup
     config.py           # Layered config loader (env > .env > yaml)
-    safety.py           # Dangerous command detection, path deny list, credential redaction, SSRF protection
-    middleware.py       # SafetyMiddleware — gates tool calls through safety checks
-    tools/
-      __init__.py       # Plugin discovery (discover_tools)
-      web_search.py     # Tavily web search + extract plugin
-    scheduler.py        # Application-level cron scheduler
+    gateway.py          # Shared message handler with streaming
+    channels/
+      base.py           # Abstract Channel interface
+      telegram.py       # Telegram bot with streaming responses
+    safety.py           # Command detection, SSRF, credential redaction
+    middleware.py       # SafetyMiddleware — gates tool calls
+    auth.py             # User pairing and allowlist
+    scheduler.py        # Cron scheduler
+    heartbeat.py        # Periodic proactive monitoring
     service.py          # systemd/launchd service management
+    doctor.py           # Diagnostic health checks
+    tools/
+      __init__.py       # Plugin discovery
+      web_search.py     # Tavily web search + extract
+      cron.py           # Cron management tools
   tests/
-    test_bot.py
-    test_config.py
-    test_safety.py
-    test_middleware.py
-    test_scheduler.py
-    test_service.py
-  docs/
-    DESIGN_DEEPCLAW.md  # Full design document
 ```
 
 ## Roadmap
 
-See [docs/DESIGN_DEEPCLAW.md](docs/DESIGN_DEEPCLAW.md) for the full design. Next up:
-
-- **Post-MVP** — Discord, Slack, Signal, webhooks, smart routing, skills guard, RL training, and more
+- Discord, Slack, and more channels
+- Image and document handling
+- File sending back to chat
+- Smart model routing
+- Hybrid memory search
