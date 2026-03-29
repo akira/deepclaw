@@ -307,6 +307,29 @@ class TestSchedulerTick:
         assert updated[0].last_run is not None
         assert updated[0].last_run != past
 
+    @pytest.mark.asyncio
+    async def test_tick_redacts_secrets_before_delivery(self, tmp_path):
+        f = tmp_path / "jobs.json"
+        past = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+        job = _make_job(cron_expr="* * * * *", last_run=past)
+        save_jobs([job], f)
+
+        secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content=secret)]})
+        channel = AsyncMock()
+        channel.name = "telegram"
+
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
+        await scheduler.tick()
+
+        channel.send.assert_called_once()
+        delivered = channel.send.call_args.args[1]
+        assert secret not in delivered
+        assert "[REDACTED]" in delivered
+
 
 # ---------------------------------------------------------------------------
 # list_jobs

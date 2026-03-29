@@ -13,6 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from deepclaw.config import CONFIG_DIR, HeartbeatConfig
+from deepclaw.safety import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,7 @@ class HeartbeatRunner:
             else:
                 response = str(content)
 
+            response = redact_secrets(response)
             self._consecutive_failures = 0
         except Exception:
             self._consecutive_failures += 1

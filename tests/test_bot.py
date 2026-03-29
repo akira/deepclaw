@@ -1,9 +1,10 @@
-"""Tests for deepclaw bot modules (auth, channels.telegram)."""
+"""Tests for deepclaw bot modules (auth, channels.telegram, gateway)."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
@@ -11,7 +12,7 @@ from deepclaw.channels.telegram import (
     THREAD_IDS_KEY,
     get_thread_id,
 )
-from deepclaw.gateway import chunk_message
+from deepclaw.gateway import CURSOR_INDICATOR, Gateway, chunk_message
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -135,3 +136,96 @@ class TestIsUserAllowed:
     def test_user_without_username_rejected(self):
         update = _make_update(user_id=1, username=None)
         assert is_user_allowed(update, {"alice"}) is False
+
+
+class _FakeStreamingChannel:
+    def __init__(self):
+        self.sent: list[tuple[str, str]] = []
+        self.edits: list[tuple[str, str, str]] = []
+
+    @property
+    def name(self) -> str:
+        return "telegram"
+
+    @property
+    def message_limit(self) -> int:
+        return TELEGRAM_MESSAGE_LIMIT
+
+    async def send_typing(self, chat_id: str) -> None:
+        return None
+
+    async def send(self, chat_id: str, text: str) -> str:
+        self.sent.append((chat_id, text))
+        return "msg-1"
+
+    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        self.edits.append((chat_id, message_id, text))
+
+
+class _FakeStreamingAgent:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def astream(self, *_args, **_kwargs):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class TestGatewayRedaction:
+    @pytest.mark.asyncio
+    async def test_streaming_redacts_before_edit_and_final_send(self):
+        secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        agent = _FakeStreamingAgent(
+            [
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": secret}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="show secret")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert channel.sent == [("123", "Thinking...")]
+        assert channel.edits
+        assert all(secret not in text for _, _, text in channel.edits)
+        assert any("[REDACTED]" in text for _, _, text in channel.edits)
+
+    @pytest.mark.asyncio
+    async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):
+        secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {"type": "tool_call", "name": "read_file", "args": {"token": secret}},
+                            {"type": "text", "text": "done"},
+                        ]
+                    ),
+                    {},
+                ),
+                (
+                    ToolMessage(content=f"token={secret}", name="read_file", tool_call_id="call-1"),
+                    {},
+                ),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="show secret")
+        logged_messages: list[str] = []
+
+        def _capture_log(msg, *args, **_kwargs):
+            logged_messages.append(msg % args if args else msg)
+
+        monkeypatch.setattr("deepclaw.gateway.logger.info", _capture_log)
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert logged_messages
+        assert all(secret not in entry for entry in logged_messages)
+        assert any("[REDACTED]" in entry for entry in logged_messages if "Tool" in entry)
+        assert all(CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits)

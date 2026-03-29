@@ -43,6 +43,16 @@ class Gateway:
         self.agent = agent
         self.streaming_config = streaming_config
 
+    async def _edit_redacted_message(
+        self, channel: Channel, chat_id: str, message_id: str, text: str
+    ) -> None:
+        """Redact secrets before editing a streamed message."""
+        await channel.edit_message(chat_id, message_id, redact_secrets(text))
+
+    async def _send_redacted_message(self, channel: Channel, chat_id: str, text: str) -> str:
+        """Redact secrets before sending a message."""
+        return await channel.send(chat_id, redact_secrets(text))
+
     async def handle_message(
         self, channel: Channel, message: IncomingMessage, thread_id: str
     ) -> None:
@@ -59,7 +69,7 @@ class Gateway:
 
         await channel.send_typing(message.chat_id)
 
-        msg_id = await channel.send(message.chat_id, THINKING_MESSAGE)
+        msg_id = await self._send_redacted_message(channel, message.chat_id, THINKING_MESSAGE)
 
         accumulated = ""
         last_edit_time = time.monotonic()
@@ -81,7 +91,7 @@ class Gateway:
                 if isinstance(message_obj, ToolMessage):
                     tool_name = getattr(message_obj, "name", "unknown")
                     content = message_obj.content
-                    preview = str(content)[:200] if content else "(empty)"
+                    preview = redact_secrets(str(content)[:200]) if content else "(empty)"
                     logger.info("Tool result [%s]: %s", tool_name, preview)
                     continue
 
@@ -98,7 +108,9 @@ class Gateway:
                         tool_name = block.get("name")
                         if tool_name:
                             tool_args = block.get("args", {})
-                            args_preview = str(tool_args)[:200] if tool_args else ""
+                            args_preview = (
+                                redact_secrets(str(tool_args)[:200]) if tool_args else ""
+                            )
                             logger.info("Tool call [%s]: %s", tool_name, args_preview)
                             tool_line = f"\n\U0001f527 {tool_name}\n"
                             accumulated += tool_line
@@ -121,7 +133,9 @@ class Gateway:
                     ):
                         display = accumulated + CURSOR_INDICATOR
                         if len(display) <= limit:
-                            await channel.edit_message(message.chat_id, msg_id, display)
+                            await self._edit_redacted_message(
+                                channel, message.chat_id, msg_id, display
+                            )
                         last_edit_time = time.monotonic()
                         chars_since_edit = 0
         except Exception:
@@ -133,6 +147,6 @@ class Gateway:
 
         # Final delivery: send complete text (possibly chunked)
         chunks = chunk_message(response_text, limit)
-        await channel.edit_message(message.chat_id, msg_id, chunks[0])
+        await self._edit_redacted_message(channel, message.chat_id, msg_id, chunks[0])
         for extra_chunk in chunks[1:]:
-            await channel.send(message.chat_id, extra_chunk)
+            await self._send_redacted_message(channel, message.chat_id, extra_chunk)

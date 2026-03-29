@@ -228,9 +228,7 @@ class TestHeartbeatRunner:
 
     @pytest.mark.asyncio
     async def test_tick_findings_sends_notification(self, runner):
-        runner._agent.ainvoke.return_value = {
-            "messages": [MagicMock(content="Disk usage at 95% on /dev/sda1")]
-        }
+        runner._agent.ainvoke.return_value = {"messages": [MagicMock(content="Disk usage at 95% on /dev/sda1")]}
         with (
             patch("deepclaw.heartbeat._load_checklist", return_value="- Check disk usage"),
             patch("deepclaw.heartbeat.is_quiet_hours", return_value=False),
@@ -242,6 +240,21 @@ class TestHeartbeatRunner:
         call_args = runner._channels["telegram"].send.call_args
         assert "12345" in call_args.args
         assert "Disk usage" in call_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_tick_findings_redacts_secrets_before_notification(self, runner):
+        secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        runner._agent.ainvoke.return_value = {"messages": [MagicMock(content=f"Leaked token: {secret}")]}
+        with (
+            patch("deepclaw.heartbeat._load_checklist", return_value="- Check tokens"),
+            patch("deepclaw.heartbeat.is_quiet_hours", return_value=False),
+        ):
+            await runner._tick()
+
+        runner._channels["telegram"].send.assert_awaited_once()
+        delivered = runner._channels["telegram"].send.call_args.args[1]
+        assert secret not in delivered
+        assert "[REDACTED]" in delivered
 
     @pytest.mark.asyncio
     async def test_tick_agent_failure_increments_counter(self, runner):

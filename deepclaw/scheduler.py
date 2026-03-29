@@ -16,6 +16,8 @@ from typing import TypedDict
 
 from croniter import croniter
 
+from deepclaw.safety import redact_secrets
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_JOBS_PATH = Path("~/.deepclaw/cron/jobs.json").expanduser()
@@ -212,6 +214,8 @@ class Scheduler:
         except Exception:
             logger.exception("Cron job %s (%s) agent invocation failed", job.name, job.id)
             response = f"Cron job '{job.name}' failed to execute."
+
+        response = redact_secrets(str(response))
 
         channel_name = job.delivery.get("channel", "")
         chat_id = job.delivery.get("chat_id", "")
