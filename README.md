@@ -180,15 +180,27 @@ The main agent decides when to delegate based on the task. You don't need to spe
 
 DeepClaw can run periodic proactive checks via a `HEARTBEAT.md` checklist. The agent reviews the checklist on a schedule and **only notifies you when something needs attention** — silent when everything is OK.
 
-A default (commented-out) `HEARTBEAT.md` is seeded at `~/.deepclaw/HEARTBEAT.md`. Uncomment or add your own checks:
+Heartbeat requires **two things** to work:
+
+**1. Add checklist items** to `~/.deepclaw/HEARTBEAT.md` (the default seed is all comments — nothing runs until you add real items):
 
 ```markdown
 # Heartbeat Checklist
 - Check if any git repos in ~/projects have uncommitted changes
 - Check disk usage and warn if any partition is above 90%
+- Review and tidy up AGENTS.md if it's getting long
 ```
 
-Enable in `~/.deepclaw/config.yaml` (see [Configuration](#configuration)).
+**2. Enable it** in `~/.deepclaw/config.yaml` (disabled by default):
+
+```yaml
+heartbeat:
+  enabled: true
+  interval_minutes: 30
+  notify_chat_id: "123456789"   # your Telegram chat ID (check /status)
+```
+
+If the checklist is empty (only comments/headers), heartbeat skips the LLM call to save costs — even when enabled.
 
 ## Cron Scheduler
 
