@@ -405,6 +405,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message or not update.message.text:
         return
 
+    # Block group chats by default — bot has filesystem/shell access
+    chat = update.effective_chat
+    if chat and chat.type != "private":
+        logger.debug("Ignoring non-private chat %s (type=%s)", chat.id, chat.type)
+        return
+
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
