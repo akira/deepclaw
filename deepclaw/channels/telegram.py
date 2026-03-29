@@ -55,6 +55,16 @@ GATEWAY_KEY = "gateway"
 _STREAM_MESSAGES: dict[str, dict[str, object]] = {}
 
 
+def authorize_chat(update: Update) -> bool:
+    """Return True if the chat is authorized for bot interaction.
+
+    Currently restricts to private (DM) chats only. Group support
+    can be added here later via allowlisted chat IDs.
+    """
+    chat = update.effective_chat
+    return chat is not None and chat.type == "private"
+
+
 def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
     """Return the current thread_id for a chat, defaulting to the chat_id itself."""
     thread_ids: dict[str, str] = context.bot_data.setdefault(THREAD_IDS_KEY, {})
@@ -63,6 +73,8 @@ def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /new -- start a fresh conversation thread."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -75,6 +87,8 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help -- list available commands."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -96,6 +110,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status -- show current thread ID and model info."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -114,6 +130,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start -- Telegram's default start command."""
+    if not authorize_chat(update):
+        return
     allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
     if is_user_allowed(update, allowed_users):
         await update.message.reply_text(
@@ -129,6 +147,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /pair <code> -- pair a new user with the bot."""
+    if not authorize_chat(update):
+        return
     user = update.effective_user
     if user is None:
         return
@@ -178,6 +198,8 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_cron(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cron -- list all cron jobs."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -195,6 +217,8 @@ async def cmd_cron(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cron_add <cron_expr> | <prompt>."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -227,6 +251,8 @@ async def cmd_cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cron_rm <job_id_prefix>."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -258,6 +284,8 @@ async def cmd_cron_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cmd_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /doctor -- run diagnostic checks and report results."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -273,6 +301,8 @@ async def cmd_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_safety_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /safety_test <command> -- check a command for dangerous patterns."""
+    if not authorize_chat(update):
+        return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
@@ -405,10 +435,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message or not update.message.text:
         return
 
-    # Block group chats by default — bot has filesystem/shell access
-    chat = update.effective_chat
-    if chat and chat.type != "private":
-        logger.debug("Ignoring non-private chat %s (type=%s)", chat.id, chat.type)
+    if not authorize_chat(update):
         return
 
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):

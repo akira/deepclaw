@@ -228,7 +228,9 @@ class TestHeartbeatRunner:
 
     @pytest.mark.asyncio
     async def test_tick_findings_sends_notification(self, runner):
-        runner._agent.ainvoke.return_value = {"messages": [MagicMock(content="Disk usage at 95% on /dev/sda1")]}
+        runner._agent.ainvoke.return_value = {
+            "messages": [MagicMock(content="Disk usage at 95% on /dev/sda1")]
+        }
         with (
             patch("deepclaw.heartbeat._load_checklist", return_value="- Check disk usage"),
             patch("deepclaw.heartbeat.is_quiet_hours", return_value=False),
@@ -244,7 +246,9 @@ class TestHeartbeatRunner:
     @pytest.mark.asyncio
     async def test_tick_findings_redacts_secrets_before_notification(self, runner):
         secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
-        runner._agent.ainvoke.return_value = {"messages": [MagicMock(content=f"Leaked token: {secret}")]}
+        runner._agent.ainvoke.return_value = {
+            "messages": [MagicMock(content=f"Leaked token: {secret}")]
+        }
         with (
             patch("deepclaw.heartbeat._load_checklist", return_value="- Check tokens"),
             patch("deepclaw.heartbeat.is_quiet_hours", return_value=False),

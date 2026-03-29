@@ -10,6 +10,7 @@ from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
+    authorize_chat,
     get_thread_id,
 )
 from deepclaw.gateway import CURSOR_INDICATOR, Gateway, chunk_message
@@ -138,6 +139,41 @@ class TestIsUserAllowed:
         assert is_user_allowed(update, {"alice"}) is False
 
 
+# ---------------------------------------------------------------------------
+# authorize_chat — private chat enforcement
+# ---------------------------------------------------------------------------
+
+
+def _make_update_with_chat(chat_type: str, user_id: int = 1):
+    """Build a mock Update with effective_chat.type set."""
+    update = _make_update(user_id=user_id)
+    update.effective_chat = SimpleNamespace(id=123, type=chat_type)
+    return update
+
+
+class TestAuthorizeChat:
+    def test_private_chat_allowed(self):
+        update = _make_update_with_chat("private")
+        assert authorize_chat(update) is True
+
+    def test_group_chat_rejected(self):
+        update = _make_update_with_chat("group")
+        assert authorize_chat(update) is False
+
+    def test_supergroup_chat_rejected(self):
+        update = _make_update_with_chat("supergroup")
+        assert authorize_chat(update) is False
+
+    def test_channel_rejected(self):
+        update = _make_update_with_chat("channel")
+        assert authorize_chat(update) is False
+
+    def test_no_effective_chat(self):
+        update = MagicMock()
+        update.effective_chat = None
+        assert authorize_chat(update) is False
+
+
 class _FakeStreamingChannel:
     def __init__(self):
         self.sent: list[tuple[str, str]] = []
@@ -228,4 +264,6 @@ class TestGatewayRedaction:
         assert logged_messages
         assert all(secret not in entry for entry in logged_messages)
         assert any("[REDACTED]" in entry for entry in logged_messages if "Tool" in entry)
-        assert all(CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits)
+        assert all(
+            CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits
+        )

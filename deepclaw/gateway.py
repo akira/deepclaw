@@ -108,9 +108,7 @@ class Gateway:
                         tool_name = block.get("name")
                         if tool_name:
                             tool_args = block.get("args", {})
-                            args_preview = (
-                                redact_secrets(str(tool_args)[:200]) if tool_args else ""
-                            )
+                            args_preview = redact_secrets(str(tool_args)[:200]) if tool_args else ""
                             logger.info("Tool call [%s]: %s", tool_name, args_preview)
                             tool_line = f"\n\U0001f527 {tool_name}\n"
                             accumulated += tool_line
