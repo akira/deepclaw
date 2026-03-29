@@ -58,6 +58,7 @@ class DeepClawConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     workspace_root: str = "~/.deepclaw/workspace"
+    command_timeout: int = 300  # seconds, default 5 minutes
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -106,10 +107,47 @@ def _resolve(env_name: str, dot_env: dict[str, str], yaml_value: str | None) -> 
     return None
 
 
+DEFAULT_CONFIG_YAML = """\
+# DeepClaw configuration
+# Docs: https://github.com/akira/deepclaw#configuration
+
+# Model — use provider:model format (default: anthropic:claude-sonnet-4-6)
+# model: "openai:gpt-4o"
+
+# Shell command timeout in seconds (default: 300 = 5 minutes)
+# command_timeout: 300
+
+# Telegram settings
+# telegram:
+#   allowed_users:
+#     - "123456789"      # your Telegram user ID
+#   streaming:
+#     edit_interval: 1.0
+#     buffer_threshold: 100
+
+# Heartbeat — periodic monitoring (disabled by default)
+# heartbeat:
+#   enabled: true
+#   interval_minutes: 30
+#   notify_chat_id: "123456789"  # check /status for your chat ID
+#   quiet_hours_start: 23
+#   quiet_hours_end: 8
+#   timezone: "America/Los_Angeles"
+"""
+
+
+def _seed_config() -> None:
+    """Create default config.yaml if it doesn't exist."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(DEFAULT_CONFIG_YAML, encoding="utf-8")
+        logger.info("Seeded default config.yaml at %s", CONFIG_FILE)
+
+
 def load_config() -> DeepClawConfig:
     """Load and merge configuration from all sources, returning a DeepClawConfig."""
-    # Ensure config directory exists
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # Ensure config directory exists and seed defaults
+    _seed_config()
 
     # Load .env
     dot_env = _parse_env_file(ENV_FILE)
@@ -184,11 +222,15 @@ def load_config() -> DeepClawConfig:
         notify_chat_id=str(yaml_heartbeat.get("notify_chat_id", "")),
     )
 
+    # Command timeout
+    command_timeout = int(yaml_data.get("command_timeout", DeepClawConfig.command_timeout))
+
     config = DeepClawConfig(
         model=model,
         telegram=telegram,
         heartbeat=heartbeat,
         workspace_root=str(workspace_root),
+        command_timeout=command_timeout,
     )
 
     logger.info(

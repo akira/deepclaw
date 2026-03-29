@@ -131,7 +131,7 @@ def _setup_auth() -> None:
 def create_agent(config, checkpointer):
     """Create a DeepAgents agent with the given config and checkpointer."""
     _setup_auth()
-    backend = LocalShellBackend(virtual_mode=False, env=scrub_env())
+    backend = LocalShellBackend(virtual_mode=False, env=scrub_env(), timeout=config.command_timeout)
 
     # Middleware stack
     middleware = []
