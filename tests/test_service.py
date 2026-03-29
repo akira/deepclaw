@@ -1,8 +1,10 @@
 """Tests for deepclaw.service module."""
 
+import os
 from unittest.mock import patch
 
 from deepclaw.service import (
+    _collect_env_vars,
     detect_platform,
     generate_service_file,
     get_service_path,
@@ -61,6 +63,20 @@ class TestGenerateServiceFile:
         assert "<key>StandardErrorPath</key>" in content
         assert "deepclaw" in content.lower()
 
+    @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-test"})
+    def test_macos_plist_inlines_env_vars(self):
+        content = generate_service_file("macos")
+        assert "<key>EnvironmentVariables</key>" in content
+        assert "<key>TELEGRAM_BOT_TOKEN</key>" in content
+        assert "<string>test-token</string>" in content
+        assert "<key>ANTHROPIC_API_KEY</key>" in content
+        assert "<string>sk-test</string>" in content
+
+    def test_macos_plist_no_env_block_when_empty(self):
+        with patch("deepclaw.service._collect_env_vars", return_value={}):
+            content = generate_service_file("macos")
+        assert "EnvironmentVariables" not in content
+
     def test_linux_systemd_content(self):
         content = generate_service_file("linux")
         assert "[Unit]" in content
@@ -72,6 +88,52 @@ class TestGenerateServiceFile:
         assert "PATH=" in content
         assert "ExecStart=" in content
         assert "deepclaw" in content.lower()
+
+    @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-test"})
+    def test_linux_systemd_inlines_env_vars(self):
+        content = generate_service_file("linux")
+        assert 'Environment=TELEGRAM_BOT_TOKEN="test-token"' in content
+        assert 'Environment=ANTHROPIC_API_KEY="sk-test"' in content
+
+    def test_linux_systemd_no_unknown_vars(self):
+        with patch.dict(os.environ, {"RANDOM_SECRET": "should-not-appear"}):
+            content = generate_service_file("linux")
+        assert "RANDOM_SECRET" not in content
+
+
+class TestCollectEnvVars:
+    @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "from-shell", "RANDOM_VAR": "ignored"})
+    def test_only_known_keys_from_shell(self):
+        with patch("deepclaw.service._parse_env_file", return_value={}):
+            result = _collect_env_vars()
+        assert "TELEGRAM_BOT_TOKEN" in result
+        assert result["TELEGRAM_BOT_TOKEN"] == "from-shell"
+        assert "RANDOM_VAR" not in result
+
+    def test_reads_from_env_file(self):
+        fake_env = {"ANTHROPIC_API_KEY": "from-file", "UNKNOWN_KEY": "ignored"}
+        with (
+            patch("deepclaw.service._parse_env_file", return_value=fake_env),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            result = _collect_env_vars()
+        assert result.get("ANTHROPIC_API_KEY") == "from-file"
+        assert "UNKNOWN_KEY" not in result
+
+    @patch.dict(os.environ, {"TAVILY_API_KEY": "shell-wins"})
+    def test_shell_overrides_env_file(self):
+        fake_env = {"TAVILY_API_KEY": "from-file"}
+        with patch("deepclaw.service._parse_env_file", return_value=fake_env):
+            result = _collect_env_vars()
+        assert result["TAVILY_API_KEY"] == "shell-wins"
+
+    def test_empty_when_nothing_set(self):
+        with (
+            patch("deepclaw.service._parse_env_file", return_value={}),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            result = _collect_env_vars()
+        assert result == {}
 
 
 class TestInstallService:
