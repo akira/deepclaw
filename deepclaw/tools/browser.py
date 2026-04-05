@@ -167,6 +167,7 @@ def available() -> bool:
     """True if playwright is installed."""
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -215,6 +216,7 @@ def _ensure_session(url: str | None = None) -> dict | None:
 
         if api_key and project_id:
             from browserbase import Browserbase
+
             bb = Browserbase(api_key=api_key)
             bb_session = bb.sessions.create(project_id=project_id)
             browser = pw.chromium.connect_over_cdp(bb_session.connect_url)
@@ -228,7 +230,13 @@ def _ensure_session(url: str | None = None) -> dict | None:
             data_extra = {"session_id": "local"}
 
         page = context.pages[0] if context.pages else context.new_page()
-        data = {"playwright": pw, "browser": browser, "context": context, "page": page, **data_extra}
+        data = {
+            "playwright": pw,
+            "browser": browser,
+            "context": context,
+            "page": page,
+            **data_extra,
+        }
         _set_session(data)
         return data
     except Exception as e:
@@ -294,13 +302,20 @@ def browser_navigate(url: str) -> dict[str, Any]:
     if not session.get("page"):
         session = _ensure_session(url)
         if not session:
-            return {"error": "Failed to start browser. Make sure playwright is installed: uv add playwright && playwright install chromium"}
+            return {
+                "error": "Failed to start browser. Make sure playwright is installed: uv add playwright && playwright install chromium"
+            }
 
     page = session["page"]
     try:
         response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
         time.sleep(1)
-        return {"success": True, "url": page.url, "title": page.title(), "status": response.status if response else None}
+        return {
+            "success": True,
+            "url": page.url,
+            "title": page.title(),
+            "status": response.status if response else None,
+        }
     except Exception as e:
         return {"error": str(e), "url": url}
 
@@ -328,7 +343,7 @@ def browser_snapshot(offset: int = 0, limit: int = 100) -> dict[str, Any]:
         nodes = result.get("nodes", [])
         total = len(nodes)
         limit = min(limit, 200)
-        page_nodes = nodes[offset:offset + limit]
+        page_nodes = nodes[offset : offset + limit]
 
         lines = []
         for n in page_nodes:
@@ -355,7 +370,9 @@ def browser_snapshot(offset: int = 0, limit: int = 100) -> dict[str, Any]:
             "showing": f"{offset}–{offset + len(page_nodes)} of {total}",
         }
         if offset + limit < total:
-            result_dict["hint"] = f"More elements available. Call browser_snapshot(offset={offset + limit}) to see next page."
+            result_dict["hint"] = (
+                f"More elements available. Call browser_snapshot(offset={offset + limit}) to see next page."
+            )
         return result_dict
     except Exception as e:
         return {"error": str(e)}
