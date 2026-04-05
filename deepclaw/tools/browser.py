@@ -153,11 +153,11 @@ def _get_env(key: str) -> str:
         return val
     env_file = Path("~/.deepclaw/.env").expanduser()
     if env_file.is_file():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("#") or "=" not in line:
+        for raw_line in env_file.read_text().splitlines():
+            stripped = raw_line.strip()
+            if stripped.startswith("#") or "=" not in stripped:
                 continue
-            k, _, v = line.partition("=")
+            k, _, v = stripped.partition("=")
             if k.strip() == key:
                 return v.strip().strip('"').strip("'")
     return ""
@@ -266,8 +266,8 @@ def _locate_ref(page, ref: str):
     ref_clean = ref.lstrip("@e").lstrip("e")
     try:
         ref_num = int(ref_clean)
-    except ValueError:
-        raise ValueError(f"Invalid ref: {ref!r} — use format like 'e5' or '@e5'")
+    except ValueError as err:
+        raise ValueError(f"Invalid ref: {ref!r} — use format like 'e5' or '@e5'") from err
 
     selector = page.evaluate(_FIND_REF_JS, ref_num)
     if not selector:
