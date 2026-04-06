@@ -1,3 +1,6 @@
+# Beads task tracker
+.beads/
+
 # Python
 __pycache__/
 *.py[cod]

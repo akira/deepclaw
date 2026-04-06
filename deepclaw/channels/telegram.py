@@ -5,7 +5,9 @@ Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
+import time
 import uuid
+from pathlib import Path
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -49,6 +51,14 @@ SCHEDULER_KEY = "scheduler"
 HEARTBEAT_KEY = "heartbeat_runner"
 JOBS_PATH_KEY = "jobs_path"
 GATEWAY_KEY = "gateway"
+LAST_MESSAGE_KEY = "last_user_message"
+MODEL_OVERRIDE_KEY = "model_override"
+
+# Bot start time for /uptime
+_BOT_START_TIME: float = time.time()
+
+# Workspace root for /memory and /soul
+_WORKSPACE_ROOT = Path("~/.deepclaw/workspace").expanduser()
 
 # Map of chat_id -> dict of msg_id -> telegram Message object
 # Used to translate string message IDs back to editable message objects.
@@ -96,6 +106,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Available commands:\n"
         "/new \u2014 Start a fresh conversation thread\n"
+        "/clear \u2014 Clear conversation (alias for /new)\n"
+        "/retry \u2014 Re-send the last message\n"
+        "/model [name] \u2014 View or set the active model\n"
+        "/memory \u2014 Show MEMORY.md\n"
+        "/soul \u2014 Show SOUL.md\n"
+        "/uptime \u2014 Show bot uptime\n"
         "/status \u2014 Show current thread ID and model info\n"
         "/safety_test <cmd> \u2014 Check a command for dangerous patterns\n"
         "/cron \u2014 List scheduled jobs\n"
@@ -194,6 +210,121 @@ async def cmd_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Paired successfully! You now have full access to DeepClaw.\n"
         "Type /help to see available commands."
     )
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /clear -- start a fresh conversation thread."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    new_thread = str(uuid.uuid4())
+    context.bot_data.setdefault(THREAD_IDS_KEY, {})[chat_id] = new_thread
+    context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
+    logger.info("Cleared thread for chat %s: %s", chat_id, new_thread)
+    await update.message.reply_text("Conversation cleared.")
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /model [name] -- view or set the active model."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    raw = update.message.text
+    parts = raw.split(maxsplit=1)
+    model_arg = parts[1].strip() if len(parts) > 1 else ""
+    if model_arg:
+        context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
+        await update.message.reply_text(
+            f"Model override set to: {model_arg}\nUse /new or /clear to start a fresh thread."
+        )
+    else:
+        override = context.bot_data.get(MODEL_OVERRIDE_KEY)
+        config_model = context.bot_data[CONFIG_KEY].model or "not set"
+        if override:
+            await update.message.reply_text(
+                f"Active model override: {override}\nConfig default: {config_model}"
+            )
+        else:
+            await update.message.reply_text(f"Current model: {config_model} (no override set)")
+
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /memory -- display MEMORY.md from the workspace."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    memory_path = _WORKSPACE_ROOT / "MEMORY.md"
+    if not memory_path.is_file():
+        await update.message.reply_text("No memory file found.")
+        return
+    text = memory_path.read_text(encoding="utf-8").strip() or "(empty)"
+    for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+        await update.message.reply_text(chunk)
+
+
+async def cmd_soul(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /soul -- display SOUL.md from the workspace."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    soul_path = _WORKSPACE_ROOT / "SOUL.md"
+    if not soul_path.is_file():
+        await update.message.reply_text("No SOUL.md found.")
+        return
+    text = soul_path.read_text(encoding="utf-8").strip() or "(empty)"
+    for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+        await update.message.reply_text(chunk)
+
+
+async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /retry -- re-send the last user message."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    last_messages: dict[str, str] = context.bot_data.get(LAST_MESSAGE_KEY, {})
+    last_text = last_messages.get(chat_id)
+    if not last_text:
+        await update.message.reply_text("No previous message to retry.")
+        return
+    thread_id = get_thread_id(context, chat_id)
+    incoming = IncomingMessage(
+        text=last_text,
+        chat_id=chat_id,
+        user_id=str(update.effective_user.id) if update.effective_user else "",
+        username=update.effective_user.username if update.effective_user else None,
+        source="telegram",
+    )
+    channel = TelegramChannel(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
+    try:
+        await gateway.handle_message(channel, incoming, thread_id)
+    finally:
+        _STREAM_MESSAGES.pop(chat_id, None)
+
+
+async def cmd_uptime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /uptime -- show how long the bot has been running."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    elapsed = int(time.time() - _BOT_START_TIME)
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    await update.message.reply_text(f"Uptime: {hours}h {minutes}m {seconds}s")
 
 
 async def cmd_cron(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -447,6 +578,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     thread_id = get_thread_id(context, chat_id)
 
+    # Track last message per chat for /retry
+    context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
+
     incoming = IncomingMessage(
         text=user_text,
         chat_id=chat_id,
@@ -562,6 +696,12 @@ def run_telegram(config) -> None:
 
     application.add_handler(CommandHandler("pair", cmd_pair))
     application.add_handler(CommandHandler("new", cmd_new))
+    application.add_handler(CommandHandler("clear", cmd_clear))
+    application.add_handler(CommandHandler("retry", cmd_retry))
+    application.add_handler(CommandHandler("model", cmd_model))
+    application.add_handler(CommandHandler("memory", cmd_memory))
+    application.add_handler(CommandHandler("soul", cmd_soul))
+    application.add_handler(CommandHandler("uptime", cmd_uptime))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("start", cmd_start))

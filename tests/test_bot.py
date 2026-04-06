@@ -1,16 +1,26 @@
 """Tests for deepclaw bot modules (auth, channels.telegram, gateway)."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import ToolMessage
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
+    ALLOWED_USERS_KEY,
+    CONFIG_KEY,
+    LAST_MESSAGE_KEY,
+    MODEL_OVERRIDE_KEY,
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
     authorize_chat,
+    cmd_clear,
+    cmd_memory,
+    cmd_model,
+    cmd_retry,
+    cmd_soul,
+    cmd_uptime,
     get_thread_id,
 )
 from deepclaw.gateway import CURSOR_INDICATOR, Gateway, chunk_message
@@ -267,3 +277,189 @@ class TestGatewayRedaction:
         assert all(
             CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits
         )
+
+
+# ---------------------------------------------------------------------------
+# New slash command helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_slash_update(user_id: int = 1, text: str = "/cmd", username: str = "alice"):
+    """Build a mock Update suitable for slash command tests."""
+    user = SimpleNamespace(id=user_id, username=username)
+    chat = SimpleNamespace(id=user_id, type="private")
+    message = MagicMock()
+    message.reply_text = AsyncMock()
+    message.text = text
+    update = MagicMock()
+    update.effective_user = user
+    update.effective_chat = chat
+    update.message = message
+    return update
+
+
+def _make_slash_context(
+    user_id: int = 1,
+    model: str = "anthropic:claude-test",
+    extra: dict | None = None,
+):
+    """Build a mock context for slash command tests."""
+    config = SimpleNamespace(model=model)
+    bot_data: dict = {
+        ALLOWED_USERS_KEY: {"1"},
+        CONFIG_KEY: config,
+    }
+    if extra:
+        bot_data.update(extra)
+    ctx = MagicMock()
+    ctx.bot_data = bot_data
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# /clear
+# ---------------------------------------------------------------------------
+
+
+class TestCmdClear:
+    @pytest.mark.asyncio
+    async def test_clear_creates_new_thread(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        await cmd_clear(update, ctx)
+        update.message.reply_text.assert_called_once_with("Conversation cleared.")
+        assert "1" in ctx.bot_data[THREAD_IDS_KEY]
+
+    @pytest.mark.asyncio
+    async def test_clear_removes_last_message(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context(extra={LAST_MESSAGE_KEY: {"1": "hello"}})
+        await cmd_clear(update, ctx)
+        assert ctx.bot_data.get(LAST_MESSAGE_KEY, {}).get("1") is None
+
+
+# ---------------------------------------------------------------------------
+# /model
+# ---------------------------------------------------------------------------
+
+
+class TestCmdModel:
+    @pytest.mark.asyncio
+    async def test_model_no_arg_shows_config_model(self):
+        update = _make_slash_update(text="/model")
+        ctx = _make_slash_context(model="anthropic:claude-sonnet")
+        await cmd_model(update, ctx)
+        call_args = update.message.reply_text.call_args[0][0]
+        assert "anthropic:claude-sonnet" in call_args
+        assert "no override" in call_args
+
+    @pytest.mark.asyncio
+    async def test_model_with_arg_sets_override(self):
+        update = _make_slash_update(text="/model anthropic:claude-opus")
+        ctx = _make_slash_context()
+        await cmd_model(update, ctx)
+        assert ctx.bot_data[MODEL_OVERRIDE_KEY] == "anthropic:claude-opus"
+        call_args = update.message.reply_text.call_args[0][0]
+        assert "anthropic:claude-opus" in call_args
+
+    @pytest.mark.asyncio
+    async def test_model_shows_override_when_set(self):
+        update = _make_slash_update(text="/model")
+        ctx = _make_slash_context(extra={MODEL_OVERRIDE_KEY: "openai:gpt-5"})
+        await cmd_model(update, ctx)
+        call_args = update.message.reply_text.call_args[0][0]
+        assert "openai:gpt-5" in call_args
+
+
+# ---------------------------------------------------------------------------
+# /memory
+# ---------------------------------------------------------------------------
+
+
+class TestCmdMemory:
+    @pytest.mark.asyncio
+    async def test_memory_file_not_found(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT") as mock_root:
+            mock_path = MagicMock()
+            mock_path.__truediv__ = lambda self, x: mock_path
+            mock_path.is_file.return_value = False
+            mock_root.__truediv__ = lambda self, x: mock_path
+            await cmd_memory(update, ctx)
+        update.message.reply_text.assert_called_once_with("No memory file found.")
+
+    @pytest.mark.asyncio
+    async def test_memory_file_exists(self, tmp_path):
+        memory_file = tmp_path / "MEMORY.md"
+        memory_file.write_text("# Lessons\n- Always test.")
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT", tmp_path):
+            await cmd_memory(update, ctx)
+        update.message.reply_text.assert_called_once()
+        assert "Always test" in update.message.reply_text.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# /soul
+# ---------------------------------------------------------------------------
+
+
+class TestCmdSoul:
+    @pytest.mark.asyncio
+    async def test_soul_file_not_found(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT") as mock_root:
+            mock_path = MagicMock()
+            mock_path.__truediv__ = lambda self, x: mock_path
+            mock_path.is_file.return_value = False
+            mock_root.__truediv__ = lambda self, x: mock_path
+            await cmd_soul(update, ctx)
+        update.message.reply_text.assert_called_once_with("No SOUL.md found.")
+
+    @pytest.mark.asyncio
+    async def test_soul_file_exists(self, tmp_path):
+        soul_file = tmp_path / "SOUL.md"
+        soul_file.write_text("Be genuinely helpful.")
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT", tmp_path):
+            await cmd_soul(update, ctx)
+        update.message.reply_text.assert_called_once()
+        assert "genuinely helpful" in update.message.reply_text.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# /uptime
+# ---------------------------------------------------------------------------
+
+
+class TestCmdUptime:
+    @pytest.mark.asyncio
+    async def test_uptime_format(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        with patch("deepclaw.channels.telegram._BOT_START_TIME", 0):
+            with patch("deepclaw.channels.telegram.time") as mock_time:
+                mock_time.time.return_value = 3661  # 1h 1m 1s
+                await cmd_uptime(update, ctx)
+        call_args = update.message.reply_text.call_args[0][0]
+        assert "Uptime:" in call_args
+        assert "1h" in call_args
+        assert "1m" in call_args
+
+
+# ---------------------------------------------------------------------------
+# /retry
+# ---------------------------------------------------------------------------
+
+
+class TestCmdRetry:
+    @pytest.mark.asyncio
+    async def test_retry_no_previous_message(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context()
+        await cmd_retry(update, ctx)
+        update.message.reply_text.assert_called_once_with("No previous message to retry.")
