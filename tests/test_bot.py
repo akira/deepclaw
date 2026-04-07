@@ -24,6 +24,7 @@ from deepclaw.channels.telegram import (
     cmd_uptime,
     get_thread_id,
 )
+from deepclaw.config import DeepClawConfig
 from deepclaw.gateway import CURSOR_INDICATOR, Gateway, chunk_message
 
 # ---------------------------------------------------------------------------
@@ -305,7 +306,7 @@ def _make_slash_context(
     extra: dict | None = None,
 ):
     """Build a mock context for slash command tests."""
-    config = SimpleNamespace(model=model)
+    config = DeepClawConfig(model=model)
     bot_data: dict = {
         ALLOWED_USERS_KEY: {"1"},
         CONFIG_KEY: config,
@@ -375,7 +376,9 @@ class TestCmdModel:
     async def test_model_with_arg_sets_override(self):
         update = _make_slash_update(text="/model anthropic:claude-opus")
         ctx = _make_slash_context()
-        await cmd_model(update, ctx)
+        ctx.bot_data["checkpointer_resolved"] = MagicMock()
+        with patch("deepclaw.channels.telegram.create_agent", return_value=MagicMock()):
+            await cmd_model(update, ctx)
         assert ctx.bot_data[MODEL_OVERRIDE_KEY] == "anthropic:claude-opus"
         call_args = update.message.reply_text.call_args[0][0]
         assert "anthropic:claude-opus" in call_args
