@@ -656,6 +656,25 @@ async def post_init(application: Application) -> None:
     application.bot_data[HEARTBEAT_KEY] = heartbeat_runner
     await heartbeat_runner.start()
 
+    # Register commands in Telegram so they appear in the / dropdown menu
+    from telegram import BotCommand
+
+    await application.bot.set_my_commands([
+        BotCommand("new", "Start a fresh conversation thread"),
+        BotCommand("clear", "Clear conversation (alias for /new)"),
+        BotCommand("retry", "Re-send the last message"),
+        BotCommand("model", "View or set the active model"),
+        BotCommand("memory", "Show MEMORY.md"),
+        BotCommand("soul", "Show SOUL.md"),
+        BotCommand("uptime", "Show bot uptime"),
+        BotCommand("status", "Show thread ID and model info"),
+        BotCommand("cron", "List scheduled jobs"),
+        BotCommand("cron_add", "Add a scheduled job"),
+        BotCommand("cron_rm", "Remove a scheduled job"),
+        BotCommand("doctor", "Run system diagnostics"),
+        BotCommand("help", "Show all commands"),
+    ])
+
     logger.info("DeepAgents agent initialized")
 
 
