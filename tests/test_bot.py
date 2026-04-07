@@ -14,6 +14,7 @@ from deepclaw.channels.telegram import (
     MODEL_OVERRIDE_KEY,
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
+    _validate_model,
     authorize_chat,
     cmd_clear,
     cmd_memory,
@@ -343,6 +344,23 @@ class TestCmdClear:
 # ---------------------------------------------------------------------------
 
 
+class TestValidateModel:
+    def test_valid_anthropic(self):
+        assert _validate_model("anthropic:claude-sonnet-4-6") is None
+
+    def test_valid_openai(self):
+        assert _validate_model("openai:gpt-5.3-codex") is None
+
+    def test_missing_colon(self):
+        assert _validate_model("claude-sonnet") is not None
+
+    def test_empty_model_name(self):
+        assert _validate_model("anthropic:") is not None
+
+    def test_unknown_provider(self):
+        assert _validate_model("fakeprovider:some-model") is not None
+
+
 class TestCmdModel:
     @pytest.mark.asyncio
     async def test_model_no_arg_shows_config_model(self):
@@ -441,10 +459,12 @@ class TestCmdUptime:
     async def test_uptime_format(self):
         update = _make_slash_update()
         ctx = _make_slash_context()
-        with patch("deepclaw.channels.telegram._BOT_START_TIME", 0):
-            with patch("deepclaw.channels.telegram.time") as mock_time:
-                mock_time.time.return_value = 3661  # 1h 1m 1s
-                await cmd_uptime(update, ctx)
+        with (
+            patch("deepclaw.channels.telegram._BOT_START_TIME", 0),
+            patch("deepclaw.channels.telegram.time") as mock_time,
+        ):
+            mock_time.time.return_value = 3661  # 1h 1m 1s
+            await cmd_uptime(update, ctx)
         call_args = update.message.reply_text.call_args[0][0]
         assert "Uptime:" in call_args
         assert "1h" in call_args

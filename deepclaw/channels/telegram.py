@@ -227,6 +227,26 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Conversation cleared.")
 
 
+KNOWN_PROVIDERS = ("anthropic", "openai", "google", "groq", "mistral", "bedrock", "vertex")
+
+
+def _validate_model(model: str) -> str | None:
+    """Validate a model string of the form 'provider:model-name'.
+
+    Returns an error message string if invalid, or None if valid.
+    """
+    if ":" not in model:
+        providers = ", ".join(KNOWN_PROVIDERS)
+        return f"Invalid format. Expected provider:model-name (e.g. anthropic:claude-sonnet-4-6).\nKnown providers: {providers}"
+    provider, _, model_name = model.partition(":")
+    if not model_name:
+        return "Model name cannot be empty after the provider prefix."
+    if provider not in KNOWN_PROVIDERS:
+        providers = ", ".join(KNOWN_PROVIDERS)
+        return f"Unknown provider '{provider}'. Known providers: {providers}"
+    return None
+
+
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /model [name] -- view or set the active model."""
     if not authorize_chat(update):
@@ -238,6 +258,10 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     parts = raw.split(maxsplit=1)
     model_arg = parts[1].strip() if len(parts) > 1 else ""
     if model_arg:
+        error = _validate_model(model_arg)
+        if error:
+            await update.message.reply_text(f"Invalid model: {error}")
+            return
         context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
         await update.message.reply_text(
             f"Model override set to: {model_arg}\nUse /new or /clear to start a fresh thread."
