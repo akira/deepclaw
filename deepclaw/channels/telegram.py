@@ -276,10 +276,14 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             agent=new_agent, streaming_config=new_config.telegram.streaming
         )
 
-        # Update scheduler so cron jobs use the new agent
+        # Update scheduler and heartbeat so they use the new agent
         scheduler = context.bot_data.get(SCHEDULER_KEY)
         if scheduler is not None:
             scheduler.update_agent(new_agent)
+
+        heartbeat = context.bot_data.get(HEARTBEAT_KEY)
+        if heartbeat is not None:
+            heartbeat.update_agent(new_agent)
 
         logger.info("Agent reloaded with model: %s", model_arg)
 
