@@ -135,6 +135,10 @@ class Scheduler:
         self._channels: dict = channels or {}  # name -> Channel instance
         self._task: asyncio.Task | None = None
 
+    def update_agent(self, agent) -> None:
+        """Swap the agent used for cron job invocations (e.g. after a /model switch)."""
+        self._agent = agent
+
     async def start(self) -> None:
         """Start the tick loop as a background asyncio task."""
         if self._task is not None:

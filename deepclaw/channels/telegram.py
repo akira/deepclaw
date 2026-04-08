@@ -275,6 +275,12 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.bot_data[GATEWAY_KEY] = Gateway(
             agent=new_agent, streaming_config=new_config.telegram.streaming
         )
+
+        # Update scheduler so cron jobs use the new agent
+        scheduler = context.bot_data.get(SCHEDULER_KEY)
+        if scheduler is not None:
+            scheduler.update_agent(new_agent)
+
         logger.info("Agent reloaded with model: %s", model_arg)
 
         # Update AGENTS.md so memory reflects the new active model
@@ -310,7 +316,8 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    memory_path = _WORKSPACE_ROOT / "MEMORY.md"
+    from deepclaw.agent import MEMORY_FILE
+    memory_path = MEMORY_FILE
     if not memory_path.is_file():
         await update.message.reply_text("No memory file found.")
         return
@@ -326,7 +333,8 @@ async def cmd_soul(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    soul_path = _WORKSPACE_ROOT / "SOUL.md"
+    from deepclaw.agent import SOUL_FILE
+    soul_path = SOUL_FILE
     if not soul_path.is_file():
         await update.message.reply_text("No SOUL.md found.")
         return
