@@ -263,20 +263,27 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if error:
             await update.message.reply_text(f"Invalid model: {error}")
             return
-        context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
-
-        # Rebuild the agent and gateway with the new model
+        # Build new agent and gateway first — don't touch bot_data until
+        # everything succeeds so we never leave state partially updated.
         config = context.bot_data[CONFIG_KEY]
         new_config = replace(config, model=model_arg)
-        context.bot_data[CONFIG_KEY] = new_config
         checkpointer = context.bot_data["checkpointer_resolved"]
-        new_agent = create_agent(new_config, checkpointer)
-        context.bot_data["agent"] = new_agent
-        context.bot_data[GATEWAY_KEY] = Gateway(
-            agent=new_agent, streaming_config=new_config.telegram.streaming
-        )
+        try:
+            new_agent = create_agent(new_config, checkpointer)
+        except Exception:
+            logger.exception("Failed to create agent for model %s", model_arg)
+            await update.message.reply_text(
+                f"Failed to switch to model {model_arg} — agent creation failed. Keeping current model."
+            )
+            return
+        new_gateway = Gateway(agent=new_agent, streaming_config=new_config.telegram.streaming)
 
-        # Update scheduler and heartbeat so they use the new agent
+        # Commit atomically — all-or-nothing from here
+        context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
+        context.bot_data[CONFIG_KEY] = new_config
+        context.bot_data["agent"] = new_agent
+        context.bot_data[GATEWAY_KEY] = new_gateway
+
         scheduler = context.bot_data.get(SCHEDULER_KEY)
         if scheduler is not None:
             scheduler.update_agent(new_agent)
