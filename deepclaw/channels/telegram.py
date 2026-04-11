@@ -5,6 +5,7 @@ Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
+import mimetypes
 import time
 import uuid
 from dataclasses import replace
@@ -58,6 +59,8 @@ MODEL_OVERRIDE_KEY = "model_override"
 
 # Bot start time for /uptime
 _BOT_START_TIME: float = time.time()
+_UPLOADS_DIR = Path("~/.deepclaw/uploads").expanduser()
+_SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 # Workspace root for /memory and /soul
 _WORKSPACE_ROOT = Path("~/.deepclaw/workspace").expanduser()
@@ -65,6 +68,79 @@ _WORKSPACE_ROOT = Path("~/.deepclaw/workspace").expanduser()
 # Map of chat_id -> dict of msg_id -> telegram Message object
 # Used to translate string message IDs back to editable message objects.
 _STREAM_MESSAGES: dict[str, dict[str, object]] = {}
+
+
+def _looks_like_supported_image(document) -> bool:
+    """Return True if a Telegram document looks like a supported image."""
+    mime_type = (getattr(document, "mime_type", "") or "").lower()
+    if mime_type.startswith("image/"):
+        return True
+
+    filename = getattr(document, "file_name", "") or ""
+    return Path(filename).suffix.lower() in _SUPPORTED_IMAGE_SUFFIXES
+
+
+async def _download_media_file(update: Update) -> tuple[str | None, str | None]:
+    """Download an incoming Telegram photo or image document."""
+    message = update.message
+    if message is None:
+        return None, "No message found."
+
+    chat_id = str(update.effective_chat.id) if update.effective_chat else "unknown"
+    file_obj = None
+    suffix = ".bin"
+
+    if message.photo:
+        photo = message.photo[-1]
+        file_obj = await photo.get_file()
+        suffix = ".jpg"
+    elif message.document:
+        document = message.document
+        if not _looks_like_supported_image(document):
+            return (
+                None,
+                "I can analyze image uploads, but this file type is not supported yet. "
+                "Please send a photo or an image file (png, jpg, jpeg, webp, gif).",
+            )
+        file_obj = await document.get_file()
+        guessed = Path(document.file_name or "").suffix.lower()
+        if guessed in _SUPPORTED_IMAGE_SUFFIXES:
+            suffix = guessed
+        else:
+            suffix = mimetypes.guess_extension(document.mime_type or "") or ".img"
+    else:
+        return None, None
+
+    target_dir = _UPLOADS_DIR / "telegram" / chat_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / f"upload_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}{suffix}"
+    await file_obj.download_to_drive(custom_path=str(path))
+    return str(path), None
+
+
+async def _build_incoming_text(update: Update) -> tuple[str | None, str | None]:
+    """Build the text sent to the agent, including downloaded media paths when present."""
+    message = update.message
+    if message is None:
+        return None, None
+
+    text = (message.text or message.caption or "").strip()
+    media_path, media_error = await _download_media_file(update)
+    if media_error:
+        return None, media_error
+
+    if media_path:
+        prompt = text or "The user sent an image."
+        prompt += (
+            f"\n\nAttached image saved at local path: {media_path}\n"
+            "If the image matters for answering, use vision_analyze on that path."
+        )
+        return prompt, None
+
+    if text:
+        return text, None
+
+    return None, None
 
 
 def authorize_chat(update: Update) -> bool:
@@ -619,7 +695,7 @@ class TelegramChannel(Channel):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle an incoming Telegram message by streaming the agent response."""
-    if not update.message or not update.message.text:
+    if not update.message:
         return
 
     if not authorize_chat(update):
@@ -630,9 +706,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id = str(update.effective_chat.id)
-    user_text = update.message.text
     user = update.effective_user
     thread_id = get_thread_id(context, chat_id)
+    user_text, media_error = await _build_incoming_text(update)
+    if media_error:
+        await update.message.reply_text(media_error)
+        return
+    if not user_text:
+        return
 
     # Track last message per chat for /retry
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
@@ -787,6 +868,9 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("cron_rm", cmd_cron_rm))
     application.add_handler(CommandHandler("safety_test", cmd_safety_test))
     application.add_handler(CommandHandler("doctor", cmd_doctor))
+    application.add_handler(
+        MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message)
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Starting DeepClaw Telegram bot...")

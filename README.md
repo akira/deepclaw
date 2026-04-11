@@ -12,6 +12,7 @@ A self-hosted AI assistant you talk to over Telegram. It can read your files, ru
 - **Shell commands** — execute commands with a layered safety system that blocks dangerous operations
 - **Web search** — search the web and extract content from URLs (via Tavily)
 - **Persistent memory** — learns your preferences and remembers context across conversations
+- **Image uploads in Telegram** — send a photo or image file, and the agent can download it and inspect it with the vision tool
 - **Cron scheduling** — run agent prompts on a schedule ("summarize my todos every morning at 9am")
 - **Heartbeat monitoring** — periodic proactive checks that only notify you when something needs attention
 - **Customizable personality** — define your agent's voice and behavior via SOUL.md
@@ -290,14 +291,25 @@ This is defense-in-depth, not a sandbox. The safety patterns catch common danger
 
 ## Tool Plugins
 
-DeepClaw auto-discovers tool plugins from `deepclaw/tools/` at startup. A plugin loads only if its dependencies are installed and required env vars are set.
+DeepClaw auto-discovers tool plugins from `deepclaw/tools/` at startup.
 
 | Plugin | Install | Env Var | Tools |
 |---|---|---|---|
 | `web_search` | `uv sync --extra web` | `TAVILY_API_KEY` | `web_search`, `web_extract` |
+| `vision` | none | `OPENAI_API_KEY` | `vision_analyze` |
+
+The vision tool accepts either a local image path or a public image URL. It is designed to pair with browser screenshots, for example:
+
+```text
+1. browser_navigate("https://example.com")
+2. browser_screenshot()  -> returns a local .png path
+3. vision_analyze(path, "What does this error dialog say?")
+```
+
+In Telegram, you can also send a photo or an image file directly. DeepClaw downloads it to a local path and can then call `vision_analyze` on that saved file.
 
 To add a new tool plugin, create a module in `deepclaw/tools/` that exports:
-- `available() -> bool` — checks if deps and env vars are present
+- `available() -> bool` — checks if deps are installed (prefer returning useful credential errors at call time)
 - `get_tools() -> list` — returns tool callables
 
 ## Diagnostics
@@ -327,6 +339,7 @@ deepclaw/
     tools/
       __init__.py       # Plugin discovery
       web_search.py     # Tavily web search + extract
+      vision.py         # Image/screenshot question answering
       cron.py           # Cron management tools
   tests/
 ```
