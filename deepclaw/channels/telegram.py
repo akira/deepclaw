@@ -5,7 +5,6 @@ Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
-import re
 import time
 import uuid
 from dataclasses import replace
@@ -295,22 +294,6 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             heartbeat.update_agent(new_agent)
 
         logger.info("Agent reloaded with model: %s", model_arg)
-
-        # Update AGENTS.md so memory reflects the new active model
-        try:
-            mem_text = (
-                agent_module.MEMORY_FILE.read_text(encoding="utf-8")
-                if agent_module.MEMORY_FILE.exists()
-                else ""
-            )
-            mem_text = re.sub(
-                r"(?m)^- Model: .*$", f"- Model: {model_arg} (active override)", mem_text
-            )
-            if "- Model:" not in mem_text:
-                mem_text = mem_text.rstrip() + f"\n- Model: {model_arg} (active override)\n"
-            agent_module.MEMORY_FILE.write_text(mem_text, encoding="utf-8")
-        except Exception:
-            logger.exception("Failed to update AGENTS.md with new model")
 
         await update.message.reply_text(
             f"Model switched to: {model_arg}\nAgent reloaded — use /clear to start a fresh thread."
