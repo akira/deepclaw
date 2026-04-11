@@ -23,7 +23,7 @@ import threading
 import time
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ _SCREENSHOTS_DIR = Path("~/.deepclaw/browser_screenshots").expanduser()
 # sync API binds objects to the thread that created them.
 _SESSION: dict[str, Any] = {}
 _SESSION_LOCK = threading.Lock()
-_BROWSER_TASKS: queue.Queue[tuple[callable | None, Future | None]] = queue.Queue()
+_BROWSER_TASKS: queue.Queue[tuple[Callable[[], Any] | None, Future | None]] = queue.Queue()
 _BROWSER_THREAD: threading.Thread | None = None
 
 # JS to extract interactive + content elements with stable ref IDs
