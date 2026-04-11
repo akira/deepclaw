@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
@@ -161,6 +162,31 @@ class TestWebExtractFunction:
         mock_client.extract.assert_called_once()
 
         ws_mod._client = None
+
+
+# ---------------------------------------------------------------------------
+# Browser plugin session persistence
+# ---------------------------------------------------------------------------
+
+
+class TestBrowserPluginSessionPersistence:
+    def test_session_survives_cross_thread_tool_calls(self):
+        from deepclaw.tools import browser as browser_mod
+
+        browser_mod._set_session({"page": "sentinel", "session_id": "local"})
+        result: dict[str, object] = {}
+
+        def _read_session() -> None:
+            result.update(browser_mod._get_session())
+
+        thread = threading.Thread(target=_read_session)
+        thread.start()
+        thread.join()
+
+        assert result["page"] == "sentinel"
+        assert result["session_id"] == "local"
+
+        browser_mod._set_session({})
 
 
 # ---------------------------------------------------------------------------

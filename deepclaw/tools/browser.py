@@ -18,8 +18,10 @@ Provides:
 
 import logging
 import os
+import queue
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,12 @@ _ENV_API_KEY = "BROWSERBASE_API_KEY"
 _ENV_PROJECT_ID = "BROWSERBASE_PROJECT_ID"
 _SCREENSHOTS_DIR = Path("~/.deepclaw/browser_screenshots").expanduser()
 
-_local = threading.local()
+# Browser operations must run on a single dedicated thread because Playwright's
+# sync API binds objects to the thread that created them.
+_SESSION: dict[str, Any] = {}
+_SESSION_LOCK = threading.Lock()
+_BROWSER_TASKS: queue.Queue[tuple[callable | None, Future | None]] = queue.Queue()
+_BROWSER_THREAD: threading.Thread | None = None
 
 # JS to extract interactive + content elements with stable ref IDs
 _SNAPSHOT_JS = """
@@ -174,11 +181,48 @@ def available() -> bool:
 
 
 def _get_session() -> dict:
-    return getattr(_local, "session", {})
+    with _SESSION_LOCK:
+        return dict(_SESSION)
 
 
 def _set_session(data: dict) -> None:
-    _local.session = data
+    with _SESSION_LOCK:
+        _SESSION.clear()
+        _SESSION.update(data)
+
+
+def _ensure_browser_thread() -> None:
+    global _BROWSER_THREAD  # noqa: PLW0603
+    if _BROWSER_THREAD and _BROWSER_THREAD.is_alive():
+        return
+
+    def _worker() -> None:
+        while True:
+            fn, future = _BROWSER_TASKS.get()
+            if fn is None:
+                if future is not None:
+                    future.set_result(None)
+                return
+            try:
+                result = fn()
+            except Exception as e:  # pragma: no cover - surfaced to caller
+                if future is not None:
+                    future.set_exception(e)
+            else:
+                if future is not None:
+                    future.set_result(result)
+
+    _BROWSER_THREAD = threading.Thread(target=_worker, name="deepclaw-browser", daemon=True)
+    _BROWSER_THREAD.start()
+
+
+def _run_in_browser_thread(fn):
+    _ensure_browser_thread()
+    if threading.current_thread() is _BROWSER_THREAD:
+        return fn()
+    future: Future = Future()
+    _BROWSER_TASKS.put((fn, future))
+    return future.result()
 
 
 def _close_session() -> None:
@@ -298,26 +342,30 @@ def browser_navigate(url: str) -> dict[str, Any]:
     Returns:
         Dict with url, title, and status.
     """
-    session = _get_session()
-    if not session.get("page"):
-        session = _ensure_session(url)
-        if not session:
-            return {
-                "error": "Failed to start browser. Make sure playwright is installed: uv add playwright && playwright install chromium"
-            }
 
-    page = session["page"]
-    try:
-        response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(1)
-        return {
-            "success": True,
-            "url": page.url,
-            "title": page.title(),
-            "status": response.status if response else None,
-        }
-    except Exception as e:
-        return {"error": str(e), "url": url}
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            session = _ensure_session(url)
+            if not session:
+                return {
+                    "error": "Failed to start browser. Make sure playwright is installed: uv add playwright && playwright install chromium"
+                }
+
+        page = session["page"]
+        try:
+            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(1)
+            return {
+                "success": True,
+                "url": page.url,
+                "title": page.title(),
+                "status": response.status if response else None,
+            }
+        except Exception as e:
+            return {"error": str(e), "url": url}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_snapshot(offset: int = 0, limit: int = 100) -> dict[str, Any]:
@@ -333,49 +381,53 @@ def browser_snapshot(offset: int = 0, limit: int = 100) -> dict[str, Any]:
     Returns:
         Dict with snapshot text, total element count, url, and title.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"error": "No active browser session. Call browser_navigate first."}
 
-    page = session["page"]
-    try:
-        result = page.evaluate(_SNAPSHOT_JS)
-        nodes = result.get("nodes", [])
-        total = len(nodes)
-        limit = min(limit, 200)
-        page_nodes = nodes[offset : offset + limit]
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"error": "No active browser session. Call browser_navigate first."}
 
-        lines = []
-        for n in page_nodes:
-            indent = "  " * n["depth"]
-            ref = f"[e{n['ref']}]"
-            role = n["role"]
-            text = n["text"]
-            extra = ""
-            if n.get("href"):
-                extra = f" -> {n['href']}"
-            if n.get("checked") is True:
-                extra += " [checked]"
-            elif n.get("checked") is False:
-                extra += " [unchecked]"
-            info = "" if n["interactive"] else " (info)"
-            lines.append(f"{indent}{ref} {role}{info}: {text}{extra}")
+        page = session["page"]
+        try:
+            result = page.evaluate(_SNAPSHOT_JS)
+            nodes = result.get("nodes", [])
+            total = len(nodes)
+            current_limit = min(limit, 200)
+            page_nodes = nodes[offset : offset + current_limit]
 
-        snapshot_text = "\n".join(lines) if lines else "(no elements found)"
-        result_dict = {
-            "url": page.url,
-            "title": page.title(),
-            "snapshot": snapshot_text,
-            "total_elements": total,
-            "showing": f"{offset}–{offset + len(page_nodes)} of {total}",
-        }
-        if offset + limit < total:
-            result_dict["hint"] = (
-                f"More elements available. Call browser_snapshot(offset={offset + limit}) to see next page."
-            )
-        return result_dict
-    except Exception as e:
-        return {"error": str(e)}
+            lines = []
+            for n in page_nodes:
+                indent = "  " * n["depth"]
+                ref = f"[e{n['ref']}]"
+                role = n["role"]
+                text = n["text"]
+                extra = ""
+                if n.get("href"):
+                    extra = f" -> {n['href']}"
+                if n.get("checked") is True:
+                    extra += " [checked]"
+                elif n.get("checked") is False:
+                    extra += " [unchecked]"
+                info = "" if n["interactive"] else " (info)"
+                lines.append(f"{indent}{ref} {role}{info}: {text}{extra}")
+
+            snapshot_text = "\n".join(lines) if lines else "(no elements found)"
+            result_dict = {
+                "url": page.url,
+                "title": page.title(),
+                "snapshot": snapshot_text,
+                "total_elements": total,
+                "showing": f"{offset}–{offset + len(page_nodes)} of {total}",
+            }
+            if offset + current_limit < total:
+                result_dict["hint"] = (
+                    f"More elements available. Call browser_snapshot(offset={offset + current_limit}) to see next page."
+                )
+            return result_dict
+        except Exception as e:
+            return {"error": str(e)}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_click(ref: str) -> dict[str, Any]:
@@ -387,18 +439,22 @@ def browser_click(ref: str) -> dict[str, Any]:
     Returns:
         Dict with success status and updated url/title.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"error": "No active browser session. Call browser_navigate first."}
 
-    page = session["page"]
-    try:
-        locator = _locate_ref(page, ref)
-        locator.first.click(timeout=10000)
-        time.sleep(0.8)
-        return {"success": True, "url": page.url, "title": page.title()}
-    except Exception as e:
-        return {"error": str(e), "ref": ref}
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"error": "No active browser session. Call browser_navigate first."}
+
+        page = session["page"]
+        try:
+            locator = _locate_ref(page, ref)
+            locator.first.click(timeout=10000)
+            time.sleep(0.8)
+            return {"success": True, "url": page.url, "title": page.title()}
+        except Exception as e:
+            return {"error": str(e), "ref": ref}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_type(ref: str, text: str) -> dict[str, Any]:
@@ -411,17 +467,21 @@ def browser_type(ref: str, text: str) -> dict[str, Any]:
     Returns:
         Dict with success status.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"error": "No active browser session. Call browser_navigate first."}
 
-    page = session["page"]
-    try:
-        locator = _locate_ref(page, ref)
-        locator.first.fill(text, timeout=10000)
-        return {"success": True, "ref": ref, "text": text}
-    except Exception as e:
-        return {"error": str(e), "ref": ref}
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"error": "No active browser session. Call browser_navigate first."}
+
+        page = session["page"]
+        try:
+            locator = _locate_ref(page, ref)
+            locator.first.fill(text, timeout=10000)
+            return {"success": True, "ref": ref, "text": text}
+        except Exception as e:
+            return {"error": str(e), "ref": ref}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_press(key: str) -> dict[str, Any]:
@@ -433,17 +493,21 @@ def browser_press(key: str) -> dict[str, Any]:
     Returns:
         Dict with success status.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"error": "No active browser session. Call browser_navigate first."}
 
-    page = session["page"]
-    try:
-        page.keyboard.press(key)
-        time.sleep(0.3)
-        return {"success": True, "key": key}
-    except Exception as e:
-        return {"error": str(e), "key": key}
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"error": "No active browser session. Call browser_navigate first."}
+
+        page = session["page"]
+        try:
+            page.keyboard.press(key)
+            time.sleep(0.3)
+            return {"success": True, "key": key}
+        except Exception as e:
+            return {"error": str(e), "key": key}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_scroll(direction: str = "down") -> dict[str, Any]:
@@ -455,18 +519,22 @@ def browser_scroll(direction: str = "down") -> dict[str, Any]:
     Returns:
         Dict with success status.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"error": "No active browser session. Call browser_navigate first."}
 
-    page = session["page"]
-    try:
-        delta = 600 if direction == "down" else -600
-        page.mouse.wheel(0, delta)
-        time.sleep(0.4)
-        return {"success": True, "direction": direction}
-    except Exception as e:
-        return {"error": str(e)}
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"error": "No active browser session. Call browser_navigate first."}
+
+        page = session["page"]
+        try:
+            delta = 600 if direction == "down" else -600
+            page.mouse.wheel(0, delta)
+            time.sleep(0.4)
+            return {"success": True, "direction": direction}
+        except Exception as e:
+            return {"error": str(e)}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_screenshot() -> dict[str, Any]:
@@ -475,19 +543,23 @@ def browser_screenshot() -> dict[str, Any]:
     Returns:
         Dict with the local file path to the screenshot.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"error": "No active browser session. Call browser_navigate first."}
 
-    page = session["page"]
-    try:
-        _SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        ts = int(time.time() * 1000)
-        path = _SCREENSHOTS_DIR / f"screenshot_{ts}.png"
-        page.screenshot(path=str(path), full_page=False)
-        return {"success": True, "path": str(path), "url": page.url}
-    except Exception as e:
-        return {"error": str(e)}
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"error": "No active browser session. Call browser_navigate first."}
+
+        page = session["page"]
+        try:
+            _SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time() * 1000)
+            path = _SCREENSHOTS_DIR / f"screenshot_{ts}.png"
+            page.screenshot(path=str(path), full_page=False)
+            return {"success": True, "path": str(path), "url": page.url}
+        except Exception as e:
+            return {"error": str(e)}
+
+    return _run_in_browser_thread(_op)
 
 
 def browser_close() -> dict[str, Any]:
@@ -498,12 +570,16 @@ def browser_close() -> dict[str, Any]:
     Returns:
         Dict confirming the session was closed.
     """
-    session = _get_session()
-    if not session.get("page"):
-        return {"status": "no active session"}
-    session_id = session.get("session_id", "unknown")
-    _close_session()
-    return {"status": "closed", "session_id": session_id}
+
+    def _op() -> dict[str, Any]:
+        session = _get_session()
+        if not session.get("page"):
+            return {"status": "no active session"}
+        session_id = session.get("session_id", "unknown")
+        _close_session()
+        return {"status": "closed", "session_id": session_id}
+
+    return _run_in_browser_thread(_op)
 
 
 def get_tools() -> list:
