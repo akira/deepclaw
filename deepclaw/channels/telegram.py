@@ -5,6 +5,7 @@ Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -21,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from deepclaw import agent as agent_module
 from deepclaw.agent import create_agent, create_checkpointer
 from deepclaw.auth import (
     REJECTION_MESSAGE,
@@ -296,13 +298,17 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Update AGENTS.md so memory reflects the new active model
         try:
-            from deepclaw.agent import MEMORY_FILE
-            import re as _re
-            mem_text = MEMORY_FILE.read_text(encoding="utf-8") if MEMORY_FILE.exists() else ""
-            mem_text = _re.sub(r"(?m)^- Model: .*$", f"- Model: {model_arg} (active override)", mem_text)
+            mem_text = (
+                agent_module.MEMORY_FILE.read_text(encoding="utf-8")
+                if agent_module.MEMORY_FILE.exists()
+                else ""
+            )
+            mem_text = re.sub(
+                r"(?m)^- Model: .*$", f"- Model: {model_arg} (active override)", mem_text
+            )
             if "- Model:" not in mem_text:
                 mem_text = mem_text.rstrip() + f"\n- Model: {model_arg} (active override)\n"
-            MEMORY_FILE.write_text(mem_text, encoding="utf-8")
+            agent_module.MEMORY_FILE.write_text(mem_text, encoding="utf-8")
         except Exception:
             logger.exception("Failed to update AGENTS.md with new model")
 
@@ -327,8 +333,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    from deepclaw.agent import MEMORY_FILE
-    memory_path = MEMORY_FILE
+    memory_path = agent_module.MEMORY_FILE
     if not memory_path.is_file():
         await update.message.reply_text("No memory file found.")
         return
@@ -344,8 +349,7 @@ async def cmd_soul(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    from deepclaw.agent import SOUL_FILE
-    soul_path = SOUL_FILE
+    soul_path = agent_module.SOUL_FILE
     if not soul_path.is_file():
         await update.message.reply_text("No SOUL.md found.")
         return
