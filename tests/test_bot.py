@@ -1,5 +1,6 @@
 """Tests for deepclaw bot modules (auth, channels.telegram, gateway)."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,10 +11,13 @@ from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
     ALLOWED_USERS_KEY,
     CONFIG_KEY,
+    GATEWAY_KEY,
     LAST_MESSAGE_KEY,
     MODEL_OVERRIDE_KEY,
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
+    _build_incoming_text,
+    _looks_like_supported_image,
     _validate_model,
     authorize_chat,
     cmd_clear,
@@ -23,6 +27,7 @@ from deepclaw.channels.telegram import (
     cmd_soul,
     cmd_uptime,
     get_thread_id,
+    handle_message,
 )
 from deepclaw.config import DeepClawConfig
 from deepclaw.gateway import CURSOR_INDICATOR, Gateway, chunk_message
@@ -282,6 +287,114 @@ class TestGatewayRedaction:
 
 
 # ---------------------------------------------------------------------------
+# Telegram media handling
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramMediaHelpers:
+    def test_looks_like_supported_image_accepts_image_mime(self):
+        document = SimpleNamespace(mime_type="image/png", file_name="upload.bin")
+        assert _looks_like_supported_image(document) is True
+
+    def test_looks_like_supported_image_accepts_known_suffix(self):
+        document = SimpleNamespace(mime_type="application/octet-stream", file_name="photo.webp")
+        assert _looks_like_supported_image(document) is True
+
+    def test_looks_like_supported_image_rejects_other_files(self):
+        document = SimpleNamespace(mime_type="application/pdf", file_name="report.pdf")
+        assert _looks_like_supported_image(document) is False
+
+    @pytest.mark.asyncio
+    async def test_build_incoming_text_for_plain_text(self):
+        update = _make_slash_update(text="hello")
+        text, error = await _build_incoming_text(update)
+        assert error is None
+        assert text == "hello"
+
+    @pytest.mark.asyncio
+    async def test_build_incoming_text_for_photo(self, tmp_path):
+        update = _make_slash_update(text="")
+        update.message.caption = "What does this say?"
+        file_obj = MagicMock()
+
+        async def _fake_download_to_drive(*, custom_path):
+            Path(custom_path).write_bytes(b"img")
+            return custom_path
+
+        file_obj.download_to_drive = AsyncMock(side_effect=_fake_download_to_drive)
+        photo = MagicMock()
+        photo.get_file = AsyncMock(return_value=file_obj)
+        update.message.photo = [photo]
+
+        with patch("deepclaw.channels.telegram._UPLOADS_DIR", tmp_path):
+            text, error = await _build_incoming_text(update)
+
+        assert error is None
+        assert "What does this say?" in text
+        assert "Attached image saved at local path:" in text
+        assert "vision_analyze" in text
+        file_obj.download_to_drive.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_incoming_text_rejects_unsupported_document(self):
+        update = _make_slash_update(text="")
+        update.message.document = SimpleNamespace(
+            mime_type="application/pdf", file_name="report.pdf"
+        )
+        text, error = await _build_incoming_text(update)
+        assert text is None
+        assert "not supported yet" in error
+
+
+class TestTelegramMediaHandleMessage:
+    @pytest.mark.asyncio
+    async def test_handle_message_routes_photo_to_gateway(self, tmp_path):
+        update = _make_slash_update(text="")
+        update.message.caption = "Please inspect this"
+        file_obj = MagicMock()
+
+        async def _fake_download_to_drive(*, custom_path):
+            Path(custom_path).write_bytes(b"img")
+            return custom_path
+
+        file_obj.download_to_drive = AsyncMock(side_effect=_fake_download_to_drive)
+        photo = MagicMock()
+        photo.get_file = AsyncMock(return_value=file_obj)
+        update.message.photo = [photo]
+
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock()
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        with patch("deepclaw.channels.telegram._UPLOADS_DIR", tmp_path):
+            await handle_message(update, ctx)
+
+        gateway.handle_message.assert_awaited_once()
+        _channel, incoming, thread_id = gateway.handle_message.await_args.args
+        assert thread_id == "1"
+        assert incoming.chat_id == "1"
+        assert incoming.source == "telegram"
+        assert "Please inspect this" in incoming.text
+        assert "vision_analyze" in incoming.text
+        assert ctx.bot_data[LAST_MESSAGE_KEY]["1"] == incoming.text
+
+    @pytest.mark.asyncio
+    async def test_handle_message_replies_for_unsupported_document(self):
+        update = _make_slash_update(text="")
+        update.message.document = SimpleNamespace(
+            mime_type="application/pdf", file_name="report.pdf"
+        )
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock()
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        await handle_message(update, ctx)
+
+        update.message.reply_text.assert_awaited_once()
+        gateway.handle_message.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # New slash command helpers
 # ---------------------------------------------------------------------------
 
@@ -293,6 +406,9 @@ def _make_slash_update(user_id: int = 1, text: str = "/cmd", username: str = "al
     message = MagicMock()
     message.reply_text = AsyncMock()
     message.text = text
+    message.caption = None
+    message.photo = []
+    message.document = None
     update = MagicMock()
     update.effective_user = user
     update.effective_chat = chat
