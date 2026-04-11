@@ -164,6 +164,11 @@ def create_agent(config, checkpointer):
     # System prompt from SOUL.md
     system_prompt = _load_soul()
 
+    # Inject active model identity so the agent always knows what it's running as
+    active_model = config.model or "unknown"
+    model_note = f"\n\n## Active Model\nYou are running as: {active_model}\nWhen asked what model you are, answer with this value."
+    system_prompt = system_prompt + model_note if system_prompt else model_note.strip()
+
     # Tool plugins
     tools = discover_tools()
 

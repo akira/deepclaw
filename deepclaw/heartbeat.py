@@ -119,6 +119,10 @@ def _load_checklist() -> str:
 class HeartbeatRunner:
     """Background runner that periodically checks HEARTBEAT.md."""
 
+    def update_agent(self, agent) -> None:
+        """Swap the agent used for heartbeat checks (e.g. after a /model switch)."""
+        self._agent = agent
+
     def __init__(self, config: HeartbeatConfig, agent, channels: dict):
         self._config = config
         self._agent = agent

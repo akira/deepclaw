@@ -5,6 +5,7 @@ Streams agent responses by progressively editing a single Telegram message.
 """
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -21,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from deepclaw import agent as agent_module
 from deepclaw.agent import create_agent, create_checkpointer
 from deepclaw.auth import (
     REJECTION_MESSAGE,
@@ -263,19 +265,52 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if error:
             await update.message.reply_text(f"Invalid model: {error}")
             return
-        context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
-
-        # Rebuild the agent and gateway with the new model
+        # Build new agent and gateway first — don't touch bot_data until
+        # everything succeeds so we never leave state partially updated.
         config = context.bot_data[CONFIG_KEY]
         new_config = replace(config, model=model_arg)
-        context.bot_data[CONFIG_KEY] = new_config
         checkpointer = context.bot_data["checkpointer_resolved"]
-        new_agent = create_agent(new_config, checkpointer)
+        try:
+            new_agent = create_agent(new_config, checkpointer)
+        except Exception:
+            logger.exception("Failed to create agent for model %s", model_arg)
+            await update.message.reply_text(
+                f"Failed to switch to model {model_arg} — agent creation failed. Keeping current model."
+            )
+            return
+        new_gateway = Gateway(agent=new_agent, streaming_config=new_config.telegram.streaming)
+
+        # Commit atomically — all-or-nothing from here
+        context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
+        context.bot_data[CONFIG_KEY] = new_config
         context.bot_data["agent"] = new_agent
-        context.bot_data[GATEWAY_KEY] = Gateway(
-            agent=new_agent, streaming_config=new_config.telegram.streaming
-        )
+        context.bot_data[GATEWAY_KEY] = new_gateway
+
+        scheduler = context.bot_data.get(SCHEDULER_KEY)
+        if scheduler is not None:
+            scheduler.update_agent(new_agent)
+
+        heartbeat = context.bot_data.get(HEARTBEAT_KEY)
+        if heartbeat is not None:
+            heartbeat.update_agent(new_agent)
+
         logger.info("Agent reloaded with model: %s", model_arg)
+
+        # Update AGENTS.md so memory reflects the new active model
+        try:
+            mem_text = (
+                agent_module.MEMORY_FILE.read_text(encoding="utf-8")
+                if agent_module.MEMORY_FILE.exists()
+                else ""
+            )
+            mem_text = re.sub(
+                r"(?m)^- Model: .*$", f"- Model: {model_arg} (active override)", mem_text
+            )
+            if "- Model:" not in mem_text:
+                mem_text = mem_text.rstrip() + f"\n- Model: {model_arg} (active override)\n"
+            agent_module.MEMORY_FILE.write_text(mem_text, encoding="utf-8")
+        except Exception:
+            logger.exception("Failed to update AGENTS.md with new model")
 
         await update.message.reply_text(
             f"Model switched to: {model_arg}\nAgent reloaded — use /clear to start a fresh thread."
@@ -298,7 +333,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    memory_path = _WORKSPACE_ROOT / "MEMORY.md"
+    memory_path = agent_module.MEMORY_FILE
     if not memory_path.is_file():
         await update.message.reply_text("No memory file found.")
         return
@@ -314,7 +349,7 @@ async def cmd_soul(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    soul_path = _WORKSPACE_ROOT / "SOUL.md"
+    soul_path = agent_module.SOUL_FILE
     if not soul_path.is_file():
         await update.message.reply_text("No SOUL.md found.")
         return

@@ -399,24 +399,21 @@ class TestCmdModel:
 
 class TestCmdMemory:
     @pytest.mark.asyncio
-    async def test_memory_file_not_found(self):
+    async def test_memory_file_not_found(self, tmp_path):
         update = _make_slash_update()
         ctx = _make_slash_context()
-        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT") as mock_root:
-            mock_path = MagicMock()
-            mock_path.__truediv__ = lambda self, x: mock_path
-            mock_path.is_file.return_value = False
-            mock_root.__truediv__ = lambda self, x: mock_path
+        missing = tmp_path / "AGENTS.md"
+        with patch("deepclaw.agent.MEMORY_FILE", missing):
             await cmd_memory(update, ctx)
         update.message.reply_text.assert_called_once_with("No memory file found.")
 
     @pytest.mark.asyncio
     async def test_memory_file_exists(self, tmp_path):
-        memory_file = tmp_path / "MEMORY.md"
+        memory_file = tmp_path / "AGENTS.md"
         memory_file.write_text("# Lessons\n- Always test.")
         update = _make_slash_update()
         ctx = _make_slash_context()
-        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT", tmp_path):
+        with patch("deepclaw.agent.MEMORY_FILE", memory_file):
             await cmd_memory(update, ctx)
         update.message.reply_text.assert_called_once()
         assert "Always test" in update.message.reply_text.call_args[0][0]
@@ -429,14 +426,11 @@ class TestCmdMemory:
 
 class TestCmdSoul:
     @pytest.mark.asyncio
-    async def test_soul_file_not_found(self):
+    async def test_soul_file_not_found(self, tmp_path):
         update = _make_slash_update()
         ctx = _make_slash_context()
-        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT") as mock_root:
-            mock_path = MagicMock()
-            mock_path.__truediv__ = lambda self, x: mock_path
-            mock_path.is_file.return_value = False
-            mock_root.__truediv__ = lambda self, x: mock_path
+        missing = tmp_path / "SOUL.md"
+        with patch("deepclaw.agent.SOUL_FILE", missing):
             await cmd_soul(update, ctx)
         update.message.reply_text.assert_called_once_with("No SOUL.md found.")
 
@@ -446,7 +440,7 @@ class TestCmdSoul:
         soul_file.write_text("Be genuinely helpful.")
         update = _make_slash_update()
         ctx = _make_slash_context()
-        with patch("deepclaw.channels.telegram._WORKSPACE_ROOT", tmp_path):
+        with patch("deepclaw.agent.SOUL_FILE", soul_file):
             await cmd_soul(update, ctx)
         update.message.reply_text.assert_called_once()
         assert "genuinely helpful" in update.message.reply_text.call_args[0][0]
