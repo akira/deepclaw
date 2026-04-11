@@ -32,6 +32,11 @@ class TestDiscoverTools:
         assert "web_search" in tool_names
         assert "web_extract" in tool_names
         assert "vision_analyze" in tool_names
+        assert "skills_list" in tool_names
+        assert "skill_view" in tool_names
+        assert "skill_create" in tool_names
+        assert "skill_update" in tool_names
+        assert "skill_install" in tool_names
 
     @patch.dict(os.environ, {}, clear=False)
     def test_skips_tavily_without_api_key(self):
