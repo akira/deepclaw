@@ -36,6 +36,7 @@ _SCREENSHOTS_DIR = Path("~/.deepclaw/browser_screenshots").expanduser()
 # sync API binds objects to the thread that created them.
 _SESSION: dict[str, Any] = {}
 _SESSION_LOCK = threading.Lock()
+_BROWSER_START_LOCK = threading.Lock()
 _BROWSER_TASKS: queue.Queue[tuple[Callable[[], Any] | None, Future | None]] = queue.Queue()
 _BROWSER_THREAD: threading.Thread | None = None
 
@@ -197,24 +198,28 @@ def _ensure_browser_thread() -> None:
     if _BROWSER_THREAD and _BROWSER_THREAD.is_alive():
         return
 
-    def _worker() -> None:
-        while True:
-            fn, future = _BROWSER_TASKS.get()
-            if fn is None:
-                if future is not None:
-                    future.set_result(None)
-                return
-            try:
-                result = fn()
-            except Exception as e:  # pragma: no cover - surfaced to caller
-                if future is not None:
-                    future.set_exception(e)
-            else:
-                if future is not None:
-                    future.set_result(result)
+    with _BROWSER_START_LOCK:
+        if _BROWSER_THREAD and _BROWSER_THREAD.is_alive():
+            return
 
-    _BROWSER_THREAD = threading.Thread(target=_worker, name="deepclaw-browser", daemon=True)
-    _BROWSER_THREAD.start()
+        def _worker() -> None:
+            while True:
+                fn, future = _BROWSER_TASKS.get()
+                if fn is None:
+                    if future is not None:
+                        future.set_result(None)
+                    return
+                try:
+                    result = fn()
+                except Exception as e:  # pragma: no cover - surfaced to caller
+                    if future is not None:
+                        future.set_exception(e)
+                else:
+                    if future is not None:
+                        future.set_result(result)
+
+        _BROWSER_THREAD = threading.Thread(target=_worker, name="deepclaw-browser", daemon=True)
+        _BROWSER_THREAD.start()
 
 
 def _run_in_browser_thread(fn):

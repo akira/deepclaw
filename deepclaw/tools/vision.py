@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+from deepclaw.safety import check_url_safety_sync
+
 _OPENAI_API_KEY_VAR = "OPENAI_API_KEY"
 _OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 _DEFAULT_MODEL = "gpt-4.1-mini"
@@ -35,6 +37,11 @@ def available() -> bool:
 
 def _resolve_image_reference(image_path: str) -> tuple[str, dict[str, Any]]:
     if image_path.startswith(("http://", "https://")):
+        is_safe, reason = check_url_safety_sync(image_path)
+        if not is_safe:
+            raise ValueError(
+                f"Remote image URL is not allowed: {reason}. Only public, SSRF-safe image URLs are supported."
+            )
         return image_path, {"source": "url", "image_path": image_path}
 
     path = Path(image_path).expanduser()

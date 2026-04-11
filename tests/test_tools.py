@@ -188,6 +188,39 @@ class TestBrowserPluginSessionPersistence:
 
         browser_mod._set_session({})
 
+    def test_browser_thread_startup_is_synchronized(self):
+        from deepclaw.tools import browser as browser_mod
+
+        starts: list[str] = []
+
+        class FakeThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+                self._alive = False
+                starts.append(name or "thread")
+
+            def is_alive(self):
+                return self._alive
+
+            def start(self):
+                self._alive = True
+
+            def join(self):
+                return None
+
+        real_thread = threading.Thread
+        browser_mod._BROWSER_THREAD = None
+        with patch("deepclaw.tools.browser.threading.Thread", FakeThread):
+            threads = [real_thread(target=browser_mod._ensure_browser_thread) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        assert len(starts) == 1
+
 
 # ---------------------------------------------------------------------------
 # Vision plugin
@@ -303,6 +336,7 @@ class TestVisionPlugin:
 
         with (
             patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch("deepclaw.tools.vision.check_url_safety_sync", return_value=(True, "")),
             patch("deepclaw.tools.vision.request.urlopen", side_effect=fake_urlopen),
         ):
             result = vision_analyze("https://example.com/cat.png", "What is here?")
@@ -310,6 +344,22 @@ class TestVisionPlugin:
         assert result["success"] is True
         assert result["answer"] == "A cat looking at the camera."
         assert result["source"] == "url"
+
+    def test_remote_url_rejected_when_not_ssrf_safe(self):
+        from deepclaw.tools.vision import vision_analyze
+
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch(
+                "deepclaw.tools.vision.check_url_safety_sync",
+                return_value=(False, "IP 127.0.0.1 is in a blocked network range"),
+            ),
+        ):
+            result = vision_analyze("http://127.0.0.1/cat.png", "What is here?")
+
+        assert "error" in result
+        assert "Remote image URL is not allowed" in result["error"]
+        assert "SSRF-safe" in result["error"]
 
     def test_http_error_surfaces_details(self, tmp_path):
         from deepclaw.tools.vision import vision_analyze
