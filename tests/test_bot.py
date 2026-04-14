@@ -19,6 +19,7 @@ from deepclaw.channels.telegram import (
     _build_incoming_text,
     _format_skills_list,
     _looks_like_supported_image,
+    _parse_memory_command,
     _parse_skills_command,
     _validate_model,
     authorize_chat,
@@ -682,6 +683,12 @@ class TestCmdModel:
 
 
 class TestCmdMemory:
+    def test_parse_memory_defaults_to_show(self):
+        assert _parse_memory_command("/memory") == ("show", "")
+
+    def test_parse_memory_with_args(self):
+        assert _parse_memory_command("/memory search timeout") == ("search", "timeout")
+
     @pytest.mark.asyncio
     async def test_memory_file_not_found(self, tmp_path):
         update = _make_slash_update()
@@ -701,6 +708,70 @@ class TestCmdMemory:
             await cmd_memory(update, ctx)
         update.message.reply_text.assert_called_once()
         assert "Always test" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_memory_search_returns_matches(self, monkeypatch):
+        update = _make_slash_update(text="/memory search timeout")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.memory_search",
+            lambda query: {
+                "query": query,
+                "count": 1,
+                "matches": [{"line_number": 12, "line": "- Prefers 5 minute timeout"}],
+            },
+        )
+
+        await cmd_memory(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Memory matches for 'timeout'" in reply
+        assert "line 12" in reply
+
+    @pytest.mark.asyncio
+    async def test_memory_add_supports_section_syntax(self, monkeypatch):
+        update = _make_slash_update(text="/memory add Preferences | Likes dark mode")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.memory_add",
+            lambda content, section="Notes": {
+                "section": section,
+                "content": content,
+            },
+        )
+
+        await cmd_memory(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Saved memory in section Preferences" in reply
+
+    @pytest.mark.asyncio
+    async def test_memory_replace_uses_pipe_args(self, monkeypatch):
+        update = _make_slash_update(text="/memory replace old value | new value")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.memory_replace",
+            lambda old_text, new_text: {"old_text": old_text},
+        )
+
+        await cmd_memory(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Replaced memory text: old value" in reply
+
+    @pytest.mark.asyncio
+    async def test_memory_remove_alias_rm(self, monkeypatch):
+        update = _make_slash_update(text="/memory rm stale note")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.memory_remove",
+            lambda text: {"text": text},
+        )
+
+        await cmd_memory(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Removed memory text: stale note" in reply
 
 
 # ---------------------------------------------------------------------------
