@@ -87,6 +87,16 @@ class TestSkillUpdate:
         assert skill_file.read_text() == "# New Content"
 
 
+class TestDefaultInstallName:
+    def test_uses_parent_directory_name_for_skill_file(self):
+        src = skills_mod.Path("/tmp/source-skill/SKILL.md")
+        assert skills_mod._default_install_name(src) == "source-skill"
+
+    def test_falls_back_to_lowercase_stem_for_root_skill_file(self):
+        src = skills_mod.Path("/SKILL.md")
+        assert skills_mod._default_install_name(src) == "skill"
+
+
 class TestSkillInstall:
     def test_installs_from_skill_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path / "installed")

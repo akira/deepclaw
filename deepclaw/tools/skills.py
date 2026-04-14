@@ -67,6 +67,13 @@ def _extract_description(content: str) -> str:
     return first_nonempty[:120]
 
 
+def _default_install_name(src: Path) -> str:
+    """Return the default installed skill name for a source path."""
+    if src.is_dir():
+        return src.name
+    return src.parent.name if src.parent.name else src.stem.lower()
+
+
 def _default_skill_content(name: str, description: str) -> str:
     title = name.replace("-", " ").replace("_", " ").title()
     return (
@@ -221,12 +228,8 @@ def skill_install(
     if not src.exists():
         return {"error": f"Source path not found: {src}", "source_path": source_path}
 
-    if src.is_dir():
-        src_skill_file = src / _SKILL_FILE_NAME
-        default_name = src.name
-    else:
-        src_skill_file = src
-        default_name = src.parent.name if src.parent.name != src.anchor else src.stem.lower()
+    src_skill_file = src / _SKILL_FILE_NAME if src.is_dir() else src
+    default_name = _default_install_name(src)
 
     if src_skill_file.name != _SKILL_FILE_NAME or not src_skill_file.is_file():
         return {
