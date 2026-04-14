@@ -90,13 +90,15 @@ class TestSkillUpdate:
 class TestSkillInstall:
     def test_installs_from_skill_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path / "installed")
-        src = tmp_path / "SKILL.md"
+        src = tmp_path / "source-skill" / "SKILL.md"
+        src.parent.mkdir()
         src.write_text("---\nname: imported\ndescription: Imported skill\n---\n")
 
-        result = skills_mod.skill_install(str(src), name="imported")
+        result = skills_mod.skill_install(str(src))
 
-        installed = tmp_path / "installed" / "imported" / "SKILL.md"
+        installed = tmp_path / "installed" / "source-skill" / "SKILL.md"
         assert result["success"] is True
+        assert result["name"] == "source-skill"
         assert installed.is_file()
         assert "Imported skill" in installed.read_text()
 

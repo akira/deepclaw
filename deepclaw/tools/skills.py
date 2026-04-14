@@ -225,7 +225,7 @@ def skill_install(
         default_name = src.name
     else:
         src_skill_file = src
-        default_name = src.stem
+        default_name = src.parent.name if src.parent.name != src.anchor else src.stem.lower()
 
     if src_skill_file.name != _SKILL_FILE_NAME or not src_skill_file.is_file():
         return {
