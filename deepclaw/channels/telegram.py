@@ -42,7 +42,7 @@ from deepclaw.scheduler import (
     parse_cron_add,
     remove_job,
 )
-from deepclaw.tools.skills import skill_create, skill_install, skill_view, skills_list
+from deepclaw.tools.skills import skill_create, skill_delete, skill_install, skill_view, skills_list
 
 logger = logging.getLogger(__name__)
 
@@ -252,8 +252,21 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
+    if subcommand in {"delete", "remove", "rm"}:
+        if not args:
+            await update.message.reply_text("Usage: /skills delete <name>")
+            return
+        result = skill_delete(args)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(
+            f"Deleted skill: {result['name']}\nRemoved: {result['path']}"
+        )
+        return
+
     await update.message.reply_text(
-        "Usage: /skills [browse|view <name>|create <name> | <description>|install <path> [| <name>]]"
+        "Usage: /skills [browse|view <name>|create <name> | <description>|install <path> [| <name>]|delete <name>]"
     )
 
 
@@ -285,7 +298,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/clear \u2014 Clear conversation (alias for /new)\n"
         "/retry \u2014 Re-send the last message\n"
         "/model [name] \u2014 View or set the active model\n"
-        "/skills [subcommand] \u2014 Browse/view/create/install local skills\n"
+        "/skills [subcommand] \u2014 Browse/view/create/install/delete local skills\n"
         "/memory \u2014 Show MEMORY.md\n"
         "/soul \u2014 Show SOUL.md\n"
         "/uptime \u2014 Show bot uptime\n"

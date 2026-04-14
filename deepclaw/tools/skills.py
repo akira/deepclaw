@@ -6,6 +6,7 @@ Provides:
   - skill_create: create a new local skill
   - skill_update: update an existing local skill
   - skill_install: import a skill from a local file or directory
+  - skill_delete: remove an installed local skill
 """
 
 import re
@@ -266,6 +267,33 @@ def skill_install(
     }
 
 
+def skill_delete(name: str) -> dict[str, Any]:
+    """Delete an installed local skill directory under ~/.deepclaw/skills.
+
+    Args:
+        name: Existing skill name.
+
+    Returns:
+        Dictionary describing the deleted skill.
+    """
+    try:
+        dest_dir = _skill_dir(name)
+    except ValueError as e:
+        return {"error": str(e), "name": name}
+
+    skill_file = dest_dir / _SKILL_FILE_NAME
+    if not skill_file.is_file():
+        return {"error": f"Skill not found: {name}", "name": name}
+
+    shutil.rmtree(dest_dir)
+    return {
+        "success": True,
+        "action": "deleted",
+        "name": name,
+        "path": str(skill_file),
+    }
+
+
 def get_tools() -> list:
     """Return the tool callables for this plugin."""
-    return [skills_list, skill_view, skill_create, skill_update, skill_install]
+    return [skills_list, skill_view, skill_create, skill_update, skill_install, skill_delete]

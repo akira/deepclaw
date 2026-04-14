@@ -138,3 +138,26 @@ class TestSkillInstall:
 
         assert "error" in result
         assert "already exists" in result["error"]
+
+
+class TestSkillDelete:
+    def test_deletes_existing_skill(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+        skill_dir = tmp_path / "delete-me"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("# Delete Me")
+
+        result = skills_mod.skill_delete("delete-me")
+
+        assert result["success"] is True
+        assert result["action"] == "deleted"
+        assert not skill_dir.exists()
+
+    def test_delete_missing_skill_returns_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+
+        result = skills_mod.skill_delete("missing")
+
+        assert "error" in result
+        assert "Skill not found" in result["error"]

@@ -616,6 +616,9 @@ class TestSkillsCommandHelpers:
             "deepclaw-development",
         )
 
+    def test_parse_skills_delete_alias(self):
+        assert _parse_skills_command("/skills rm demo-skill") == ("rm", "demo-skill")
+
     def test_format_skills_list(self, monkeypatch):
         monkeypatch.setattr(
             "deepclaw.channels.telegram.skills_list",
@@ -710,6 +713,20 @@ class TestCmdSkills:
         assert calls == [("/tmp/source-skill/SKILL.md", "imported")]
         reply = update.message.reply_text.call_args[0][0]
         assert "Installed skill: imported" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_delete_removes_skill(self, monkeypatch):
+        update = _make_slash_update(text="/skills delete demo-skill")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skill_delete",
+            lambda name: {"name": name, "path": f"/tmp/{name}/SKILL.md"},
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Deleted skill: demo-skill" in reply
 
     @pytest.mark.asyncio
     async def test_skills_unknown_subcommand_shows_usage(self):
