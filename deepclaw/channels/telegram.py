@@ -42,6 +42,7 @@ from deepclaw.scheduler import (
     parse_cron_add,
     remove_job,
 )
+from deepclaw.tools.skills import skill_create, skill_install, skill_view, skills_list
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,103 @@ def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
     return thread_ids.get(chat_id, chat_id)
 
 
+def _parse_skills_command(raw_text: str) -> tuple[str, str]:
+    """Parse `/skills ...` into a subcommand and argument string."""
+    parts = (raw_text or "").strip().split(maxsplit=2)
+    if len(parts) == 1:
+        return "browse", ""
+    if len(parts) == 2:
+        return parts[1].lower(), ""
+    return parts[1].lower(), parts[2].strip()
+
+
+def _format_skills_list() -> str:
+    """Return a user-facing summary of installed local skills."""
+    result = skills_list()
+    skills = result.get("skills", [])
+    if not skills:
+        return "No local skills installed yet."
+
+    lines = [f"Installed skills ({result['count']}):"]
+    for skill in skills[:20]:
+        description = skill.get("description") or "(no description)"
+        lines.append(f"- {skill['name']}: {description}")
+    if len(skills) > 20:
+        lines.append(f"...and {len(skills) - 20} more")
+    return "\n".join(lines)
+
+
+async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /skills subcommands for local skill management."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+
+    subcommand, args = _parse_skills_command(update.message.text or "/skills")
+
+    if subcommand in {"", "browse", "list"}:
+        await update.message.reply_text(_format_skills_list())
+        return
+
+    if subcommand == "view":
+        if not args:
+            await update.message.reply_text("Usage: /skills view <name>")
+            return
+        result = skill_view(args)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        header = f"Skill: {result['name']}\nPath: {result['path']}\n"
+        text = header + "\n" + result["content"]
+        for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+            await update.message.reply_text(chunk)
+        return
+
+    if subcommand == "create":
+        if "|" not in args:
+            await update.message.reply_text("Usage: /skills create <name> | <description>")
+            return
+        name, description = [part.strip() for part in args.split("|", maxsplit=1)]
+        if not name or not description:
+            await update.message.reply_text("Usage: /skills create <name> | <description>")
+            return
+        result = skill_create(name, description)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(
+            f"Created skill: {result['name']}\nPath: {result['path']}\nDescription: {result['description']}"
+        )
+        return
+
+    if subcommand == "install":
+        if not args:
+            await update.message.reply_text(
+                "Usage: /skills install <source_path> or /skills install <source_path> | <name>"
+            )
+            return
+        if "|" in args:
+            source_path, name = [part.strip() for part in args.split("|", maxsplit=1)]
+            dest_name = name or None
+        else:
+            source_path = args.strip()
+            dest_name = None
+        result = skill_install(source_path, name=dest_name)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(
+            f"Installed skill: {result['name']}\nPath: {result['path']}\nSource: {result['source_path']}"
+        )
+        return
+
+    await update.message.reply_text(
+        "Usage: /skills [browse|view <name>|create <name> | <description>|install <path> [| <name>]]"
+    )
+
+
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /new -- start a fresh conversation thread."""
     if not authorize_chat(update):
@@ -187,6 +285,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/clear \u2014 Clear conversation (alias for /new)\n"
         "/retry \u2014 Re-send the last message\n"
         "/model [name] \u2014 View or set the active model\n"
+        "/skills [subcommand] \u2014 Browse/view/create/install local skills\n"
         "/memory \u2014 Show MEMORY.md\n"
         "/soul \u2014 Show SOUL.md\n"
         "/uptime \u2014 Show bot uptime\n"
@@ -802,6 +901,7 @@ async def post_init(application: Application) -> None:
             BotCommand("clear", "Clear conversation (alias for /new)"),
             BotCommand("retry", "Re-send the last message"),
             BotCommand("model", "View or set the active model"),
+            BotCommand("skills", "Browse or manage local skills"),
             BotCommand("memory", "Show MEMORY.md"),
             BotCommand("soul", "Show SOUL.md"),
             BotCommand("uptime", "Show bot uptime"),
@@ -857,6 +957,7 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("clear", cmd_clear))
     application.add_handler(CommandHandler("retry", cmd_retry))
     application.add_handler(CommandHandler("model", cmd_model))
+    application.add_handler(CommandHandler("skills", cmd_skills))
     application.add_handler(CommandHandler("memory", cmd_memory))
     application.add_handler(CommandHandler("soul", cmd_soul))
     application.add_handler(CommandHandler("uptime", cmd_uptime))
