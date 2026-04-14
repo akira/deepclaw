@@ -162,6 +162,13 @@ description: Structured approach to conducting thorough web research
 
 The agent sees skill names and descriptions in its system prompt and reads the full content on demand.
 
+DeepClaw also exposes local skill-management tools so it can manage this directory itself:
+- `skills_list()` — browse installed skills
+- `skill_view(name)` — inspect one skill
+- `skill_create(name, description, content=None)` — create a new local skill
+- `skill_update(name, content)` — replace an existing skill's SKILL.md
+- `skill_install(source_path, name=None)` — import a skill from a local `SKILL.md` file or a directory containing one
+
 ## Subagents
 
 The main agent can delegate tasks to specialized subagents via the `task` tool. Each subagent runs in an isolated conversation with its own system prompt, handles the work, and returns a clean summary.
