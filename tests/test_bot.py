@@ -17,13 +17,16 @@ from deepclaw.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
     _build_incoming_text,
+    _format_skills_list,
     _looks_like_supported_image,
+    _parse_skills_command,
     _validate_model,
     authorize_chat,
     cmd_clear,
     cmd_memory,
     cmd_model,
     cmd_retry,
+    cmd_skills,
     cmd_soul,
     cmd_uptime,
     get_thread_id,
@@ -596,3 +599,141 @@ class TestCmdRetry:
         ctx = _make_slash_context()
         await cmd_retry(update, ctx)
         update.message.reply_text.assert_called_once_with("No previous message to retry.")
+
+
+# ---------------------------------------------------------------------------
+# /skills
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsCommandHelpers:
+    def test_parse_skills_defaults_to_browse(self):
+        assert _parse_skills_command("/skills") == ("browse", "")
+
+    def test_parse_skills_with_subcommand_and_args(self):
+        assert _parse_skills_command("/skills view deepclaw-development") == (
+            "view",
+            "deepclaw-development",
+        )
+
+    def test_parse_skills_delete_alias(self):
+        assert _parse_skills_command("/skills rm demo-skill") == ("rm", "demo-skill")
+
+    def test_format_skills_list(self, monkeypatch):
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skills_list",
+            lambda: {
+                "count": 2,
+                "skills": [
+                    {"name": "a", "description": "first"},
+                    {"name": "b", "description": "second"},
+                ],
+            },
+        )
+        text = _format_skills_list()
+        assert "Installed skills (2):" in text
+        assert "- a: first" in text
+        assert "- b: second" in text
+
+
+class TestCmdSkills:
+    @pytest.mark.asyncio
+    async def test_skills_default_lists_installed_skills(self, monkeypatch):
+        update = _make_slash_update(text="/skills")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skills_list",
+            lambda: {
+                "count": 1,
+                "skills": [{"name": "deepclaw-development", "description": "DeepClaw dev"}],
+            },
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "deepclaw-development" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_view_returns_content(self, monkeypatch):
+        update = _make_slash_update(text="/skills view demo-skill")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skill_view",
+            lambda name: {
+                "name": name,
+                "path": "/tmp/demo-skill/SKILL.md",
+                "content": "# Demo Skill\n\nHello",
+            },
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Skill: demo-skill" in reply
+        assert "Hello" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_create_creates_skill(self, monkeypatch):
+        update = _make_slash_update(text="/skills create demo-skill | Demo description")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skill_create",
+            lambda name, description: {
+                "name": name,
+                "path": f"/tmp/{name}/SKILL.md",
+                "description": description,
+            },
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Created skill: demo-skill" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_install_uses_optional_name(self, monkeypatch):
+        update = _make_slash_update(text="/skills install /tmp/source-skill/SKILL.md | imported")
+        ctx = _make_slash_context()
+
+        calls = []
+
+        def _fake_install(source_path, name=None):
+            calls.append((source_path, name))
+            return {
+                "name": name or "source-skill",
+                "path": "/tmp/imported/SKILL.md",
+                "source_path": source_path,
+            }
+
+        monkeypatch.setattr("deepclaw.channels.telegram.skill_install", _fake_install)
+
+        await cmd_skills(update, ctx)
+
+        assert calls == [("/tmp/source-skill/SKILL.md", "imported")]
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Installed skill: imported" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_delete_removes_skill(self, monkeypatch):
+        update = _make_slash_update(text="/skills delete demo-skill")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skill_delete",
+            lambda name: {"name": name, "path": f"/tmp/{name}/SKILL.md"},
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Deleted skill: demo-skill" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_unknown_subcommand_shows_usage(self):
+        update = _make_slash_update(text="/skills nonsense")
+        ctx = _make_slash_context()
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Usage: /skills" in reply

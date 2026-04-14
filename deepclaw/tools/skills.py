@@ -6,6 +6,7 @@ Provides:
   - skill_create: create a new local skill
   - skill_update: update an existing local skill
   - skill_install: import a skill from a local file or directory
+  - skill_delete: remove an installed local skill
 """
 
 import re
@@ -64,6 +65,13 @@ def _extract_description(content: str) -> str:
         return match.group(1).strip()
     first_nonempty = next((line.strip() for line in content.splitlines() if line.strip()), "")
     return first_nonempty[:120]
+
+
+def _default_install_name(src: Path) -> str:
+    """Return the default installed skill name for a source path."""
+    if src.is_dir():
+        return src.name
+    return src.parent.name if src.parent.name else src.stem.lower()
 
 
 def _default_skill_content(name: str, description: str) -> str:
@@ -220,12 +228,8 @@ def skill_install(
     if not src.exists():
         return {"error": f"Source path not found: {src}", "source_path": source_path}
 
-    if src.is_dir():
-        src_skill_file = src / _SKILL_FILE_NAME
-        default_name = src.name
-    else:
-        src_skill_file = src
-        default_name = src.parent.name if src.parent.name != src.anchor else src.stem.lower()
+    src_skill_file = src / _SKILL_FILE_NAME if src.is_dir() else src
+    default_name = _default_install_name(src)
 
     if src_skill_file.name != _SKILL_FILE_NAME or not src_skill_file.is_file():
         return {
@@ -266,6 +270,33 @@ def skill_install(
     }
 
 
+def skill_delete(name: str) -> dict[str, Any]:
+    """Delete an installed local skill directory under ~/.deepclaw/skills.
+
+    Args:
+        name: Existing skill name.
+
+    Returns:
+        Dictionary describing the deleted skill.
+    """
+    try:
+        dest_dir = _skill_dir(name)
+    except ValueError as e:
+        return {"error": str(e), "name": name}
+
+    skill_file = dest_dir / _SKILL_FILE_NAME
+    if not skill_file.is_file():
+        return {"error": f"Skill not found: {name}", "name": name}
+
+    shutil.rmtree(dest_dir)
+    return {
+        "success": True,
+        "action": "deleted",
+        "name": name,
+        "path": str(skill_file),
+    }
+
+
 def get_tools() -> list:
     """Return the tool callables for this plugin."""
-    return [skills_list, skill_view, skill_create, skill_update, skill_install]
+    return [skills_list, skill_view, skill_create, skill_update, skill_install, skill_delete]
