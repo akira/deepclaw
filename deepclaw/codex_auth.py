@@ -1,6 +1,6 @@
 """Codex and GitHub Copilot authentication for DeepClaw.
 
-Ported from hermes-agent's copilot_auth.py and auth.py. Supports two providers:
+Supports two providers:
 
 GitHub Copilot
   Token resolution order (matches Copilot CLI behaviour):
@@ -358,8 +358,7 @@ def _write_codex_cli_tokens(access_token: str, refresh_token: str) -> None:
 
     OpenAI refresh tokens are single-use and rotate on every refresh. If we
     don't write the new pair back, the Codex CLI / VS Code extension will fail
-    with refresh_token_reused on its next attempt. Mirrors hermes-agent's
-    _write_codex_cli_tokens().
+    with refresh_token_reused on its next attempt.
     """
     codex_home = os.getenv("CODEX_HOME", "").strip() or str(Path.home() / ".codex")
     auth_path = Path(codex_home).expanduser() / "auth.json"
