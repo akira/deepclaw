@@ -66,8 +66,7 @@ def _looks_like_narration(text: str) -> bool:
     """Return True if text describes a tool action without having called any tools."""
     lower = text.lower()
     has_opener = any(
-        lower.lstrip().startswith(op) or f"\n{op}" in lower
-        for op in _NARRATION_OPENERS
+        lower.lstrip().startswith(op) or f"\n{op}" in lower for op in _NARRATION_OPENERS
     )
     has_action = any(word in lower for word in _ACTION_WORDS)
     return has_opener and has_action
@@ -200,9 +199,7 @@ class Gateway:
             return tool_calls_seen
 
         try:
-            tool_calls_seen = await _stream_once(
-                [{"role": "user", "content": message.text}]
-            )
+            tool_calls_seen = await _stream_once([{"role": "user", "content": message.text}])
 
             # If the model described an action without calling any tools, nudge it once.
             if not tool_calls_seen and _looks_like_narration(accumulated):

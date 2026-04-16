@@ -409,9 +409,7 @@ class TestGatewayNarrationNudge:
     async def test_no_nudge_for_plain_answer(self):
         """A plain text answer without narration patterns does not trigger a retry."""
         chunk = (
-            SimpleNamespace(
-                content_blocks=[{"type": "text", "text": "The answer is 42."}]
-            ),
+            SimpleNamespace(content_blocks=[{"type": "text", "text": "The answer is 42."}]),
             {},
         )
         agent = _MultiCallStreamingAgent([[chunk]])
@@ -434,9 +432,7 @@ class TestGatewayNarrationNudge:
             {},
         )
         recovery_chunk = (
-            SimpleNamespace(
-                content_blocks=[{"type": "text", "text": "Found it: 42."}]
-            ),
+            SimpleNamespace(content_blocks=[{"type": "text", "text": "Found it: 42."}]),
             {},
         )
         agent = _MultiCallStreamingAgent([[narration_chunk], [recovery_chunk]])
