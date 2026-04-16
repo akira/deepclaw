@@ -320,6 +320,13 @@ class TestLooksLikeNarration:
             "The tests all passed.",
             "",
             "Sure, happy to help.",
+            # Devin review: substring false positives — word-boundary matching required
+            "I'll explain this because it's important.",  # "use" in "because"
+            "I should clarify because there's a misunderstanding.",
+            "Let me think about this because it's tricky.",
+            "I'll forget about that.",  # "get" in "forget"
+            "I'll listen to your explanation.",  # "list" in "listen"
+            "Let me pause for a moment.",  # "use" in "pause"
         ],
     )
     def test_ignores_final_answers(self, text):

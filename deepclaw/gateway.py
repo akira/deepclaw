@@ -5,6 +5,7 @@ so adding Discord/Slack/etc. requires zero changes here.
 """
 
 import logging
+import re
 import time
 
 from langchain_core.messages import ToolMessage
@@ -56,6 +57,9 @@ _ACTION_WORDS = (
     "call",
     "use",
 )
+# Pre-compiled regex for whole-word action matching — avoids substring false positives
+# such as "use" in "because", "get" in "forget", "list" in "listen".
+_ACTION_RE = re.compile(r"\b(" + "|".join(_ACTION_WORDS) + r")\b")
 _NUDGE_MESSAGE = (
     "You described an action but did not call any tools. "
     "Please call the appropriate tool now to carry out what you described."
@@ -68,7 +72,7 @@ def _looks_like_narration(text: str) -> bool:
     has_opener = any(
         lower.lstrip().startswith(op) or f"\n{op}" in lower for op in _NARRATION_OPENERS
     )
-    has_action = any(word in lower for word in _ACTION_WORDS)
+    has_action = bool(_ACTION_RE.search(lower))
     return has_opener and has_action
 
 
