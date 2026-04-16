@@ -117,6 +117,11 @@ DEFAULT_CONFIG_YAML = """\
 # Shell command timeout in seconds (default: 300 = 5 minutes)
 # command_timeout: 300
 
+# LangSmith tracing — add these to ~/.deepclaw/.env (not this file):
+#   LANGSMITH_API_KEY=lsv2_...
+#   LANGSMITH_TRACING=true
+#   LANGSMITH_PROJECT=deepclaw
+
 # Telegram settings
 # telegram:
 #   allowed_users:
@@ -151,6 +156,12 @@ def load_config() -> DeepClawConfig:
 
     # Load .env
     dot_env = _parse_env_file(ENV_FILE)
+
+    # Expose .env vars to third-party SDKs (e.g. LangSmith) that read os.environ
+    # directly. Shell env takes precedence — never overwrite.
+    for key, value in dot_env.items():
+        if key not in os.environ:
+            os.environ[key] = value
 
     # Load config.yaml
     yaml_data: dict = {}
