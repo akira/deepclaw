@@ -180,11 +180,12 @@ def _build_model(config):
                 "or run `deepclaw login copilot`."
             )
         logger.info("Using GitHub Copilot token from %s", source)
+        # Set OPENAI_API_KEY so the OpenAI SDK doesn't fall back to a stale env var
+        os.environ["OPENAI_API_KEY"] = token
         inner = model_str[len("copilot:") :]
         return init_chat_model(
             f"openai:{inner}",
             base_url="https://api.githubcopilot.com",
-            openai_api_key=token,
             default_headers=copilot_request_headers(),
         )
 
@@ -194,10 +195,11 @@ def _build_model(config):
         token = resolve_codex_token()
         inner = model_str[len("codex:") :]
         logger.info("Using OpenAI Codex OAuth token")
+        # Set OPENAI_API_KEY so the OpenAI SDK doesn't fall back to a stale env var
+        os.environ["OPENAI_API_KEY"] = token
         return init_chat_model(
             f"openai:{inner}",
             base_url=CODEX_BASE_URL,
-            openai_api_key=token,
         )
 
     return model_str or None
