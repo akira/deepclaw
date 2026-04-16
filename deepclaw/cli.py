@@ -50,11 +50,27 @@ def _handle_service_command(args: list[str]) -> None:
         raise SystemExit(1)
 
 
-def _handle_login_command() -> None:
-    """Handle 'deepclaw login' — OAuth PKCE flow for Claude Pro/Max."""
+def _handle_login_command(args: list[str]) -> None:
+    """Handle 'deepclaw login [provider]'.
+
+    Providers:
+      (none)   — Claude Pro/Max OAuth PKCE flow (default)
+      copilot  — GitHub Copilot device code flow
+      codex    — Import tokens from ~/.codex/auth.json (written by Codex CLI)
+    """
+    provider = args[0].lower() if args else "claude"
+
+    if provider == "copilot":
+        _handle_login_copilot()
+    elif provider == "codex":
+        _handle_login_codex()
+    else:
+        _handle_login_claude()
+
+
+def _handle_login_claude() -> None:
     from deepclaw.oauth import login, resolve_token
 
-    # Check if already authenticated
     token, is_oauth = resolve_token()
     if token and is_oauth:
         print("Already authenticated with OAuth credentials.")  # noqa: T201
@@ -68,6 +84,64 @@ def _handle_login_command() -> None:
     else:
         print("Login failed.")  # noqa: T201
         raise SystemExit(1)
+
+
+def _handle_login_copilot() -> None:
+    """Device code OAuth flow to obtain a GitHub gho_* token for Copilot."""
+    from deepclaw.codex_auth import copilot_device_code_login, resolve_copilot_token
+
+    # Show existing token if present
+    token, source = resolve_copilot_token()
+    if token:
+        print(f"Already authenticated with GitHub Copilot (token from {source}).")  # noqa: T201
+        answer = input("Re-authenticate? [y/N] ").strip().lower()
+        if answer != "y":
+            return
+
+    print("Authenticating with GitHub Copilot via device code flow...")  # noqa: T201
+    token = copilot_device_code_login()
+    if token:
+        # Store in GH_TOKEN so the current process and subprocesses pick it up,
+        # and advise the user to persist it in their .env file.
+        import os
+
+        os.environ["GH_TOKEN"] = token
+        print("Login successful!")  # noqa: T201
+        print(  # noqa: T201
+            f"Add the following to ~/.deepclaw/.env to persist across restarts:\n  GH_TOKEN={token}"
+        )
+    else:
+        print("Login failed.")  # noqa: T201
+        raise SystemExit(1)
+
+
+def _handle_login_codex() -> None:
+    """Import Codex tokens from ~/.codex/auth.json (written by the Codex CLI)."""
+    from deepclaw.codex_auth import (
+        _import_codex_cli_tokens,
+        _save_codex_tokens,
+        resolve_codex_token,
+    )
+
+    print("Importing Codex credentials from ~/.codex/auth.json ...")  # noqa: T201
+    cli_tokens = _import_codex_cli_tokens()
+    if not cli_tokens:
+        print(  # noqa: T201
+            "No valid Codex tokens found in ~/.codex/auth.json.\n"
+            "Run `codex` in your terminal to log in via the Codex CLI, then re-run "
+            "`deepclaw login codex`."
+        )
+        raise SystemExit(1)
+
+    _save_codex_tokens(cli_tokens["access_token"], cli_tokens["refresh_token"])
+    print("Codex credentials imported successfully.")  # noqa: T201
+
+    # Verify resolve works end-to-end
+    try:
+        resolve_codex_token()
+        print("Token verified. Set `model: codex:<model-name>` in config.yaml to use Codex.")  # noqa: T201
+    except ValueError as exc:
+        print(f"Warning: token import succeeded but verification failed: {exc}")  # noqa: T201
 
 
 def _handle_logout_command() -> None:
@@ -91,7 +165,7 @@ def main() -> None:
         _handle_doctor_command()
         return
     if args and args[0] == "login":
-        _handle_login_command()
+        _handle_login_command(args[1:])
         return
     if args and args[0] == "logout":
         _handle_logout_command()

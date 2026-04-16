@@ -150,6 +150,59 @@ def _setup_auth() -> None:
         logger.info("Using API key for authentication")
 
 
+def _is_copilot_model(model_str: str) -> bool:
+    return model_str.startswith("copilot:")
+
+
+def _is_codex_model(model_str: str) -> bool:
+    return model_str.startswith("codex:")
+
+
+def _build_model(config):
+    """Return a model string or pre-initialized BaseChatModel.
+
+    Standard provider strings (anthropic:, openai:, ...) are returned as-is so
+    deepagents calls init_chat_model() normally.  copilot: and codex: prefixes
+    resolve credentials and return a pre-initialized ChatOpenAI with the right
+    base_url and api_key.
+    """
+    from langchain.chat_models import init_chat_model
+
+    model_str = config.model or ""
+
+    if _is_copilot_model(model_str):
+        from deepclaw.codex_auth import copilot_request_headers, resolve_copilot_token
+
+        token, source = resolve_copilot_token()
+        if not token:
+            raise ValueError(
+                "No GitHub Copilot token found. Set COPILOT_GITHUB_TOKEN, GH_TOKEN, "
+                "or run `deepclaw login copilot`."
+            )
+        logger.info("Using GitHub Copilot token from %s", source)
+        inner = model_str[len("copilot:") :]
+        return init_chat_model(
+            f"openai:{inner}",
+            base_url="https://api.githubcopilot.com",
+            openai_api_key=token,
+            default_headers=copilot_request_headers(),
+        )
+
+    if _is_codex_model(model_str):
+        from deepclaw.codex_auth import CODEX_BASE_URL, resolve_codex_token
+
+        token = resolve_codex_token()
+        inner = model_str[len("codex:") :]
+        logger.info("Using OpenAI Codex OAuth token")
+        return init_chat_model(
+            f"openai:{inner}",
+            base_url=CODEX_BASE_URL,
+            openai_api_key=token,
+        )
+
+    return model_str or None
+
+
 def create_agent(config, checkpointer):
     """Create a DeepAgents agent with the given config and checkpointer."""
     _setup_auth()
@@ -190,7 +243,7 @@ def create_agent(config, checkpointer):
     tools = discover_tools()
 
     return create_deep_agent(
-        model=config.model or None,
+        model=_build_model(config),
         backend=backend,
         checkpointer=checkpointer,
         middleware=middleware,
