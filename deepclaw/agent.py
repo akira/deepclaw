@@ -78,6 +78,18 @@ Use skills as your procedural memory.
 """
 
 
+TOOL_USE_ENFORCEMENT = """\
+## Tool Use Enforcement
+
+When you need to use a tool, call it immediately — never describe what you are \
+about to do in text first. Do not say "I'll now check X", "Let me search for Y", \
+or "I will run Z" without actually calling the corresponding tool in the same \
+response. Every response must either (a) make progress by calling tools, or \
+(b) deliver a final answer to the user. Responses that only describe intentions \
+without acting are not acceptable.\
+"""
+
+
 def _load_soul() -> str | None:
     """Load SOUL.md from ~/.deepclaw/SOUL.md.
 
@@ -170,8 +182,9 @@ def create_agent(config, checkpointer):
         )
     )
 
-    # System prompt from SOUL.md
-    system_prompt = _load_soul()
+    # System prompt from SOUL.md, always followed by tool-use enforcement
+    soul = _load_soul()
+    system_prompt = (soul + "\n\n" + TOOL_USE_ENFORCEMENT) if soul else TOOL_USE_ENFORCEMENT
 
     # Tool plugins
     tools = discover_tools()

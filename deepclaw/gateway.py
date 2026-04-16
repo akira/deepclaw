@@ -17,6 +17,61 @@ logger = logging.getLogger(__name__)
 CURSOR_INDICATOR = "\u258c"
 THINKING_MESSAGE = "Thinking..."
 
+# Phrases that suggest the model is describing a future action instead of calling a tool
+_NARRATION_OPENERS = (
+    "i'll ",
+    "i will ",
+    "let me ",
+    "i'm going to ",
+    "i am going to ",
+    "i can ",
+    "i need to ",
+    "i should ",
+    "now i'll ",
+    "next i'll ",
+    "first i'll ",
+    "i'll now ",
+)
+_ACTION_WORDS = (
+    "check",
+    "look",
+    "search",
+    "find",
+    "read",
+    "write",
+    "create",
+    "run",
+    "execute",
+    "analyze",
+    "fetch",
+    "get",
+    "update",
+    "install",
+    "clone",
+    "open",
+    "scan",
+    "list",
+    "review",
+    "examine",
+    "call",
+    "use",
+)
+_NUDGE_MESSAGE = (
+    "You described an action but did not call any tools. "
+    "Please call the appropriate tool now to carry out what you described."
+)
+
+
+def _looks_like_narration(text: str) -> bool:
+    """Return True if text describes a tool action without having called any tools."""
+    lower = text.lower()
+    has_opener = any(
+        lower.lstrip().startswith(op) or f"\n{op}" in lower
+        for op in _NARRATION_OPENERS
+    )
+    has_action = any(word in lower for word in _ACTION_WORDS)
+    return has_opener and has_action
+
 
 def chunk_message(text: str, limit: int = 4096) -> list[str]:
     """Split text into chunks that fit within a channel's message size limit."""
@@ -76,9 +131,13 @@ class Gateway:
         chars_since_edit = 0
         limit = channel.message_limit
 
-        try:
+        async def _stream_once(input_messages: list[dict]) -> bool:
+            """Stream one agent turn. Returns True if any tool calls were seen."""
+            nonlocal accumulated, last_edit_time, chars_since_edit
+            tool_calls_seen = False
+
             async for chunk in self.agent.astream(
-                {"messages": [{"role": "user", "content": message.text}]},
+                {"messages": input_messages},
                 config={"configurable": {"thread_id": thread_id}},
                 stream_mode="messages",
             ):
@@ -105,6 +164,7 @@ class Gateway:
                     block_type = block.get("type")
 
                     if block_type in ("tool_call", "tool_call_chunk"):
+                        tool_calls_seen = True
                         tool_name = block.get("name")
                         if tool_name:
                             tool_args = block.get("args", {})
@@ -136,6 +196,21 @@ class Gateway:
                             )
                         last_edit_time = time.monotonic()
                         chars_since_edit = 0
+
+            return tool_calls_seen
+
+        try:
+            tool_calls_seen = await _stream_once(
+                [{"role": "user", "content": message.text}]
+            )
+
+            # If the model described an action without calling any tools, nudge it once.
+            if not tool_calls_seen and _looks_like_narration(accumulated):
+                logger.info("Narration-without-tool-call detected — sending nudge")
+                accumulated = ""
+                last_edit_time = time.monotonic()
+                chars_since_edit = 0
+                await _stream_once([{"role": "user", "content": _NUDGE_MESSAGE}])
         except Exception:
             logger.exception("Agent streaming failed")
             accumulated = accumulated or "Sorry, something went wrong processing your message."
