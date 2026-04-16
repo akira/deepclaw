@@ -8,6 +8,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 ALLOWED_USERS_FILE = "~/.deepclaw/allowed_users.json"
+THREAD_IDS_FILE = "~/.deepclaw/thread_ids.json"
 REJECTION_MESSAGE = "You are not authorized to use this bot. Send /pair <code> to pair."
 
 
@@ -28,6 +29,26 @@ def save_allowed_users(users: set[str]) -> None:
     path = Path(os.path.expanduser(ALLOWED_USERS_FILE))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sorted(users), indent=2))
+
+
+def load_thread_ids() -> dict[str, str]:
+    """Load per-chat thread IDs from the persistent JSON file."""
+    path = Path(os.path.expanduser(THREAD_IDS_FILE))
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.warning("Failed to read %s, starting with empty thread IDs", path)
+        return {}
+
+
+def save_thread_ids(thread_ids: dict[str, str]) -> None:
+    """Save per-chat thread IDs to the persistent JSON file."""
+    path = Path(os.path.expanduser(THREAD_IDS_FILE))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(thread_ids, indent=2))
 
 
 def is_user_allowed(update, allowed_users: set[str]) -> bool:

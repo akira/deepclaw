@@ -28,7 +28,9 @@ from deepclaw.auth import (
     REJECTION_MESSAGE,
     is_user_allowed,
     load_allowed_users,
+    load_thread_ids,
     save_allowed_users,
+    save_thread_ids,
 )
 from deepclaw.channels.base import Channel, IncomingMessage
 from deepclaw.gateway import Gateway, chunk_message
@@ -279,7 +281,9 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = str(update.effective_chat.id)
     new_thread = str(uuid.uuid4())
-    context.bot_data.setdefault(THREAD_IDS_KEY, {})[chat_id] = new_thread
+    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
+    thread_ids[chat_id] = new_thread
+    save_thread_ids(thread_ids)
     logger.info("New thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text(f"Started a new conversation thread.\nThread ID: {new_thread}")
 
@@ -411,7 +415,9 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = str(update.effective_chat.id)
     new_thread = str(uuid.uuid4())
-    context.bot_data.setdefault(THREAD_IDS_KEY, {})[chat_id] = new_thread
+    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
+    thread_ids[chat_id] = new_thread
+    save_thread_ids(thread_ids)
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
     logger.info("Cleared thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text("Conversation cleared.")
@@ -868,6 +874,9 @@ async def post_init(application: Application) -> None:
     allowed_users = set(config.telegram.allowed_users)
     allowed_users.update(load_allowed_users())
     application.bot_data[ALLOWED_USERS_KEY] = allowed_users
+
+    # Restore thread IDs from disk so /new survives bot restarts
+    application.bot_data[THREAD_IDS_KEY] = load_thread_ids()
 
     # Generate pairing code for new user onboarding
     pairing_code = uuid.uuid4().hex[:8]
