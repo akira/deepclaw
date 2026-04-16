@@ -33,7 +33,7 @@ from deepclaw.channels.telegram import (
     handle_message,
 )
 from deepclaw.config import DeepClawConfig
-from deepclaw.gateway import CURSOR_INDICATOR, Gateway, chunk_message
+from deepclaw.gateway import CURSOR_INDICATOR, Gateway, _looks_like_narration, chunk_message
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -287,6 +287,171 @@ class TestGatewayRedaction:
         assert all(
             CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits
         )
+
+
+# ---------------------------------------------------------------------------
+# Narration detection
+# ---------------------------------------------------------------------------
+
+
+class TestLooksLikeNarration:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I'll check the file for you.",
+            "Let me search for that.",
+            "I will run the tests now.",
+            "I'm going to read the directory.",
+            "I need to find the relevant code.",
+            "I should look at the logs.",
+            "Now I'll execute the command.",
+            "First I'll scan the codebase.",
+        ],
+    )
+    def test_detects_narration(self, text):
+        assert _looks_like_narration(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The answer is 42.",
+            "Here is the summary of the results.",
+            "Done! The file has been created.",
+            "The tests all passed.",
+            "",
+            "Sure, happy to help.",
+            # Devin review: substring false positives — word-boundary matching required
+            "I'll explain this because it's important.",  # "use" in "because"
+            "I should clarify because there's a misunderstanding.",
+            "Let me think about this because it's tricky.",
+            "I'll forget about that.",  # "get" in "forget"
+            "I'll listen to your explanation.",  # "list" in "listen"
+            "Let me pause for a moment.",  # "use" in "pause"
+        ],
+    )
+    def test_ignores_final_answers(self, text):
+        assert _looks_like_narration(text) is False
+
+    def test_multiline_narration_in_body(self):
+        text = "Here is what I found.\n\nLet me now check the logs for errors."
+        assert _looks_like_narration(text) is True
+
+    def test_tool_call_present_does_not_affect_function(self):
+        # _looks_like_narration is a pure text check; tool-call tracking is in Gateway
+        text = "I'll use the search tool to find it."
+        assert _looks_like_narration(text) is True
+
+
+# ---------------------------------------------------------------------------
+# Narration nudge in Gateway
+# ---------------------------------------------------------------------------
+
+
+class _MultiCallStreamingAgent:
+    """Agent that returns different chunk sequences on successive astream() calls."""
+
+    def __init__(self, call_responses: list[list]):
+        self._responses = iter(call_responses)
+        self.call_count = 0
+
+    async def astream(self, *_args, **_kwargs):
+        self.call_count += 1
+        chunks = next(self._responses)
+        for chunk in chunks:
+            yield chunk
+
+
+class TestGatewayNarrationNudge:
+    @pytest.mark.asyncio
+    async def test_nudges_when_narration_and_no_tools(self):
+        """When the model narrates without calling tools, the gateway retries with a nudge."""
+        narration_chunk = (
+            SimpleNamespace(
+                content_blocks=[{"type": "text", "text": "I'll check the file for you."}]
+            ),
+            {},
+        )
+        recovery_chunk = (
+            SimpleNamespace(
+                content_blocks=[
+                    {"type": "tool_call", "name": "read_file", "args": {"path": "/tmp/x"}},
+                    {"type": "text", "text": "Done."},
+                ]
+            ),
+            {},
+        )
+        agent = _MultiCallStreamingAgent([[narration_chunk], [recovery_chunk]])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="42", text="check the file")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert agent.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_nudge_when_tool_was_called(self):
+        """When at least one tool fires, no nudge is sent even if the text has narration phrases."""
+        chunk = (
+            SimpleNamespace(
+                content_blocks=[
+                    {"type": "tool_call", "name": "read_file", "args": {}},
+                    {"type": "text", "text": "I'll now check the output."},
+                ]
+            ),
+            {},
+        )
+        agent = _MultiCallStreamingAgent([[chunk]])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="42", text="read the file")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert agent.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_nudge_for_plain_answer(self):
+        """A plain text answer without narration patterns does not trigger a retry."""
+        chunk = (
+            SimpleNamespace(content_blocks=[{"type": "text", "text": "The answer is 42."}]),
+            {},
+        )
+        agent = _MultiCallStreamingAgent([[chunk]])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="42", text="what is the answer?")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert agent.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_nudge_response_is_delivered(self):
+        """After a nudge, the recovery response text is what gets sent to the channel."""
+        narration_chunk = (
+            SimpleNamespace(
+                content_blocks=[{"type": "text", "text": "I will search for the answer."}]
+            ),
+            {},
+        )
+        recovery_chunk = (
+            SimpleNamespace(content_blocks=[{"type": "text", "text": "Found it: 42."}]),
+            {},
+        )
+        agent = _MultiCallStreamingAgent([[narration_chunk], [recovery_chunk]])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="42", text="find the answer")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        final_edit = channel.edits[-1][2]
+        assert "Found it: 42." in final_edit
 
 
 # ---------------------------------------------------------------------------
