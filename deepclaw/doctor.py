@@ -66,13 +66,53 @@ def check_telegram_token(config: DeepClawConfig) -> Check:
     return Check("Telegram token", STATUS_FAIL, "bot_token is not set")
 
 
-def check_llm_api_key() -> Check:
-    """Check whether ANTHROPIC_API_KEY or OPENAI_API_KEY is set in environment."""
+def check_llm_api_key(config: DeepClawConfig | None = None) -> Check:
+    """Check whether credentials are available for the configured model."""
+    model = (config.model if config else None) or ""
+
+    if model.startswith("codex:"):
+        from deepclaw.codex_auth import (
+            _CODEX_AUTH_FILE,
+            _import_codex_cli_tokens,
+            _load_codex_tokens,
+        )
+
+        if _load_codex_tokens() is not None:
+            return Check(
+                "LLM credentials", STATUS_OK, "Codex tokens found in ~/.deepclaw/codex_auth.json"
+            )
+        if _import_codex_cli_tokens() is not None:
+            return Check(
+                "LLM credentials",
+                STATUS_WARN,
+                "Codex tokens found in ~/.codex/auth.json (run `deepclaw login codex` to import)",
+            )
+        return Check(
+            "LLM credentials",
+            STATUS_FAIL,
+            f"{_CODEX_AUTH_FILE} not found — run `deepclaw login codex`",
+        )
+
+    if model.startswith("copilot:"):
+        from deepclaw.codex_auth import resolve_copilot_token
+
+        try:
+            token, source = resolve_copilot_token()
+        except ValueError as exc:
+            return Check("LLM credentials", STATUS_FAIL, str(exc))
+        if token:
+            return Check("LLM credentials", STATUS_OK, f"Copilot token available (from {source})")
+        return Check(
+            "LLM credentials", STATUS_FAIL, "No Copilot token found — run `deepclaw login copilot`"
+        )
+
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return Check("LLM API key", STATUS_OK, "ANTHROPIC_API_KEY is set")
+        return Check("LLM credentials", STATUS_OK, "ANTHROPIC_API_KEY is set")
     if os.environ.get("OPENAI_API_KEY"):
-        return Check("LLM API key", STATUS_OK, "OPENAI_API_KEY is set")
-    return Check("LLM API key", STATUS_FAIL, "Neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set")
+        return Check("LLM credentials", STATUS_OK, "OPENAI_API_KEY is set")
+    return Check(
+        "LLM credentials", STATUS_FAIL, "No API key found — set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+    )
 
 
 def check_workspace(config: DeepClawConfig) -> Check:
@@ -114,7 +154,7 @@ async def run_checks(config: DeepClawConfig) -> list[Check]:
         check_config_file(),
         check_env_file(),
         check_telegram_token(config),
-        check_llm_api_key(),
+        check_llm_api_key(config),
         check_workspace(config),
         check_checkpointer_path(),
         check_service_installed(),
