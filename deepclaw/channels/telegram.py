@@ -44,6 +44,7 @@ from deepclaw.scheduler import (
     parse_cron_add,
     remove_job,
 )
+from deepclaw.tools.memory import memory_add, memory_remove, memory_replace, memory_search
 from deepclaw.tools.skills import skill_create, skill_delete, skill_install, skill_view, skills_list
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,16 @@ def _parse_skills_command(raw_text: str) -> tuple[str, str]:
     parts = (raw_text or "").strip().split(maxsplit=2)
     if len(parts) == 1:
         return "browse", ""
+    if len(parts) == 2:
+        return parts[1].lower(), ""
+    return parts[1].lower(), parts[2].strip()
+
+
+def _parse_memory_command(raw_text: str) -> tuple[str, str]:
+    """Parse `/memory ...` into a subcommand and argument string."""
+    parts = (raw_text or "").strip().split(maxsplit=2)
+    if len(parts) == 1:
+        return "show", ""
     if len(parts) == 2:
         return parts[1].lower(), ""
     return parts[1].lower(), parts[2].strip()
@@ -303,7 +314,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/retry \u2014 Re-send the last message\n"
         "/model [name] \u2014 View or set the active model\n"
         "/skills [subcommand] \u2014 Browse/view/create/install/delete local skills\n"
-        "/memory \u2014 Show MEMORY.md\n"
+        "/memory [subcommand] \u2014 Show/search/edit AGENTS.md memory\n"
         "/soul \u2014 Show SOUL.md\n"
         "/uptime \u2014 Show bot uptime\n"
         "/status \u2014 Show current thread ID and model info\n"
@@ -504,19 +515,95 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /memory -- display MEMORY.md from the workspace."""
+    """Handle /memory subcommands and raw memory display."""
     if not authorize_chat(update):
         return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    memory_path = agent_module.MEMORY_FILE
-    if not memory_path.is_file():
-        await update.message.reply_text("No memory file found.")
+
+    subcommand, args = _parse_memory_command(update.message.text or "/memory")
+
+    if subcommand in {"", "show"}:
+        memory_path = agent_module.MEMORY_FILE
+        if not memory_path.is_file():
+            await update.message.reply_text("No memory file found.")
+            return
+        text = memory_path.read_text(encoding="utf-8").strip() or "(empty)"
+        for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+            await update.message.reply_text(chunk)
         return
-    text = memory_path.read_text(encoding="utf-8").strip() or "(empty)"
-    for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
-        await update.message.reply_text(chunk)
+
+    if subcommand == "search":
+        if not args:
+            await update.message.reply_text("Usage: /memory search <query>")
+            return
+        result = memory_search(args)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        if result["count"] == 0:
+            await update.message.reply_text(f"No memory matches for: {args}")
+            return
+        lines = [f"Memory matches for '{result['query']}' ({result['count']}):"]
+        for match in result["matches"][:20]:
+            lines.append(f"- line {match['line_number']}: {match['line']}")
+        if result["count"] > 20:
+            lines.append(f"...and {result['count'] - 20} more")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if subcommand == "add":
+        if not args:
+            await update.message.reply_text(
+                "Usage: /memory add <text> or /memory add <section> | <text>"
+            )
+            return
+        if "|" in args:
+            section, content = [part.strip() for part in args.split("|", maxsplit=1)]
+            if not section or not content:
+                await update.message.reply_text("Usage: /memory add <section> | <text>")
+                return
+            result = memory_add(content, section=section)
+        else:
+            result = memory_add(args)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(
+            f"Saved memory in section {result['section']}: {result['content']}"
+        )
+        return
+
+    if subcommand == "replace":
+        if "|" not in args:
+            await update.message.reply_text("Usage: /memory replace <old_text> | <new_text>")
+            return
+        old_text, new_text = [part.strip() for part in args.split("|", maxsplit=1)]
+        if not old_text:
+            await update.message.reply_text("Usage: /memory replace <old_text> | <new_text>")
+            return
+        result = memory_replace(old_text, new_text)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(f"Replaced memory text: {result['old_text']}")
+        return
+
+    if subcommand in {"remove", "delete", "rm"}:
+        if not args:
+            await update.message.reply_text("Usage: /memory remove <text>")
+            return
+        result = memory_remove(args)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(f"Removed memory text: {result['text']}")
+        return
+
+    await update.message.reply_text(
+        "Usage: /memory [show|search <query>|add <text>|add <section> | <text>|replace <old_text> | <new_text>|remove <text>]"
+    )
 
 
 async def cmd_soul(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -924,7 +1011,7 @@ async def post_init(application: Application) -> None:
             BotCommand("retry", "Re-send the last message"),
             BotCommand("model", "View or set the active model"),
             BotCommand("skills", "Browse or manage local skills"),
-            BotCommand("memory", "Show MEMORY.md"),
+            BotCommand("memory", "Show or manage memory"),
             BotCommand("soul", "Show SOUL.md"),
             BotCommand("uptime", "Show bot uptime"),
             BotCommand("status", "Show thread ID and model info"),
