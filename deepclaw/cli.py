@@ -95,7 +95,13 @@ def _handle_login_copilot() -> None:
     from deepclaw.codex_auth import copilot_device_code_login, resolve_copilot_token
 
     # Show existing token if present
-    token, source = resolve_copilot_token()
+    try:
+        token, source = resolve_copilot_token()
+    except ValueError as exc:
+        print(f"Existing GitHub token is not usable for Copilot: {exc}")  # noqa: T201
+        print("Continuing with device code login to get a valid OAuth token...")  # noqa: T201
+        token, source = "", ""
+
     if token:
         print(f"Already authenticated with GitHub Copilot (token from {source}).")  # noqa: T201
         answer = input("Re-authenticate? [y/N] ").strip().lower()
