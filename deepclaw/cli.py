@@ -64,8 +64,12 @@ def _handle_login_command(args: list[str]) -> None:
         _handle_login_copilot()
     elif provider == "codex":
         _handle_login_codex()
-    else:
+    elif provider == "claude":
         _handle_login_claude()
+    else:
+        print(f"Unknown login provider: {provider}")  # noqa: T201
+        print("Usage: deepclaw login [claude|copilot|codex]")  # noqa: T201
+        raise SystemExit(1)
 
 
 def _handle_login_claude() -> None:

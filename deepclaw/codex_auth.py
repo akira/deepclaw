@@ -344,13 +344,13 @@ def _save_codex_tokens(access_token: str, refresh_token: str) -> None:
         "refresh_token": refresh_token,
         "saved_at": int(time.time()),
     }
-    with open(path, "w", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            f.write(json.dumps(data, indent=2) + "\n")
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-    path.chmod(0o600)
+
+    # Write atomically to avoid readers observing empty/partial files.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, indent=2) + "\n")
+    tmp_path.chmod(0o600)
+    os.replace(tmp_path, path)
 
 
 def _write_codex_cli_tokens(access_token: str, refresh_token: str) -> None:
@@ -385,7 +385,7 @@ def _write_codex_cli_tokens(access_token: str, refresh_token: str) -> None:
 def _import_codex_cli_tokens() -> dict[str, Any] | None:
     """Try to read tokens from ~/.codex/auth.json (written by the Codex CLI).
 
-    Returns the tokens dict if valid and not already expired, else None.
+    Returns the tokens dict if valid, else None.
     Does NOT write anything to the shared file.
     """
     codex_home = os.getenv("CODEX_HOME", "").strip() or str(Path.home() / ".codex")
@@ -401,10 +401,8 @@ def _import_codex_cli_tokens() -> dict[str, Any] | None:
         refresh_token = tokens.get("refresh_token")
         if not access_token or not refresh_token:
             return None
-        # Skip already-expired tokens — importing them would leave the user stuck
-        if _codex_token_is_expiring(access_token, skew_seconds=0):
-            logger.debug("Codex CLI tokens at %s are expired — skipping import", auth_path)
-            return None
+        # Do not filter on access_token expiry here; resolve_codex_token()
+        # will refresh automatically when needed.
         return dict(tokens)
     except (json.JSONDecodeError, OSError):
         return None
