@@ -13,6 +13,7 @@ A self-hosted AI assistant you talk to over Telegram. It can read your files, ru
 - **Web search** — search the web and extract content from URLs (via Tavily)
 - **Persistent memory** — learns your preferences and remembers context across conversations
 - **Image uploads in Telegram** — send a photo or image file, and the agent can download it and inspect it with the vision tool
+- **Local and remote skills** — create local skills, browse installed skills, search skills.sh, and install skills directly from a skills.sh URL
 - **Cron scheduling** — run agent prompts on a schedule ("summarize my todos every morning at 9am")
 - **Heartbeat monitoring** — periodic proactive checks that only notify you when something needs attention
 - **Customizable personality** — define your agent's voice and behavior via SOUL.md
@@ -74,7 +75,7 @@ uv sync --extra web
 
 ## Choosing a Model
 
-DeepClaw defaults to `claude-sonnet-4-6` but supports any model via the `provider:model` format.
+DeepClaw defaults to `anthropic:claude-sonnet-4-6-20250514` but supports any model via the `provider:model` format.
 
 **Via config file:**
 ```yaml
@@ -101,6 +102,8 @@ Install additional providers as needed:
 ```bash
 uv pip install langchain-openai  # for OpenAI models
 ```
+
+Shell commands default to a 5-minute timeout. You can change this with `command_timeout` in `~/.deepclaw/config.yaml`.
 
 ## Running as a Daemon
 
@@ -162,12 +165,21 @@ description: Structured approach to conducting thorough web research
 
 The agent sees skill names and descriptions in its system prompt and reads the full content on demand.
 
-DeepClaw also exposes local skill-management tools so it can manage this directory itself:
-- `skills_list()` — browse installed skills
-- `skill_view(name)` — inspect one skill
+DeepClaw also exposes skill-management tools and Telegram subcommands so it can manage this directory itself and pull in community skills:
+- `skills_list()` — browse installed local skills
+- `skills_search_remote(query="", limit=10)` — search or browse skills from skills.sh
+- `skill_view(name)` — inspect one installed skill
 - `skill_create(name, description, content=None)` — create a new local skill
 - `skill_update(name, content)` — replace an existing skill's SKILL.md
-- `skill_install(source_path, name=None)` — import a skill from a local `SKILL.md` file or a directory containing one
+- `skill_install(source_path, name=None)` — import a skill from a local `SKILL.md`, a directory containing one, or a skills.sh URL
+
+Telegram examples:
+- `/skills` — browse installed local skills
+- `/skills search browser` — search skills.sh
+- `/skills remote` — browse popular skills.sh results
+- `/skills install https://skills.sh/vercel-labs/agent-browser/agent-browser`
+
+Note: if you install a skill during an active conversation, you may need to start a fresh thread with `/new` before the agent can use it in that thread.
 
 ## Subagents
 
@@ -230,6 +242,10 @@ Jobs are stored in `~/.deepclaw/cron/jobs.json` and managed via Telegram command
 | `/new` | Start a fresh conversation thread |
 | `/status` | Show current thread ID, model, and allowlist info |
 | `/help` | List available commands |
+| `/skills` | Browse installed local skills |
+| `/skills search <query>` | Search skills.sh for remote skills |
+| `/skills remote [query]` | Browse popular skills.sh results or search with an alias |
+| `/skills install <path_or_url> [\| <name>]` | Install a skill from a local path or a skills.sh URL |
 | `/cron` | List all scheduled jobs |
 | `/cron_add <expr> \| <prompt>` | Add a scheduled job |
 | `/cron_rm <id_prefix>` | Remove a scheduled job by ID prefix |
@@ -251,7 +267,7 @@ DeepClaw loads configuration from three layers (highest precedence first):
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram Bot API token from [@BotFather](https://t.me/BotFather) |
 | `ANTHROPIC_API_KEY` | Yes* | Anthropic API key (default provider) |
 | `OPENAI_API_KEY` | No | OpenAI API key (if using OpenAI models) |
-| `DEEPCLAW_MODEL` | No | Model override, e.g. `openai:gpt-4o` (defaults to `claude-sonnet-4-6`) |
+| `DEEPCLAW_MODEL` | No | Model override, e.g. `openai:gpt-4o` (defaults to `anthropic:claude-sonnet-4-6-20250514`) |
 | `DEEPCLAW_ALLOWED_USERS` | No | Comma-separated Telegram user IDs or usernames for access control |
 | `TAVILY_API_KEY` | No | Tavily API key for web search and extract tools |
 
@@ -261,7 +277,7 @@ DeepClaw loads configuration from three layers (highest precedence first):
 
 ```yaml
 # ~/.deepclaw/config.yaml
-model: "claude-sonnet-4-6"
+model: "anthropic:claude-sonnet-4-6-20250514"
 telegram:
   bot_token: "..."
   allowed_users:
@@ -281,6 +297,7 @@ heartbeat:
   max_failures: 3
 workspace:
   root: "~/.deepclaw/workspace"
+command_timeout: 300
 ```
 
 ## Safety
@@ -302,8 +319,11 @@ DeepClaw auto-discovers tool plugins from `deepclaw/tools/` at startup.
 
 | Plugin | Install | Env Var | Tools |
 |---|---|---|---|
-| `web_search` | `uv sync --extra web` | `TAVILY_API_KEY` | `web_search`, `web_extract` |
+| `browser` | none | none | `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_screenshot`, `browser_close` |
+| `cron` | none | none | `schedule`, `list_jobs`, `remove_job` |
+| `skills` | none | none | `skills_list`, `skills_search_remote`, `skill_view`, `skill_create`, `skill_update`, `skill_install`, `skill_delete` |
 | `vision` | none | `OPENAI_API_KEY` | `vision_analyze` |
+| `web_search` | `uv sync --extra web` | `TAVILY_API_KEY` | `web_search`, `web_extract` |
 
 The vision tool accepts either a local image path or a public image URL. It is designed to pair with browser screenshots, for example:
 
