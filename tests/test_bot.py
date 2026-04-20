@@ -17,6 +17,7 @@ from deepclaw.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
     _build_incoming_text,
+    _format_remote_skills,
     _format_skills_list,
     _looks_like_supported_image,
     _parse_skills_command,
@@ -800,6 +801,24 @@ class TestSkillsCommandHelpers:
         assert "- a: first" in text
         assert "- b: second" in text
 
+    def test_format_remote_skills(self):
+        text = _format_remote_skills(
+            {
+                "query": "browser",
+                "skills": [
+                    {
+                        "name": "agent-browser",
+                        "repo": "vercel-labs/agent-browser",
+                        "installs": 195769,
+                        "url": "https://skills.sh/vercel-labs/agent-browser/agent-browser",
+                    }
+                ],
+            }
+        )
+        assert "skills.sh results for: browser" in text
+        assert "agent-browser" in text
+        assert "195,769 installs" in text
+
 
 class TestCmdSkills:
     @pytest.mark.asyncio
@@ -855,6 +874,31 @@ class TestCmdSkills:
 
         reply = update.message.reply_text.call_args[0][0]
         assert "Created skill: demo-skill" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_search_returns_remote_results(self, monkeypatch):
+        update = _make_slash_update(text="/skills search browser")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skills_search_remote",
+            lambda query: {
+                "query": query,
+                "skills": [
+                    {
+                        "name": "agent-browser",
+                        "repo": "vercel-labs/agent-browser",
+                        "installs": 195769,
+                        "url": "https://skills.sh/vercel-labs/agent-browser/agent-browser",
+                    }
+                ],
+            },
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "skills.sh results for: browser" in reply
+        assert "agent-browser" in reply
 
     @pytest.mark.asyncio
     async def test_skills_install_uses_optional_name(self, monkeypatch):
