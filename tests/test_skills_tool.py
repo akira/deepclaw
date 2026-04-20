@@ -1,5 +1,7 @@
 """Tests for the local skills management tool plugin."""
 
+import urllib.error
+
 from deepclaw.tools import skills as skills_mod
 
 
@@ -97,6 +99,75 @@ class TestDefaultInstallName:
         assert skills_mod._default_install_name(src) == "skill"
 
 
+class TestSkillsShHelpers:
+    def test_extracts_identifier_from_url(self):
+        assert (
+            skills_mod._skills_sh_identifier(
+                "https://skills.sh/vercel-labs/agent-browser/agent-browser"
+            )
+            == "vercel-labs/agent-browser/agent-browser"
+        )
+
+    def test_resolves_repo_and_skill_path_from_detail_page(self, monkeypatch):
+        html = (
+            "<html><body>"
+            "npx skills add https://github.com/vercel-labs/agent-browser --skill browser/agent-browser"
+            "</body></html>"
+        )
+        monkeypatch.setattr(skills_mod, "_http_get", lambda url, accept=None: html.encode("utf-8"))
+
+        result = skills_mod._resolve_skills_sh_source(
+            "https://skills.sh/vercel-labs/agent-browser/agent-browser"
+        )
+
+        assert result == {
+            "identifier": "vercel-labs/agent-browser/agent-browser",
+            "repo": "vercel-labs/agent-browser",
+            "skill_path": "browser/agent-browser",
+            "detail_url": "https://skills.sh/vercel-labs/agent-browser/agent-browser",
+        }
+
+
+class TestSkillsSearchRemote:
+    def test_returns_remote_results(self, monkeypatch):
+        monkeypatch.setattr(
+            skills_mod,
+            "_http_get_json",
+            lambda url, accept="application/json": {
+                "skills": [
+                    {
+                        "id": "vercel-labs/agent-browser/agent-browser",
+                        "skillId": "agent-browser",
+                        "name": "agent-browser",
+                        "installs": 195769,
+                        "source": "vercel-labs/agent-browser",
+                    }
+                ]
+            },
+        )
+
+        result = skills_mod.skills_search_remote("browser", limit=5)
+
+        assert result["count"] == 1
+        assert result["query"] == "browser"
+        assert (
+            result["skills"][0]["url"]
+            == "https://skills.sh/vercel-labs/agent-browser/agent-browser"
+        )
+        assert result["skills"][0]["repo"] == "vercel-labs/agent-browser"
+
+    def test_returns_error_on_network_failure(self, monkeypatch):
+        def _fail(url, accept="application/json"):
+            raise urllib.error.URLError("boom")
+
+        monkeypatch.setattr(skills_mod, "_http_get_json", _fail)
+
+        result = skills_mod.skills_search_remote("browser")
+
+        assert "error" in result
+        assert "skills.sh" in result["error"]
+
+
 class TestSkillInstall:
     def test_installs_from_skill_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path / "installed")
@@ -125,6 +196,78 @@ class TestSkillInstall:
         assert result["success"] is True
         assert (installed_dir / "SKILL.md").is_file()
         assert (installed_dir / "notes.txt").read_text() == "extra"
+
+    def test_installs_from_skills_sh_url(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path / "installed")
+        monkeypatch.setattr(
+            skills_mod,
+            "_resolve_skills_sh_source",
+            lambda source: {
+                "identifier": "vercel-labs/agent-browser/agent-browser",
+                "repo": "vercel-labs/agent-browser",
+                "skill_path": "browser/agent-browser",
+                "detail_url": "https://skills.sh/vercel-labs/agent-browser/agent-browser",
+            },
+        )
+
+        def _fake_download(repo, path):
+            if path == "browser/agent-browser":
+                return {}
+            if path == "skills/agent-browser":
+                return {
+                    "SKILL.md": b"---\nname: agent-browser\ndescription: Browser automation\n---\n",
+                    "notes.txt": b"extra",
+                    "templates/config.json": b"{}",
+                }
+            return {}
+
+        monkeypatch.setattr(skills_mod, "_download_github_directory", _fake_download)
+        monkeypatch.setattr(
+            skills_mod,
+            "_find_github_skill_path",
+            lambda repo, skill_name: "skills/agent-browser",
+        )
+
+        result = skills_mod.skill_install(
+            "https://skills.sh/vercel-labs/agent-browser/agent-browser"
+        )
+
+        installed_dir = tmp_path / "installed" / "agent-browser"
+        assert result["success"] is True
+        assert result["name"] == "agent-browser"
+        assert result["source_repo"] == "vercel-labs/agent-browser"
+        assert result["source_skill_path"] == "browser/agent-browser"
+        assert result["resolved_skill_path"] == "skills/agent-browser"
+        assert (installed_dir / "SKILL.md").read_text() == (
+            "---\nname: agent-browser\ndescription: Browser automation\n---\n"
+        )
+        assert (installed_dir / "notes.txt").read_text() == "extra"
+        assert (installed_dir / "templates" / "config.json").read_text() == "{}"
+
+    def test_skills_sh_install_without_skill_md_returns_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path / "installed")
+        monkeypatch.setattr(
+            skills_mod,
+            "_resolve_skills_sh_source",
+            lambda source: {
+                "identifier": "vercel-labs/agent-browser/agent-browser",
+                "repo": "vercel-labs/agent-browser",
+                "skill_path": "browser/agent-browser",
+                "detail_url": "https://skills.sh/vercel-labs/agent-browser/agent-browser",
+            },
+        )
+        monkeypatch.setattr(
+            skills_mod,
+            "_download_github_directory",
+            lambda repo, path: {"notes.txt": b"extra"},
+        )
+
+        result = skills_mod.skill_install(
+            "https://skills.sh/vercel-labs/agent-browser/agent-browser"
+        )
+
+        assert "error" in result
+        assert "SKILL.md" in result["error"]
 
     def test_install_requires_skill_md_source(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path / "installed")

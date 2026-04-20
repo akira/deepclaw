@@ -33,6 +33,7 @@ class TestDiscoverTools:
         assert "web_extract" in tool_names
         assert "vision_analyze" in tool_names
         assert "skills_list" in tool_names
+        assert "skills_search_remote" in tool_names
         assert "skill_view" in tool_names
         assert "skill_create" in tool_names
         assert "skill_update" in tool_names

@@ -44,7 +44,14 @@ from deepclaw.scheduler import (
     parse_cron_add,
     remove_job,
 )
-from deepclaw.tools.skills import skill_create, skill_delete, skill_install, skill_view, skills_list
+from deepclaw.tools.skills import (
+    skill_create,
+    skill_delete,
+    skill_install,
+    skill_view,
+    skills_list,
+    skills_search_remote,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +195,26 @@ def _format_skills_list() -> str:
     return "\n".join(lines)
 
 
+def _format_remote_skills(results: dict) -> str:
+    """Return a user-facing summary of remote skills search results."""
+    skills = results.get("skills", [])
+    query = (results.get("query") or "").strip()
+    if not skills:
+        if query:
+            return f"No skills.sh results for: {query}"
+        return "No skills.sh results available right now."
+
+    title = f"skills.sh results for: {query}" if query else "skills.sh popular results:"
+    lines = [title]
+    for skill in skills[:10]:
+        installs = skill.get("installs")
+        installs_suffix = f" ({installs:,} installs)" if isinstance(installs, int) else ""
+        lines.append(f"- {skill['name']} — {skill['repo']}{installs_suffix}\n  {skill['url']}")
+    if len(skills) > 10:
+        lines.append(f"...and {len(skills) - 10} more")
+    return "\n".join(lines)
+
+
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /skills subcommands for local skill management."""
     if not authorize_chat(update):
@@ -200,6 +227,15 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if subcommand in {"", "browse", "list"}:
         await update.message.reply_text(_format_skills_list())
+        return
+
+    if subcommand in {"search", "remote"}:
+        query = args.strip()
+        result = skills_search_remote(query)
+        if "error" in result:
+            await update.message.reply_text(result["error"])
+            return
+        await update.message.reply_text(_format_remote_skills(result))
         return
 
     if subcommand == "view":
@@ -236,7 +272,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if subcommand == "install":
         if not args:
             await update.message.reply_text(
-                "Usage: /skills install <source_path> or /skills install <source_path> | <name>"
+                "Usage: /skills install <source_path_or_url> or /skills install <source_path_or_url> | <name>"
             )
             return
         if "|" in args:
@@ -268,7 +304,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     await update.message.reply_text(
-        "Usage: /skills [browse|view <name>|create <name> | <description>|install <path> [| <name>]|delete <name>]"
+        "Usage: /skills [browse|search <query>|remote [query]|view <name>|create <name> | <description>|install <path_or_url> [| <name>]|delete <name>]"
     )
 
 
