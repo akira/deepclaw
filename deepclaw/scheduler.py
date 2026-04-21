@@ -199,7 +199,7 @@ class Scheduler:
 
     async def run_job(self, job: CronJob) -> None:
         """Invoke the agent with the job's prompt and deliver the result."""
-        thread_id = f"cron-{job.id}"
+        thread_id = f"cron-{job.id}-{uuid.uuid4()}"
         config = {"configurable": {"thread_id": thread_id}}
 
         try:

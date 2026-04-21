@@ -330,6 +330,32 @@ class TestSchedulerTick:
         assert secret not in delivered
         assert "[REDACTED]" in delivered
 
+    @pytest.mark.asyncio
+    async def test_run_job_uses_fresh_thread_id_per_invocation(self, tmp_path):
+        f = tmp_path / "jobs.json"
+        job = _make_job()
+
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="ok")]})
+        channel = AsyncMock()
+        channel.name = "telegram"
+
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
+
+        await scheduler.run_job(job)
+        await scheduler.run_job(job)
+
+        first_config = agent.ainvoke.await_args_list[0].kwargs["config"]
+        second_config = agent.ainvoke.await_args_list[1].kwargs["config"]
+        first_thread_id = first_config["configurable"]["thread_id"]
+        second_thread_id = second_config["configurable"]["thread_id"]
+
+        assert first_thread_id.startswith(f"cron-{job.id}-")
+        assert second_thread_id.startswith(f"cron-{job.id}-")
+        assert first_thread_id != second_thread_id
+
 
 # ---------------------------------------------------------------------------
 # list_jobs
