@@ -2,9 +2,6 @@
 name: browser-automation-pitfalls
 description: Known pitfalls and failure patterns when using browser automation (Browserbase/Playwright) for web tasks — anti-bot detection, dynamic form field ref collisions, iframe issues, and workarounds.
 version: 1.0.0
-author: DeepClaw
-license: MIT
-platforms: [linux, macos]
 ---
 
 # Browser Automation Pitfalls

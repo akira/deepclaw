@@ -1,10 +1,6 @@
 ---
 name: devin-review
 description: Run Devin AI code review on a GitHub PR, interpret findings, and fix flagged bugs iteratively.
-triggers:
-  - "run devin review"
-  - "check devin review"
-  - "devin code review on PR"
 ---
 
 # Devin Review Workflow
