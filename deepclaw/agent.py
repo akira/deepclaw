@@ -2,6 +2,8 @@
 
 import logging
 import os
+import shutil
+from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
@@ -22,6 +24,7 @@ logger = logging.getLogger(__name__)
 SOUL_FILE = CONFIG_DIR / "SOUL.md"
 MEMORY_FILE = CONFIG_DIR / "AGENTS.md"
 SKILLS_DIR = CONFIG_DIR / "skills"
+BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "default_skills"
 
 DEFAULT_SOUL = """\
 You are DeepClaw — a sharp, resourceful AI that lives in the terminal and gets things done.
@@ -126,8 +129,26 @@ def _setup_memory() -> list[str]:
 
 
 def _setup_skills() -> list[str]:
-    """Ensure skills directory exists and return source paths."""
+    """Ensure skills directory exists, seed bundled skills, and return source paths."""
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if BUNDLED_SKILLS_DIR.is_dir():
+        for bundled_dir in sorted(BUNDLED_SKILLS_DIR.iterdir()):
+            if not bundled_dir.is_dir():
+                continue
+            skill_file = bundled_dir / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            target_dir = SKILLS_DIR / bundled_dir.name
+            if target_dir.exists():
+                continue
+            try:
+                shutil.copytree(bundled_dir, target_dir)
+            except FileExistsError:
+                logger.info("Bundled skill %s was seeded concurrently", bundled_dir.name)
+                continue
+            logger.info("Seeded bundled skill %s to %s", bundled_dir.name, target_dir)
+
     return [str(SKILLS_DIR)]
 
 
