@@ -21,6 +21,13 @@ from deepclaw.safety import redact_secrets
 logger = logging.getLogger(__name__)
 
 DEFAULT_JOBS_PATH = Path("~/.deepclaw/cron/jobs.json").expanduser()
+CRON_SILENT_SENTINEL = "[SILENT]"
+CRON_SYSTEM_PROMPT = f"""You are running as an isolated scheduled cron job in DeepClaw.
+Your final response will be delivered automatically to the configured destination.
+Do not ask follow-up questions or mention internal scheduling mechanics unless required.
+Do not call outbound messaging or notification tools to deliver the result yourself.
+If there is nothing new or nothing worth sending, reply with exactly {CRON_SILENT_SENTINEL} and nothing else.
+"""
 
 
 class DeliveryTarget(TypedDict, total=False):
@@ -204,7 +211,12 @@ class Scheduler:
 
         try:
             result = await self._agent.ainvoke(
-                {"messages": [{"role": "user", "content": job.prompt}]},
+                {
+                    "messages": [
+                        {"role": "system", "content": CRON_SYSTEM_PROMPT},
+                        {"role": "user", "content": job.prompt},
+                    ]
+                },
                 config=config,
             )
             messages = result.get("messages", [])
@@ -219,7 +231,10 @@ class Scheduler:
             logger.exception("Cron job %s (%s) agent invocation failed", job.name, job.id)
             response = f"Cron job '{job.name}' failed to execute."
 
-        response = redact_secrets(str(response))
+        response = redact_secrets(str(response)).strip()
+        if response == CRON_SILENT_SENTINEL:
+            logger.info("Cron job '%s' returned silent sentinel; skipping delivery", job.name)
+            return
 
         channel_name = job.delivery.get("channel", "")
         chat_id = job.delivery.get("chat_id", "")

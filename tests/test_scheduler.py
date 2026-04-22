@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from deepclaw.scheduler import (
+    CRON_SILENT_SENTINEL,
+    CRON_SYSTEM_PROMPT,
     CronJob,
     Scheduler,
     add_job,
@@ -314,7 +316,7 @@ class TestSchedulerTick:
         job = _make_job(cron_expr="* * * * *", last_run=past)
         save_jobs([job], f)
 
-        secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        secret = "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"
         agent = AsyncMock()
         agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content=secret)]})
         channel = AsyncMock()
@@ -329,6 +331,48 @@ class TestSchedulerTick:
         delivered = channel.send.call_args.args[1]
         assert secret not in delivered
         assert "[REDACTED]" in delivered
+
+    @pytest.mark.asyncio
+    async def test_run_job_includes_cron_system_prompt(self, tmp_path):
+        f = tmp_path / "jobs.json"
+        job = _make_job(prompt="Summarize new HN stories")
+
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="ok")]})
+        channel = AsyncMock()
+        channel.name = "telegram"
+
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
+
+        await scheduler.run_job(job)
+
+        payload = agent.ainvoke.await_args.args[0]
+        assert payload["messages"] == [
+            {"role": "system", "content": CRON_SYSTEM_PROMPT},
+            {"role": "user", "content": job.prompt},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_job_silent_sentinel_skips_delivery(self, tmp_path):
+        f = tmp_path / "jobs.json"
+        job = _make_job()
+
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(
+            return_value={"messages": [MagicMock(content=f"  {CRON_SILENT_SENTINEL}\n")]}
+        )
+        channel = AsyncMock()
+        channel.name = "telegram"
+
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
+
+        await scheduler.run_job(job)
+
+        channel.send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_run_job_uses_fresh_thread_id_per_invocation(self, tmp_path):
