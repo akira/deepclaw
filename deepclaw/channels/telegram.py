@@ -766,11 +766,15 @@ class TelegramBotChannel(Channel):
         pass
 
     async def send(self, chat_id: str, text: str) -> str:
-        """Send a message to a chat. Returns message_id as string."""
-        msg = await self._bot.send_message(chat_id=int(chat_id), text=text)
-        msg_id = str(msg.message_id)
-        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
-        return msg_id
+        """Send a message to a chat. Returns the first message_id as string."""
+        first_msg_id: str | None = None
+        for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+            msg = await self._bot.send_message(chat_id=int(chat_id), text=chunk)
+            msg_id = str(msg.message_id)
+            if first_msg_id is None:
+                first_msg_id = msg_id
+            _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return first_msg_id or ""
 
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         """Edit a previously sent message."""

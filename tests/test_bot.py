@@ -16,6 +16,7 @@ from deepclaw.channels.telegram import (
     MODEL_OVERRIDE_KEY,
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
+    TelegramBotChannel,
     _build_incoming_text,
     _format_remote_skills,
     _format_skills_list,
@@ -217,6 +218,42 @@ class _FakeStreamingChannel:
 
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         self.edits.append((chat_id, message_id, text))
+
+
+class TestTelegramBotChannel:
+    @pytest.mark.asyncio
+    async def test_send_short_message(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=100))
+
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send("123", "hello")
+
+        bot.send_message.assert_awaited_once_with(chat_id=123, text="hello")
+        assert message_id == "100"
+
+    @pytest.mark.asyncio
+    async def test_send_chunks_overlong_messages(self):
+        text = "a" * (TELEGRAM_MESSAGE_LIMIT + 5)
+        bot = MagicMock()
+        bot.send_message = AsyncMock(
+            side_effect=[
+                SimpleNamespace(message_id=101),
+                SimpleNamespace(message_id=102),
+            ]
+        )
+
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send("123", text)
+
+        expected_chunks = chunk_message(text, TELEGRAM_MESSAGE_LIMIT)
+        assert bot.send_message.await_count == 2
+        assert [call.kwargs for call in bot.send_message.await_args_list] == [
+            {"chat_id": 123, "text": chunk} for chunk in expected_chunks
+        ]
+        assert message_id == "101"
 
 
 class _FakeStreamingAgent:
