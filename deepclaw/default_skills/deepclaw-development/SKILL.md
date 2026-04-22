@@ -8,6 +8,12 @@ version: 1.0.0
 
 DeepClaw is an AI agent gateway built on DeepAgents, running as a systemd user service. Source at `/home/ubuntu/deepclaw/`, config at `~/.deepclaw/`.
 
+## When to Use
+
+- Developing or debugging DeepClaw itself
+- Working on tool plugins, scheduler behavior, SOUL.md, service deployment, or bundled skills
+- Verifying local DeepClaw runtime behavior against the source tree
+
 ## Key Paths
 
 | Path | Purpose |
@@ -35,6 +41,12 @@ uv remove <package>
 
 The project venv uses Python 3.14. Always invoke pytest through the project venv's python binary directly — using a different outer venv or global `uv run` can pick up the wrong interpreter and fail with `ModuleNotFoundError: No module named 'langchain_core'`.
 
+## Deterministic First
+
+- Prefer deterministic checks over free-form reasoning for state that can be measured directly.
+- Use logs, git history, tests, service status, filesystem inspection, and direct tool output before inferring behavior in-model.
+- For DeepClaw operations, especially avoid mental approximations for scheduler state, thread state, tool registration, or deployment status when the repo or service can answer directly.
+
 ```bash
 /home/ubuntu/deepclaw/.venv/bin/python -m pytest tests/ -v --tb=short
 # scoped:
@@ -50,6 +62,12 @@ systemctl --user restart deepclaw.service
 systemctl --user status deepclaw.service --no-pager
 journalctl --user -u deepclaw.service -f
 ```
+
+## Verification
+
+- Re-run the relevant DeepClaw tests from the project venv after changes.
+- Confirm the expected tools or behaviors are present in logs or direct commands.
+- If the service was changed, restart it and inspect `systemctl` or `journalctl` output before declaring success.
 
 ## Writing a Tool Plugin
 

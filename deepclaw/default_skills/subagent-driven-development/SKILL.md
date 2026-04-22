@@ -46,6 +46,12 @@ todo([
 
 **Key:** Read the plan ONCE. Extract everything. Don't make subagents read the plan file — provide the full task text directly in context.
 
+## Deterministic First
+
+- Use subagents for execution, but constrain them with direct commands, tests, and concrete success checks.
+- If a step can be validated deterministically, include that validation in the subagent context instead of asking for a judgment call.
+- Fresh context is valuable only if the task instructions stay precise.
+
 ### 2. Per-Task Workflow
 
 For EACH task in the plan:
@@ -274,6 +280,12 @@ If a subagent encounters bugs during implementation:
 2. Find root cause before fixing
 3. Write regression test
 4. Resume implementation
+
+## Verification
+
+- Each task should end with concrete evidence: tests passed, review completed, and expected files changed.
+- Review stages should rely on actual diffs and commands, not summaries from the implementer.
+- If a task cannot be verified, do not advance to the next task.
 
 ## Example Workflow
 

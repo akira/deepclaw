@@ -23,6 +23,18 @@ quality gates, an independent reviewer subagent, and an auto-fix loop.
 **This skill vs github-code-review:** This skill verifies YOUR changes before committing.
 `github-code-review` reviews OTHER people's PRs on GitHub with inline comments.
 
+## Deterministic First
+
+- Prefer static scans, direct test output, and reproducible command results over intuition about code quality.
+- If a security or correctness claim can be grounded in a grep, linter, type checker, or failing test, do that before reasoning abstractly.
+- The review should be constrained by evidence from the diff and verification commands, not vibes.
+
+## Verification
+
+- Before landing changes, confirm the review has concrete evidence for each blocking issue.
+- Prefer checks that can be re-run by another agent or human without interpretation.
+- If a concern cannot be tied to a reproducible diff or command result, downgrade it or investigate further.
+
 ## Step 1 — Get the diff
 
 ```bash

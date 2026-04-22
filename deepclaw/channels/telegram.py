@@ -49,6 +49,8 @@ from deepclaw.tools.skills import (
     skill_delete,
     skill_install,
     skill_view,
+    skills_audit,
+    skills_check_resolvable,
     skills_list,
     skills_search_remote,
 )
@@ -215,6 +217,42 @@ def _format_remote_skills(results: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_skills_audit(results: dict) -> str:
+    """Return a concise user-facing summary of a local skills audit."""
+    lines = [
+        "Skill audit",
+        f"- skills checked: {results.get('count', 0)}",
+        f"- duplicate descriptions: {results.get('duplicate_descriptions_count', 0)}",
+        f"- missing required sections: {results.get('skills_missing_required_sections_count', 0)}",
+    ]
+    duplicate_descriptions = results.get("duplicate_descriptions", [])
+    if duplicate_descriptions:
+        first = duplicate_descriptions[0]
+        lines.append(f"- first duplicate: {first['description']} ({', '.join(first['skills'])})")
+    missing = [entry for entry in results.get("skills", []) if entry.get("missing_sections")]
+    if missing:
+        first_missing = missing[0]
+        lines.append(
+            f"- first missing-sections skill: {first_missing['name']} ({', '.join(first_missing['missing_sections'])})"
+        )
+    return "\n".join(lines)
+
+
+def _format_skills_resolvable(results: dict) -> str:
+    """Return a concise user-facing summary of skill resolvability."""
+    total = results.get("count", 0)
+    loadable = results.get("loadable_count", 0)
+    lines = [
+        "Resolvable skills",
+        f"- loadable: {loadable} / {total}",
+        f"- unresolvable: {results.get('unresolvable_count', 0)}",
+    ]
+    if results.get("unresolvable"):
+        first = results["unresolvable"][0]
+        lines.append(f"- first issue: {first['name']} — {first['reason']}")
+    return "\n".join(lines)
+
+
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /skills subcommands for local skill management."""
     if not authorize_chat(update):
@@ -236,6 +274,14 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text(result["error"])
             return
         await update.message.reply_text(_format_remote_skills(result))
+        return
+
+    if subcommand == "audit":
+        await update.message.reply_text(_format_skills_audit(skills_audit()))
+        return
+
+    if subcommand in {"resolvable", "check"}:
+        await update.message.reply_text(_format_skills_resolvable(skills_check_resolvable()))
         return
 
     if subcommand == "view":
@@ -304,7 +350,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     await update.message.reply_text(
-        "Usage: /skills [browse|search <query>|remote [query]|view <name>|create <name> | <description>|install <path_or_url> [| <name>]|delete <name>]"
+        "Usage: /skills [browse|search <query>|remote [query]|audit|resolvable|view <name>|create <name> | <description>|install <path_or_url> [| <name>]|delete <name>]"
     )
 
 
@@ -337,10 +383,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/new \u2014 Start a fresh conversation thread\n"
         "/clear \u2014 Clear conversation (alias for /new)\n"
         "/retry \u2014 Re-send the last message\n"
-        "/model [name] \u2014 View or set the active model\n"
-        "/skills [subcommand] \u2014 Browse/view/create/install/delete local skills\n"
-        "/memory \u2014 Show MEMORY.md\n"
-        "/soul \u2014 Show SOUL.md\n"
+        "/model [name] — View or set the active model\n"
+        "/skills [subcommand] — Browse/view/create/install/delete/audit local skills\n"
+        "/memory — Show MEMORY.md\n"
+        "/soul — Show SOUL.md\n"
         "/uptime \u2014 Show bot uptime\n"
         "/status \u2014 Show current thread ID and model info\n"
         "/safety_test <cmd> \u2014 Check a command for dangerous patterns\n"

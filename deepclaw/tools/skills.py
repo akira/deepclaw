@@ -26,6 +26,7 @@ SKILLS_DIR = CONFIG_DIR / "skills"
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SKILL_FILE_NAME = "SKILL.md"
 _FRONTMATTER_DESCRIPTION_RE = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
+_FRONTMATTER_FIELD_RE = re.compile(r"^(?P<key>[A-Za-z0-9_-]+):\s*(?P<value>.+?)\s*$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _SKILLS_SH_PREFIXES = ("https://skills.sh/", "http://skills.sh/", "skills.sh/")
 _SKILLS_SH_INSTALL_CMD_RE = re.compile(
@@ -36,6 +37,7 @@ _SKILLS_SH_INSTALL_CMD_RE = re.compile(
 _GITHUB_API_BASE = "https://api.github.com"
 _SKILLS_SH_API_SEARCH_URL = "https://skills.sh/api/search"
 _HTTP_USER_AGENT = "DeepClaw/0.1 (+https://github.com/akira/deepclaw)"
+_REQUIRED_SKILL_SECTIONS = ("When to Use", "Deterministic First", "Verification")
 
 
 def available() -> bool:
@@ -67,18 +69,95 @@ def _skill_file(name: str) -> Path:
 
 
 def _extract_description(content: str) -> str:
-    if content.startswith("---\n"):
-        end = content.find("\n---\n", 4)
-        if end != -1:
-            frontmatter = content[4:end]
-            match = _FRONTMATTER_DESCRIPTION_RE.search(frontmatter)
-            if match:
-                return match.group(1).strip().strip('"').strip("'")
+    fields = _frontmatter_fields(content)
+    description = fields.get("description", "").strip()
+    if description:
+        return description
     match = _HEADING_RE.search(content)
     if match:
         return match.group(1).strip()
     first_nonempty = next((line.strip() for line in content.splitlines() if line.strip()), "")
     return first_nonempty[:120]
+
+
+def _split_frontmatter(content: str) -> tuple[str, str]:
+    if not content.startswith("---\n"):
+        return "", content
+    end = content.find("\n---\n", 4)
+    if end == -1:
+        return "", content
+    return content[4:end], content[end + len("\n---\n") :]
+
+
+def _frontmatter_fields(content: str) -> dict[str, str]:
+    frontmatter, _ = _split_frontmatter(content)
+    if not frontmatter:
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(frontmatter)
+        if isinstance(data, dict):
+            return {
+                str(key).strip(): str(value).strip()
+                for key, value in data.items()
+                if value is not None
+            }
+    except Exception:
+        pass
+    fields: dict[str, str] = {}
+    for match in _FRONTMATTER_FIELD_RE.finditer(frontmatter):
+        fields[match.group("key").strip()] = match.group("value").strip().strip('"').strip("'")
+    return fields
+
+
+def _has_heading(body: str, heading: str) -> bool:
+    pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.MULTILINE)
+    return bool(pattern.search(body))
+
+
+def _iter_skill_dirs() -> list[Path]:
+    skills_dir = _ensure_skills_dir()
+    return sorted(
+        path for path in skills_dir.iterdir() if path.is_dir() and not path.name.startswith(".")
+    )
+
+
+def _skill_inventory_entry(skill_dir: Path) -> dict[str, Any]:
+    skill_file = skill_dir / _SKILL_FILE_NAME
+    content = skill_file.read_text(encoding="utf-8") if skill_file.is_file() else ""
+    fields = _frontmatter_fields(content) if content else {}
+    _, body = _split_frontmatter(content)
+    missing_sections = [
+        section for section in _REQUIRED_SKILL_SECTIONS if not _has_heading(body, section)
+    ]
+    frontmatter_name = fields.get("name", "")
+    frontmatter_description = fields.get("description", "")
+    loadable = bool(frontmatter_name and frontmatter_description)
+    issues: list[str] = []
+    if not skill_file.is_file():
+        issues.append("missing SKILL.md")
+    elif not loadable:
+        issues.append("missing required 'name' or 'description' in YAML frontmatter")
+    if frontmatter_name and frontmatter_name != skill_dir.name:
+        issues.append(
+            f"frontmatter name '{frontmatter_name}' does not match directory '{skill_dir.name}'"
+        )
+    return {
+        "name": skill_dir.name,
+        "path": str(skill_file),
+        "content": content,
+        "description": frontmatter_description or _extract_description(content),
+        "frontmatter_name": frontmatter_name,
+        "frontmatter_description": frontmatter_description,
+        "loadable": loadable,
+        "missing_sections": missing_sections,
+        "issues": issues,
+    }
+
+
+def _skill_inventory() -> list[dict[str, Any]]:
+    return [_skill_inventory_entry(skill_dir) for skill_dir in _iter_skill_dirs()]
 
 
 def _default_install_name(src: Path) -> str:
@@ -98,9 +177,14 @@ def _default_skill_content(name: str, description: str) -> str:
         f"# {title}\n\n"
         f"## When to Use\n"
         f"- Describe when this skill should be used\n\n"
+        f"## Deterministic First\n"
+        f"- If code, a script, or a direct tool call can answer this reliably, use that before reasoning in-model\n"
+        f"- Push repeatable precision work out of latent reasoning and into deterministic execution\n\n"
         f"## Workflow\n"
         f"1. Describe the first step\n"
-        f"2. Describe the second step\n"
+        f"2. Describe the second step\n\n"
+        f"## Verification\n"
+        f"- Describe how to verify the skill worked correctly\n"
     )
 
 
@@ -301,25 +385,24 @@ def skills_list() -> dict[str, Any]:
     """List installed local skills under ~/.deepclaw/skills.
 
     Returns:
-        Dictionary with installed skills, including name, description, and path.
+        Dictionary with skill metadata.
     """
-    skills_dir = _ensure_skills_dir()
-    skills = []
-    for path in sorted(skills_dir.iterdir()):
-        if not path.is_dir():
-            continue
-        skill_file = path / _SKILL_FILE_NAME
-        if not skill_file.is_file():
-            continue
-        content = skill_file.read_text(encoding="utf-8")
-        skills.append(
-            {
-                "name": path.name,
-                "description": _extract_description(content),
-                "path": str(skill_file),
-            }
-        )
-    return {"skills": skills, "count": len(skills), "skills_dir": str(skills_dir)}
+    skills = [
+        {
+            "name": entry["name"],
+            "path": entry["path"],
+            "description": entry["description"],
+        }
+        for entry in _skill_inventory()
+        if Path(entry["path"]).is_file()
+    ]
+
+    return {
+        "count": len(skills),
+        "skills": skills,
+        "root": str(_ensure_skills_dir()),
+        "skills_dir": str(_ensure_skills_dir()),
+    }
 
 
 def skill_view(name: str) -> dict[str, Any]:
@@ -531,10 +614,10 @@ def skill_install(
 
 
 def skill_delete(name: str) -> dict[str, Any]:
-    """Delete an installed local skill directory under ~/.deepclaw/skills.
+    """Delete an installed local skill by name.
 
     Args:
-        name: Existing skill name.
+        name: Skill directory name.
 
     Returns:
         Dictionary describing the deleted skill.
@@ -557,11 +640,95 @@ def skill_delete(name: str) -> dict[str, Any]:
     }
 
 
+def skills_audit() -> dict[str, Any]:
+    """Audit local skills for duplicate descriptions and missing required sections."""
+    inventory = _skill_inventory()
+    duplicates: dict[str, list[str]] = {}
+    by_description: dict[str, list[str]] = {}
+    for entry in inventory:
+        description = (
+            entry.get("frontmatter_description") or entry.get("description") or ""
+        ).strip()
+        if not description:
+            continue
+        by_description.setdefault(description.casefold(), []).append(entry["name"])
+    duplicate_descriptions = []
+    for normalized, names in sorted(by_description.items()):
+        if len(names) < 2:
+            continue
+        canonical = next(
+            (
+                (entry.get("frontmatter_description") or entry.get("description") or "").strip()
+                for entry in inventory
+                if entry["name"] == names[0]
+            ),
+            normalized,
+        )
+        duplicate_descriptions.append({"description": canonical, "skills": sorted(names)})
+        duplicates[normalized] = names
+
+    skills = [
+        {
+            "name": entry["name"],
+            "path": entry["path"],
+            "missing_sections": entry["missing_sections"],
+            "issues": entry["issues"],
+        }
+        for entry in inventory
+    ]
+    missing_required_sections_count = sum(1 for entry in inventory if entry["missing_sections"])
+
+    return {
+        "count": len(inventory),
+        "skills": skills,
+        "duplicate_descriptions": duplicate_descriptions,
+        "duplicate_descriptions_count": len(duplicate_descriptions),
+        "skills_missing_required_sections_count": missing_required_sections_count,
+        "required_sections": list(_REQUIRED_SKILL_SECTIONS),
+        "root": str(_ensure_skills_dir()),
+    }
+
+
+def skills_check_resolvable() -> dict[str, Any]:
+    """Check whether installed skills are loadable by SkillsMiddleware-style rules."""
+    inventory = _skill_inventory()
+    unresolvable = []
+    for entry in inventory:
+        if entry["loadable"]:
+            continue
+        reason = next(
+            (
+                issue
+                for issue in entry["issues"]
+                if "missing required 'name' or 'description'" in issue
+            ),
+            "; ".join(entry["issues"]) or "skill is not loadable",
+        )
+        unresolvable.append(
+            {
+                "name": entry["name"],
+                "path": entry["path"],
+                "reason": reason,
+            }
+        )
+
+    loadable_count = sum(1 for entry in inventory if entry["loadable"])
+    return {
+        "count": len(inventory),
+        "loadable_count": loadable_count,
+        "unresolvable_count": len(unresolvable),
+        "unresolvable": unresolvable,
+        "root": str(_ensure_skills_dir()),
+    }
+
+
 def get_tools() -> list:
     """Return the tool callables for this plugin."""
     return [
         skills_list,
         skills_search_remote,
+        skills_audit,
+        skills_check_resolvable,
         skill_view,
         skill_create,
         skill_update,

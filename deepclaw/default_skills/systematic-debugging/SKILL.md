@@ -44,6 +44,18 @@ Use for ANY technical issue:
 - You're in a hurry (rushing guarantees rework)
 - Someone wants it fixed NOW (systematic is faster than thrashing)
 
+## Deterministic First
+
+- Root-cause work starts with evidence, not hunches.
+- Prefer logs, exact failing commands, git history, filesystem reads, and reproducible probes over mental reconstruction.
+- If a script or direct tool can answer the question precisely, use it before hypothesizing.
+
+## Verification
+
+- Do not propose or accept a fix until the root cause is supported by evidence.
+- Reproduce the issue, gather artifacts, and verify the fix against the original failure mode.
+- A bug is not done when it sounds plausible; it is done when the failing behavior is demonstrably gone.
+
 ## The Four Phases
 
 You MUST complete each phase before proceeding to the next.

@@ -8,6 +8,17 @@ description: Run Devin AI code review on a GitHub PR, interpret findings, and fi
 ## What it is
 Devin Review (https://app.devin.ai/review) is a PR viewer + AI analyzer. Not a GitHub App — you paste a PR URL to trigger analysis. Works on public and private repos without login.
 
+## When to Use
+- You want an additional automated reviewer on an existing PR
+- You are iterating on bug fixes and want an external pass after each push
+- A PR is green in CI but you want another bug-finding loop
+
+## Deterministic First
+
+- Treat Devin as an additional reviewer, not the source of truth.
+- Ground any follow-up fix in the actual diff, line context, and test results before changing code.
+- Re-run analysis on the exact latest commit rather than assuming old findings still apply.
+
 ## Steps
 
 ### 1. Open and submit PR URL
@@ -43,9 +54,7 @@ Devin Review (https://app.devin.ai/review) is a PR viewer + AI analyzer. Not a G
 - Resolved bugs from prior commits remain visible (grayed out) — only count open (red) bugs as actionable
 - The CONFIG_KEY overwrite flag is a persistent Devin concern about runtime state not surviving restarts — it's a design note, not a blocking bug; safe to leave unfixed if intentional
 
-## Iterative fix loop
-1. Fix all bugs Devin flagged
-2. Run the project test suite and confirm passing
-3. Commit and push to the fork branch
-4. Re-run Devin Review on the PR URL
-5. Repeat until sidebar shows 0 bugs (flags are advisory)
+## Verification
+- Re-run Devin after each push and confirm open bugs are actually cleared
+- Validate fixes locally with the project test suite before trusting the sidebar state
+- Treat stale line numbers or cached analyses as unverified until refreshed

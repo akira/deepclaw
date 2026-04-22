@@ -901,6 +901,56 @@ class TestCmdSkills:
         assert "agent-browser" in reply
 
     @pytest.mark.asyncio
+    async def test_skills_audit_returns_summary(self, monkeypatch):
+        update = _make_slash_update(text="/skills audit")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skills_audit",
+            lambda: {
+                "count": 2,
+                "duplicate_descriptions_count": 1,
+                "skills_missing_required_sections_count": 1,
+                "duplicate_descriptions": [
+                    {"description": "Shared description", "skills": ["a", "b"]}
+                ],
+                "skills": [
+                    {"name": "a", "missing_sections": ["Verification"]},
+                    {"name": "b", "missing_sections": []},
+                ],
+            },
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Skill audit" in reply
+        assert "duplicate descriptions: 1" in reply
+        assert "missing required sections: 1" in reply
+
+    @pytest.mark.asyncio
+    async def test_skills_resolvable_returns_summary(self, monkeypatch):
+        update = _make_slash_update(text="/skills resolvable")
+        ctx = _make_slash_context()
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.skills_check_resolvable",
+            lambda: {
+                "count": 2,
+                "loadable_count": 1,
+                "unresolvable_count": 1,
+                "unresolvable": [
+                    {"name": "bad-skill", "reason": "missing required 'name' or 'description'"}
+                ],
+            },
+        )
+
+        await cmd_skills(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Resolvable skills" in reply
+        assert "loadable: 1 / 2" in reply
+        assert "bad-skill" in reply
+
+    @pytest.mark.asyncio
     async def test_skills_install_uses_optional_name(self, monkeypatch):
         update = _make_slash_update(text="/skills install /tmp/source-skill/SKILL.md | imported")
         ctx = _make_slash_context()
@@ -946,3 +996,5 @@ class TestCmdSkills:
 
         reply = update.message.reply_text.call_args[0][0]
         assert "Usage: /skills" in reply
+        assert "audit" in reply
+        assert "resolvable" in reply

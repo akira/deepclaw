@@ -8,10 +8,22 @@ version: 1.1.0
 
 Perform code reviews on local changes before pushing, or review open PRs on GitHub. Most of this skill uses plain `git` — the `gh`/`curl` split only matters for PR-level interactions.
 
+## When to Use
+
+- Reviewing local changes before push
+- Reviewing an open GitHub PR with line-level feedback
+- Checking whether a code change is actually grounded in the diff and verification output
+
 ## Prerequisites
 
 - Authenticated with GitHub (see `github-auth` skill)
 - Inside a git repository
+
+## Deterministic First
+
+- Prefer the actual git diff, exact line context, and direct verification commands over intuition about what changed.
+- If a concern can be grounded in a search, test, or static check, do that before making a review claim.
+- Review output should be evidence-backed, not just plausible.
 
 ### Setup (for PR interactions)
 
@@ -115,6 +127,12 @@ When reviewing local changes, present findings in this structure:
 ```
 
 ---
+
+## Verification
+
+- Re-run the review on the latest commit after fixes.
+- Confirm actionable bugs are cleared before treating the review as complete.
+- Distinguish advisory flags from still-open defects.
 
 ## 2. Reviewing a Pull Request on GitHub
 
