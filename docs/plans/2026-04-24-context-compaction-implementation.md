@@ -1,7 +1,5 @@
 # DeepClaw Context Compaction Implementation Plan
 
-> For Hermes: use this as the execution checklist for the DeepClaw context engineering redesign MVP.
-
 **Goal:** Add a first-class DeepClaw compaction/thread-rotation layer with richer thread metadata, explicit `/compact`, offload-first historical artifacts, and summary injection into fresh threads.
 
 **Architecture:** Keep DeepAgents' built-in summarization middleware intact, but add a DeepClaw-owned orchestration layer around thread rotation and compaction. Store richer per-chat thread metadata, generate recoverable summary/raw-history artifacts, and trigger compaction manually (`/compact`) and automatically before oversized thread invocations.
