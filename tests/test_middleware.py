@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import ToolMessage
 
+from deepclaw import runtime_hygiene
 from deepclaw.middleware import (
     _blocked_tool_message,
     _check_execute,
@@ -296,6 +297,23 @@ class TestSafetyMiddlewareIntegration:
 
         result = await middleware.awrap_tool_call(request, handler)
         assert result.content == "hello"
+
+    @pytest.mark.asyncio
+    async def test_offloads_oversized_tool_output(self, middleware, tmp_path, monkeypatch):
+        monkeypatch.setattr(runtime_hygiene, "ARTIFACTS_DIR", tmp_path / "artifacts")
+        monkeypatch.setattr(runtime_hygiene, "TOOL_RESULT_MAX_CHARS", 40)
+        request = self._make_request("execute", {"command": "python big.py"})
+        large_output = ToolMessage(content="y" * 120, name="execute", tool_call_id="call_1")
+        handler = AsyncMock(return_value=large_output)
+
+        with runtime_hygiene.bind_runtime_state("thread-oversized"):
+            result = await middleware.awrap_tool_call(request, handler)
+
+        assert "DeepClaw offloaded tool result from execute" in result.content
+        assert "read_file" in result.content
+        artifacts = list((tmp_path / "artifacts").rglob("*.txt"))
+        assert len(artifacts) == 1
+        assert artifacts[0].read_text(encoding="utf-8") == "y" * 120
 
     @pytest.mark.asyncio
     async def test_unrelated_tool_passes_through(self, middleware):
