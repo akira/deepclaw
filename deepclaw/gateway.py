@@ -17,9 +17,22 @@ from langchain_core.messages import ToolMessage
 
 from deepclaw.auth import get_thread_state
 from deepclaw.channels.base import Channel, IncomingMessage
-from deepclaw.compaction import CompactionResult
+from deepclaw.compaction import CompactionResult, get_thread_snapshot
 from deepclaw.compaction import compact_thread as compact_thread_impl
-from deepclaw.runtime_hygiene import bind_runtime_state, offload_user_input
+from deepclaw.runtime_controller import (
+    HARD_RECOVERY_PROMPT_MAX_CHARS,
+    RuntimeRoute,
+    ThreadSnapshotView,
+    build_rebuild_prompt,
+    choose_runtime_route,
+    estimate_prompt_budget,
+    truncate_reference_summary,
+)
+from deepclaw.runtime_hygiene import (
+    bind_runtime_state,
+    offload_text_if_oversized,
+    offload_user_input,
+)
 from deepclaw.safety import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -74,6 +87,37 @@ _NUDGE_MESSAGE = (
     "You described an action but did not call any tools. "
     "Please call the appropriate tool now to carry out what you described."
 )
+
+
+class PreparedRuntimeInput(tuple):
+    __slots__ = ()
+
+    @property
+    def thread_id(self) -> str:
+        return self[0]
+
+    @property
+    def content(self) -> str:
+        return self[1]
+
+    @property
+    def injected_summary(self) -> bool:
+        return self[2]
+
+    @property
+    def route(self) -> RuntimeRoute:
+        return self[3]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        thread_id: str,
+        content: str,
+        injected_summary: bool,
+        route: RuntimeRoute,
+    ) -> PreparedRuntimeInput:
+        return cls((thread_id, content, injected_summary, route))
 
 
 def _looks_like_narration(text: str) -> bool:
@@ -151,6 +195,128 @@ class Gateway:
         if not summary:
             return text, False
         return f"{_REFERENCE_SUMMARY_LABEL}\n{summary}\n\n[NEW USER MESSAGE]\n{text}", True
+
+    async def _prepare_runtime_input(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        text: str,
+    ) -> PreparedRuntimeInput:
+        thread_state = (
+            get_thread_state(self.thread_state_store, chat_id)
+            if self.thread_state_store is not None
+            else None
+        )
+        pending_summary = (
+            str(thread_state.get("pending_summary_text") or "") if thread_state else ""
+        )
+        snapshot = None
+        if self.checkpointer is not None:
+            raw_snapshot = await get_thread_snapshot(self.checkpointer, thread_id)
+            snapshot = ThreadSnapshotView(
+                messages=raw_snapshot.messages,
+                working_state=raw_snapshot.working_state,
+                continuity_checkpoint=raw_snapshot.continuity_checkpoint,
+            )
+
+        estimate = estimate_prompt_budget(
+            snapshot=snapshot,
+            user_text=text,
+            pending_summary=pending_summary,
+        )
+        plan = choose_runtime_route(
+            estimate,
+            can_compact=self.checkpointer is not None,
+        )
+        logger.info(
+            "Runtime route %s for chat %s thread %s (estimated=%d chars): %s",
+            plan.route.value,
+            chat_id,
+            thread_id,
+            estimate.estimated_total_chars,
+            plan.reason,
+        )
+
+        if plan.route is RuntimeRoute.FITS:
+            effective_text, injected_summary = self._build_effective_user_content(chat_id, text)
+            return PreparedRuntimeInput.create(
+                thread_id=thread_id,
+                content=effective_text,
+                injected_summary=injected_summary,
+                route=plan.route,
+            )
+
+        if plan.route is RuntimeRoute.TRUNCATE_ARTIFACTS_ONLY and pending_summary:
+            truncated_summary = truncate_reference_summary(pending_summary)
+            return PreparedRuntimeInput.create(
+                thread_id=thread_id,
+                content=(
+                    f"{_REFERENCE_SUMMARY_LABEL}\n{truncated_summary}\n\n[NEW USER MESSAGE]\n{text}"
+                ),
+                injected_summary=True,
+                route=plan.route,
+            )
+
+        compacted = None
+        if plan.route in {
+            RuntimeRoute.COMPACT_THEN_CONTINUE,
+            RuntimeRoute.REBUILD_FROM_STATE,
+            RuntimeRoute.HARD_OVERFLOW_RECOVERY,
+        }:
+            compacted = await self.compact_thread(chat_id, thread_id, reason="runtime_budget")
+            if compacted is not None:
+                thread_id = compacted.new_thread_id
+                if self.thread_state_store is not None:
+                    thread_state = get_thread_state(self.thread_state_store, chat_id)
+
+        if plan.route is RuntimeRoute.COMPACT_THEN_CONTINUE and compacted is not None:
+            return PreparedRuntimeInput.create(
+                thread_id=thread_id,
+                content=(
+                    f"{_REFERENCE_SUMMARY_LABEL}\n{compacted.summary_text}\n\n"
+                    f"[NEW USER MESSAGE]\n{text}"
+                ),
+                injected_summary=True,
+                route=plan.route,
+            )
+
+        recovery_route = (
+            plan.route if compacted is not None else RuntimeRoute.HARD_OVERFLOW_RECOVERY
+        )
+        rebuild_prompt = build_rebuild_prompt(
+            user_text=text,
+            snapshot=snapshot,
+            thread_state=thread_state,
+            handoff_summary=compacted.summary_text if compacted is not None else pending_summary,
+            route=recovery_route,
+        )
+
+        if plan.route is RuntimeRoute.REBUILD_FROM_STATE and compacted is not None:
+            return PreparedRuntimeInput.create(
+                thread_id=thread_id,
+                content=rebuild_prompt,
+                injected_summary=True,
+                route=plan.route,
+            )
+
+        recovery_prompt, artifact = offload_text_if_oversized(
+            rebuild_prompt,
+            category="context-recovery",
+            kind="runtime-recovery",
+            label="runtime recovery prompt",
+            max_chars=HARD_RECOVERY_PROMPT_MAX_CHARS,
+            thread_id=thread_id,
+            metadata={"chat_id": chat_id, "route": recovery_route.value},
+        )
+        if artifact is not None:
+            logger.info("Offloaded hard-overflow recovery prompt to %s", artifact.path)
+        return PreparedRuntimeInput.create(
+            thread_id=thread_id,
+            content=recovery_prompt,
+            injected_summary=bool(compacted is not None or pending_summary),
+            route=RuntimeRoute.HARD_OVERFLOW_RECOVERY,
+        )
 
     async def compact_thread(
         self, chat_id: str, thread_id: str, *, reason: str, source: str = "telegram"
@@ -274,10 +440,14 @@ class Gateway:
 
             injected_summary = False
             try:
-                effective_text, injected_summary = self._build_effective_user_content(
-                    message.chat_id, message.text
+                prepared = await self._prepare_runtime_input(
+                    chat_id=message.chat_id,
+                    thread_id=thread_id,
+                    text=message.text,
                 )
-                user_content, artifact = offload_user_input(effective_text)
+                thread_id = prepared.thread_id
+                injected_summary = prepared.injected_summary
+                user_content, artifact = offload_user_input(prepared.content, thread_id=thread_id)
                 if artifact is not None:
                     logger.info("Offloaded oversized user input to %s", artifact.path)
                 tool_calls_seen = await _stream_once([{"role": "user", "content": user_content}])

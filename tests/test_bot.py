@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from deepclaw import runtime_hygiene
 from deepclaw.auth import get_thread_state, is_user_allowed
@@ -294,10 +294,28 @@ class _FakeStreamingAgent:
 class _CapturingStreamingAgent:
     def __init__(self):
         self.calls: list[dict] = []
+        self.configs: list[dict] = []
 
-    async def astream(self, payload, *_args, **_kwargs):
+    async def astream(self, payload, *_args, **kwargs):
         self.calls.append(payload)
+        self.configs.append(kwargs.get("config", {}))
         yield (SimpleNamespace(content_blocks=[{"type": "text", "text": "ok"}]), {})
+
+
+class _FakeGatewayCheckpointer:
+    def __init__(self, *, messages, working_state=None, continuity_checkpoint=None):
+        self._tuple = SimpleNamespace(
+            checkpoint={
+                "channel_values": {
+                    "messages": list(messages),
+                    "working_state": working_state or {},
+                    "continuity_checkpoint": continuity_checkpoint or {},
+                }
+            }
+        )
+
+    async def aget_tuple(self, _config):
+        return self._tuple
 
 
 class TestGatewayRedaction:
@@ -368,6 +386,101 @@ class TestGatewayRedaction:
         assert "historical handoff" in content
         assert "[NEW USER MESSAGE]" in content
         assert get_thread_state(thread_state_store, "123")["pending_summary_text"] is None
+
+    @pytest.mark.asyncio
+    async def test_runtime_route_compacts_and_rebinds_to_new_thread(self, monkeypatch):
+        monkeypatch.setattr("deepclaw.runtime_controller.DEFAULT_SYSTEM_OVERHEAD_CHARS", 20)
+        monkeypatch.setattr("deepclaw.runtime_controller.DEFAULT_FIT_BUDGET_CHARS", 200)
+        monkeypatch.setattr("deepclaw.runtime_controller.DEFAULT_REBUILD_BUDGET_CHARS", 2_500)
+
+        agent = _CapturingStreamingAgent()
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        checkpointer = _FakeGatewayCheckpointer(
+            messages=[HumanMessage(content="x" * 500) for _ in range(4)],
+        )
+        thread_state_store = {"123": {"current_thread_id": "thread-old"}}
+        gateway = Gateway(
+            agent=agent,
+            streaming_config=streaming,
+            checkpointer=checkpointer,
+            thread_state_store=thread_state_store,
+        )
+        gateway.compact_thread = AsyncMock(
+            return_value=SimpleNamespace(
+                old_thread_id="thread-old",
+                new_thread_id="thread-new",
+                summary_text="handoff summary",
+                summary_artifact_path="/tmp/summary.md",
+                checkpoint_artifact_path="/tmp/checkpoint.json",
+                raw_history_artifact_paths=["/tmp/raw.md"],
+                reason="runtime_budget",
+            )
+        )
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="continue")
+
+        await gateway.handle_message(channel, incoming, "thread-old")
+
+        gateway.compact_thread.assert_awaited_once_with(
+            "123", "thread-old", reason="runtime_budget"
+        )
+        assert agent.configs[0]["configurable"]["thread_id"] == "thread-new"
+        content = agent.calls[0]["messages"][0]["content"]
+        assert "handoff summary" in content
+        assert "[NEW USER MESSAGE]" in content
+        assert get_thread_state(thread_state_store, "123")["pending_summary_text"] is None
+
+    @pytest.mark.asyncio
+    async def test_runtime_route_rebuilds_from_state_after_failed_compaction(self, monkeypatch):
+        monkeypatch.setattr("deepclaw.runtime_controller.DEFAULT_FIT_BUDGET_CHARS", 100)
+        monkeypatch.setattr("deepclaw.runtime_controller.DEFAULT_REBUILD_BUDGET_CHARS", 120)
+
+        agent = _CapturingStreamingAgent()
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        continuity_checkpoint = {
+            "current_goal": "Ship PR 5",
+            "next_action": "Recover a minimal prompt",
+            "verification_status": "pending",
+            "active_blockers": [],
+            "relevant_files": ["deepclaw/gateway.py"],
+            "pending_verification": ["pytest"],
+            "artifact_refs": [{"path": "/tmp/raw.md", "kind": "history", "label": "history"}],
+            "reference_summary": {"items": ["Prior handoff may be stale."]},
+        }
+        checkpointer = _FakeGatewayCheckpointer(
+            messages=[HumanMessage(content="y" * 800)],
+            continuity_checkpoint=continuity_checkpoint,
+        )
+        thread_state_store = {
+            "123": {
+                "current_thread_id": "thread-old",
+                "pending_summary_text": "very large handoff",
+                "summary_artifact_path": "/tmp/summary.md",
+                "checkpoint_artifact_path": "/tmp/checkpoint.json",
+                "raw_history_artifact_paths": ["/tmp/raw.md"],
+            }
+        }
+        gateway = Gateway(
+            agent=agent,
+            streaming_config=streaming,
+            checkpointer=checkpointer,
+            thread_state_store=thread_state_store,
+        )
+        gateway.compact_thread = AsyncMock(return_value=None)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="continue carefully")
+
+        await gateway.handle_message(channel, incoming, "thread-old")
+
+        gateway.compact_thread.assert_awaited_once_with(
+            "123", "thread-old", reason="runtime_budget"
+        )
+        content = agent.calls[0]["messages"][0]["content"]
+        assert "[DeepClaw runtime context recovery]" in content
+        assert "Route: hard_overflow_recovery" in content
+        assert "Ship PR 5" in content
+        assert "`/tmp/checkpoint.json`" in content
+        assert "continue carefully" in content
 
     @pytest.mark.asyncio
     async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):
