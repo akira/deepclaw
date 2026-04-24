@@ -15,6 +15,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR
 from deepclaw.middleware import SafetyMiddleware
 from deepclaw.oauth import resolve_token
+from deepclaw.project_context import DerivedProjectContextMiddleware
 from deepclaw.safety import scrub_env
 from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
@@ -184,6 +185,9 @@ def create_agent(config, checkpointer):
         logger.warning("SafetyMiddleware is not available — safety checks disabled")
 
     fs_backend = FilesystemBackend()
+
+    # Derived local/project coding context
+    middleware.append(DerivedProjectContextMiddleware(workspace_root=config.workspace_root))
 
     # Memory (AGENTS.md — agent learns and persists across sessions)
     memory_sources = _setup_memory()
