@@ -4,13 +4,21 @@ This module is channel-agnostic — it depends only on the Channel ABC,
 so adding Discord/Slack/etc. requires zero changes here.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 import time
+from copy import deepcopy
+from datetime import UTC, datetime
+from typing import Any
 
 from langchain_core.messages import ToolMessage
 
+from deepclaw.auth import get_thread_state
 from deepclaw.channels.base import Channel, IncomingMessage
+from deepclaw.compaction import CompactionResult
+from deepclaw.compaction import compact_thread as compact_thread_impl
 from deepclaw.runtime_hygiene import bind_runtime_state, offload_user_input
 from deepclaw.safety import redact_secrets
 
@@ -18,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 CURSOR_INDICATOR = "\u258c"
 THINKING_MESSAGE = "Thinking..."
+_REFERENCE_SUMMARY_LABEL = "[DeepClaw historical handoff — reference only]"
 
 # Phrases that suggest the model is describing a future action instead of calling a tool
 _NARRATION_OPENERS = (
@@ -98,9 +107,18 @@ def chunk_message(text: str, limit: int = 4096) -> list[str]:
 class Gateway:
     """Shared message handler that invokes the agent and streams responses back through channels."""
 
-    def __init__(self, agent, streaming_config):
+    def __init__(self, agent, streaming_config, *, checkpointer=None, thread_state_store=None):
         self.agent = agent
         self.streaming_config = streaming_config
+        self.checkpointer = checkpointer
+        self.thread_state_store = thread_state_store
+
+    def _persist_thread_store(self) -> None:
+        if self.thread_state_store is None:
+            return
+        from deepclaw.auth import save_thread_ids
+
+        save_thread_ids(self.thread_state_store)
 
     async def _edit_redacted_message(
         self, channel: Channel, chat_id: str, message_id: str, text: str
@@ -111,6 +129,54 @@ class Gateway:
     async def _send_redacted_message(self, channel: Channel, chat_id: str, text: str) -> str:
         """Redact secrets before sending a message."""
         return await channel.send(chat_id, redact_secrets(text))
+
+    def _peek_pending_summary(self, chat_id: str) -> str | None:
+        if self.thread_state_store is None:
+            return None
+        state = get_thread_state(self.thread_state_store, chat_id)
+        summary = state.get("pending_summary_text")
+        return str(summary) if summary else None
+
+    def _clear_pending_summary(self, chat_id: str) -> None:
+        if self.thread_state_store is None:
+            return
+        state = get_thread_state(self.thread_state_store, chat_id)
+        if not state.get("pending_summary_text"):
+            return
+        state["pending_summary_text"] = None
+        self._persist_thread_store()
+
+    def _build_effective_user_content(self, chat_id: str, text: str) -> tuple[str, bool]:
+        summary = self._peek_pending_summary(chat_id)
+        if not summary:
+            return text, False
+        return f"{_REFERENCE_SUMMARY_LABEL}\n{summary}\n\n[NEW USER MESSAGE]\n{text}", True
+
+    async def compact_thread(
+        self, chat_id: str, thread_id: str, *, reason: str, source: str = "telegram"
+    ) -> CompactionResult | None:
+        """Compact the current thread and rotate chat metadata to a fresh thread id."""
+        result = await compact_thread_impl(
+            self.checkpointer,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            reason=reason,
+            source=source,
+        )
+        if result is None or self.thread_state_store is None:
+            return result
+
+        state = get_thread_state(self.thread_state_store, chat_id)
+        state["current_thread_id"] = result.new_thread_id
+        state["parent_thread_id"] = result.old_thread_id
+        state["pending_summary_text"] = result.summary_text
+        state["summary_artifact_path"] = result.summary_artifact_path
+        state["checkpoint_artifact_path"] = result.checkpoint_artifact_path
+        state["raw_history_artifact_paths"] = deepcopy(result.raw_history_artifact_paths)
+        state["last_compacted_at"] = datetime.now(UTC).isoformat()
+        state["last_compaction_reason"] = result.reason
+        self._persist_thread_store()
+        return result
 
     async def handle_message(
         self, channel: Channel, message: IncomingMessage, thread_id: str
@@ -136,7 +202,7 @@ class Gateway:
             chars_since_edit = 0
             limit = channel.message_limit
 
-            async def _stream_once(input_messages: list[dict]) -> bool:
+            async def _stream_once(input_messages: list[dict[str, Any]]) -> bool:
                 """Stream one agent turn. Returns True if any tool calls were seen."""
                 nonlocal accumulated, last_edit_time, chars_since_edit
                 tool_calls_seen = False
@@ -206,8 +272,12 @@ class Gateway:
 
                 return tool_calls_seen
 
+            injected_summary = False
             try:
-                user_content, artifact = offload_user_input(message.text)
+                effective_text, injected_summary = self._build_effective_user_content(
+                    message.chat_id, message.text
+                )
+                user_content, artifact = offload_user_input(effective_text)
                 if artifact is not None:
                     logger.info("Offloaded oversized user input to %s", artifact.path)
                 tool_calls_seen = await _stream_once([{"role": "user", "content": user_content}])
@@ -222,6 +292,9 @@ class Gateway:
             except Exception:
                 logger.exception("Agent streaming failed")
                 accumulated = accumulated or "Sorry, something went wrong processing your message."
+
+            if injected_summary and accumulated:
+                self._clear_pending_summary(message.chat_id)
 
             response_text = accumulated if accumulated else "(no response)"
             response_text = redact_secrets(response_text)
