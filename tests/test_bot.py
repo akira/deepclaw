@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import ToolMessage
 
+from deepclaw import runtime_hygiene
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
     ALLOWED_USERS_KEY,
@@ -265,6 +266,15 @@ class _FakeStreamingAgent:
             yield chunk
 
 
+class _CapturingStreamingAgent:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def astream(self, payload, *_args, **_kwargs):
+        self.calls.append(payload)
+        yield (SimpleNamespace(content_blocks=[{"type": "text", "text": "ok"}]), {})
+
+
 class TestGatewayRedaction:
     @pytest.mark.asyncio
     async def test_streaming_redacts_before_edit_and_final_send(self):
@@ -285,6 +295,28 @@ class TestGatewayRedaction:
         assert channel.edits
         assert all(secret not in text for _, _, text in channel.edits)
         assert any("[REDACTED]" in text for _, _, text in channel.edits)
+
+    @pytest.mark.asyncio
+    async def test_offloads_oversized_user_input_before_invocation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(runtime_hygiene, "ARTIFACTS_DIR", tmp_path / "artifacts")
+        monkeypatch.setattr(runtime_hygiene, "USER_INPUT_MAX_CHARS", 40)
+
+        agent = _CapturingStreamingAgent()
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="x" * 120)
+
+        await gateway.handle_message(channel, incoming, "thread-oversized")
+
+        assert len(agent.calls) == 1
+        content = agent.calls[0]["messages"][0]["content"]
+        assert "DeepClaw offloaded user input" in content
+        assert "read_file" in content
+
+        artifacts = list((tmp_path / "artifacts").rglob("*.txt"))
+        assert len(artifacts) == 1
+        assert artifacts[0].read_text(encoding="utf-8") == "x" * 120
 
     @pytest.mark.asyncio
     async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):
