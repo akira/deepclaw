@@ -23,6 +23,12 @@ from deepclaw.safety import (
     format_warning,
     redact_secrets,
 )
+from deepclaw.state_continuity import (
+    add_attempt,
+    add_blocker,
+    add_relevant_file,
+    ensure_working_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +143,32 @@ def _check_url(tool_call: dict) -> ToolMessage | None:
     return _blocked_tool_message(tool_call, reason)
 
 
+def _tool_paths(tool_call: dict) -> list[str]:
+    args = tool_call.get("args", {})
+    if not isinstance(args, dict):
+        return []
+
+    paths: list[str] = []
+    for key in ("path", "workdir", "cwd"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            paths.append(value.strip())
+    return paths
+
+
+def _tool_attempt_details(tool_call: dict) -> str | None:
+    args = tool_call.get("args", {})
+    if not isinstance(args, dict) or not args:
+        return None
+
+    interesting: list[str] = []
+    for key in ("command", "path", "workdir", "cwd", "url"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            interesting.append(f"{key}={value.strip()}")
+    return ", ".join(interesting) if interesting else None
+
+
 try:
     from langchain.agents.middleware.types import (  # type: ignore[import-untyped]
         AgentMiddleware,
@@ -171,26 +203,71 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             """Intercept tool calls for safety checks, then redact output."""
             tool_call = request.tool_call
             tool_name = tool_call["name"]
+            working_state = (
+                ensure_working_state(request.state) if isinstance(request.state, dict) else None
+            )
+            attempt = None
+            if working_state is not None:
+                attempt = add_attempt(
+                    working_state,
+                    action=f"tool:{tool_name}",
+                    status="started",
+                    details=_tool_attempt_details(tool_call),
+                    tool_name=tool_name,
+                )
+                for path in _tool_paths(tool_call):
+                    add_relevant_file(working_state, path)
 
             # --- Pre-execution safety gates ---
 
             if tool_name == _EXECUTE_TOOL:
                 blocked = _check_execute(tool_call)
                 if blocked is not None:
+                    if attempt is not None:
+                        attempt["status"] = "blocked"
+                    if working_state is not None:
+                        add_blocker(
+                            working_state,
+                            summary=f"Tool blocked: {tool_name}",
+                            owner="safety_middleware",
+                        )
                     return blocked
 
             elif tool_name in (_WRITE_FILE_TOOL, _EDIT_FILE_TOOL):
                 blocked = _check_write_path(tool_call)
                 if blocked is not None:
+                    if attempt is not None:
+                        attempt["status"] = "blocked"
+                    if working_state is not None:
+                        add_blocker(
+                            working_state,
+                            summary=f"Tool blocked: {tool_name}",
+                            owner="safety_middleware",
+                        )
                     return blocked
 
             elif tool_name in _WEB_FETCH_TOOLS:
                 blocked = _check_url(tool_call)
                 if blocked is not None:
+                    if attempt is not None:
+                        attempt["status"] = "blocked"
+                    if working_state is not None:
+                        add_blocker(
+                            working_state,
+                            summary=f"Tool blocked: {tool_name}",
+                            owner="safety_middleware",
+                        )
                     return blocked
 
             # --- Execute the tool ---
             result = await handler(request)
+            if attempt is not None:
+                attempt["status"] = (
+                    "error"
+                    if isinstance(result, ToolMessage)
+                    and getattr(result, "status", None) == "error"
+                    else "completed"
+                )
 
             # --- Post-execution: redact secrets from output ---
             if isinstance(result, ToolMessage) and tool_name in _REDACT_OUTPUT_TOOLS:

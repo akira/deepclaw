@@ -208,6 +208,7 @@ class TestSafetyMiddlewareIntegration:
         """Create a mock ToolCallRequest."""
         request = MagicMock()
         request.tool_call = _make_tool_call(name, args, call_id)
+        request.state = {"messages": []}
         return request
 
     @pytest.mark.asyncio
@@ -239,6 +240,9 @@ class TestSafetyMiddlewareIntegration:
         handler.assert_not_awaited()
         assert isinstance(result, ToolMessage)
         assert result.status == "error"
+        working_state = request.state["working_state"]
+        assert working_state["attempts"][-1]["status"] == "blocked"
+        assert working_state["blockers"][-1]["summary"] == "Tool blocked: write_file"
 
     @pytest.mark.asyncio
     async def test_edit_to_bashrc_blocked(self, middleware):
@@ -257,6 +261,10 @@ class TestSafetyMiddlewareIntegration:
         result = await middleware.awrap_tool_call(request, handler)
         handler.assert_awaited_once()
         assert result == expected
+        working_state = request.state["working_state"]
+        assert working_state["relevant_files"] == ["/tmp/test.txt"]
+        assert working_state["attempts"][-1]["action"] == "tool:write_file"
+        assert working_state["attempts"][-1]["status"] == "completed"
 
     @pytest.mark.asyncio
     @patch("deepclaw.safety.socket.getaddrinfo")

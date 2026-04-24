@@ -44,13 +44,21 @@ class RuntimeState:
     invocation_id: str
     artifacts: list[ArtifactRecord] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    working_state: dict[str, Any] = field(default_factory=dict)
 
 
 @contextlib.contextmanager
 def bind_runtime_state(thread_id: str):
     """Bind a fresh per-invocation runtime state to the current async context."""
 
-    state = RuntimeState(thread_id=thread_id, invocation_id=uuid.uuid4().hex)
+    from deepclaw.state_continuity import create_working_state
+
+    invocation_id = uuid.uuid4().hex
+    state = RuntimeState(
+        thread_id=thread_id,
+        invocation_id=invocation_id,
+        working_state=create_working_state(thread_id=thread_id, invocation_id=invocation_id),
+    )
     token = _runtime_state_var.set(state)
     try:
         yield state
@@ -112,6 +120,19 @@ def write_text_artifact(
     if state is not None:
         state.artifacts.append(record)
         state.metadata["artifact_count"] = len(state.artifacts)
+        try:
+            from deepclaw.state_continuity import add_artifact_ref
+
+            add_artifact_ref(
+                state.working_state,
+                path=str(record.path),
+                kind=record.kind,
+                label=record.kind,
+                original_chars=record.original_chars,
+                preview_chars=record.preview_chars,
+            )
+        except Exception:
+            pass
     return record
 
 
