@@ -33,6 +33,18 @@ class TestSkillView:
         assert result["name"] == "test-skill"
         assert "Hello" in result["content"]
 
+    def test_extracts_folded_yaml_description(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+        skill_dir = tmp_path / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: test-skill\ndescription: >\n  Review code carefully\n  with a folded block\n---\n\n# Test Skill\n"
+        )
+
+        result = skills_mod.skill_view("test-skill")
+
+        assert result["description"] == "Review code carefully with a folded block"
+
     def test_missing_skill_returns_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
 
@@ -166,6 +178,65 @@ class TestSkillsSearchRemote:
 
         assert "error" in result
         assert "skills.sh" in result["error"]
+
+
+class TestSkillsAudit:
+    def test_reports_missing_required_sections_and_duplicate_descriptions(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+
+        a_dir = tmp_path / "alpha-skill"
+        a_dir.mkdir()
+        (a_dir / "SKILL.md").write_text(
+            "---\nname: alpha-skill\ndescription: Shared description\n---\n\n"
+            "# Alpha\n\n"
+            "## When to Use\n- Use alpha\n"
+        )
+
+        b_dir = tmp_path / "beta-skill"
+        b_dir.mkdir()
+        (b_dir / "SKILL.md").write_text(
+            "---\nname: beta-skill\ndescription: Shared description\n---\n\n"
+            "# Beta\n\n"
+            "## Verification\n- Check beta\n"
+        )
+
+        result = skills_mod.skills_audit()
+
+        assert result["count"] == 2
+        assert result["duplicate_descriptions_count"] == 1
+        duplicate = result["duplicate_descriptions"][0]
+        assert duplicate["description"] == "Shared description"
+        assert duplicate["skills"] == ["alpha-skill", "beta-skill"]
+        assert result["skills_missing_required_sections_count"] == 2
+        alpha_issue = next(issue for issue in result["skills"] if issue["name"] == "alpha-skill")
+        assert "Deterministic First" in alpha_issue["missing_sections"]
+        assert "Verification" in alpha_issue["missing_sections"]
+
+
+class TestSkillsCheckResolvable:
+    def test_reports_unresolvable_skills_missing_required_frontmatter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+
+        ok_dir = tmp_path / "good-skill"
+        ok_dir.mkdir()
+        (ok_dir / "SKILL.md").write_text(
+            "---\nname: good-skill\ndescription: Good\n---\n\n# Good\n"
+        )
+
+        bad_dir = tmp_path / "bad-skill"
+        bad_dir.mkdir()
+        (bad_dir / "SKILL.md").write_text("# Missing frontmatter\n")
+
+        result = skills_mod.skills_check_resolvable()
+
+        assert result["count"] == 2
+        assert result["loadable_count"] == 1
+        assert result["unresolvable_count"] == 1
+        issue = result["unresolvable"][0]
+        assert issue["name"] == "bad-skill"
+        assert "missing required 'name' or 'description'" in issue["reason"]
 
 
 class TestSkillInstall:

@@ -17,6 +17,7 @@ from deepclaw.doctor import (
     check_env_file,
     check_llm_api_key,
     check_service_installed,
+    check_skills_health,
     check_telegram_token,
     check_workspace,
     format_report,
@@ -184,6 +185,81 @@ class TestCheckCronDir:
         assert result.status == STATUS_WARN
 
 
+class TestCheckSkillsHealth:
+    def test_ok_when_skills_are_loadable_and_audit_is_clean(self):
+        with (
+            patch(
+                "deepclaw.doctor.skills_check_resolvable",
+                return_value={
+                    "count": 2,
+                    "loadable_count": 2,
+                    "unresolvable_count": 0,
+                    "unresolvable": [],
+                },
+            ),
+            patch(
+                "deepclaw.doctor.skills_audit",
+                return_value={
+                    "count": 2,
+                    "duplicate_descriptions_count": 0,
+                    "skills_missing_required_sections_count": 0,
+                },
+            ),
+        ):
+            result = check_skills_health()
+        assert result.status == STATUS_OK
+
+    def test_fail_when_unresolvable_skills_exist(self):
+        with (
+            patch(
+                "deepclaw.doctor.skills_check_resolvable",
+                return_value={
+                    "count": 2,
+                    "loadable_count": 1,
+                    "unresolvable_count": 1,
+                    "unresolvable": [
+                        {"name": "bad-skill", "reason": "missing required 'name' or 'description'"}
+                    ],
+                },
+            ),
+            patch(
+                "deepclaw.doctor.skills_audit",
+                return_value={
+                    "count": 2,
+                    "duplicate_descriptions_count": 0,
+                    "skills_missing_required_sections_count": 0,
+                },
+            ),
+        ):
+            result = check_skills_health()
+        assert result.status == STATUS_FAIL
+        assert "bad-skill" in result.message
+
+    def test_warn_when_audit_finds_duplicates_or_missing_sections(self):
+        with (
+            patch(
+                "deepclaw.doctor.skills_check_resolvable",
+                return_value={
+                    "count": 2,
+                    "loadable_count": 2,
+                    "unresolvable_count": 0,
+                    "unresolvable": [],
+                },
+            ),
+            patch(
+                "deepclaw.doctor.skills_audit",
+                return_value={
+                    "count": 2,
+                    "duplicate_descriptions_count": 1,
+                    "skills_missing_required_sections_count": 2,
+                },
+            ),
+        ):
+            result = check_skills_health()
+        assert result.status == STATUS_WARN
+        assert "duplicate descriptions" in result.message
+
+
 class TestFormatReport:
     def test_markers_present(self):
         checks = [
@@ -234,7 +310,7 @@ class TestRunChecks:
             checks = await run_checks(config)
 
         assert isinstance(checks, list)
-        assert len(checks) == 9
+        assert len(checks) == 10
         assert all(isinstance(c, Check) for c in checks)
 
     @pytest.mark.asyncio

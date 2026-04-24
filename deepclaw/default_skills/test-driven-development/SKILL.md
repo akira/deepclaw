@@ -29,6 +29,12 @@ Write the test first. Watch it fail. Write minimal code to pass.
 
 Thinking "skip TDD just this once"? Stop. That's rationalization.
 
+## Deterministic First
+
+- TDD exists to force behavior into deterministic checks instead of relying on memory or vibes.
+- If code can prove the behavior with a test, do that before reasoning about whether it is probably correct.
+- Precision belongs in the test runner and assertions, not in the model's confidence.
+
 ## The Iron Law
 
 ```
@@ -167,6 +173,12 @@ Keep tests green throughout. Don't add behavior.
 ### Repeat
 
 Next failing test for next behavior. One cycle at a time.
+
+## Verification
+
+- The plan should make implementation obvious without guesswork.
+- Every task should include exact file paths, commands, and concrete verification steps.
+- If a task depends on deterministic behavior, the plan should specify the direct command or test that proves success.
 
 ## Why Order Matters
 

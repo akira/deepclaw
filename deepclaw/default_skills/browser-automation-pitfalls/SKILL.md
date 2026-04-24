@@ -8,6 +8,18 @@ version: 1.0.0
 
 Known failure patterns encountered with the browser tool (Browserbase + Playwright).
 
+## When to Use
+
+- A browser task is failing in a non-obvious way
+- A site behaves differently under automation than expected
+- You need to decide whether headless automation is sufficient or a user-visible handoff is required
+
+## Deterministic First
+
+- When deciding whether to use headless browser automation, favor direct reproducible checks over guesswork.
+- If a headless browser is sufficient, use it first. If the task truly needs a visible user-driven browser, hand off explicitly instead of pretending headless automation can complete it.
+- Treat browser reachability, DOM visibility, and login flow behavior as things to verify directly with the browser, not infer from page titles or assumptions.
+
 ## Ref Collisions on Dynamically Appearing Fields
 
 **Problem:** When a form reveals a new field after you fill the first one (e.g., "Confirm password" appears after typing a password), the new field may share the same `ref` ID (e.g., `@e6`) as an existing element. `browser_type` will fail with: `Selector "@eN" matched 2 elements`.
@@ -104,6 +116,12 @@ Log into rec.us with email X / password Y.
 **rec.us specific:** Login success confirmed by green initials avatar (e.g. "AK") appearing in top-right corner and "Reservations"/"Fast Track" nav links becoming visible.
 
 ---
+
+## Verification
+
+- Verify the failure mode directly with browser output, not just by inference.
+- If a workaround is recommended, confirm it on the real page flow before trusting it.
+- Distinguish between a limitation of the tool and a site-specific defense that requires handoff.
 
 ## X/Twitter — Blocks Automated Login (Camoufox and Browser Use / browser-harness)
 

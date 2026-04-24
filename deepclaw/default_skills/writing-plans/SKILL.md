@@ -26,6 +26,18 @@ Assume the implementer is a skilled developer but knows almost nothing about the
 - You plan to implement it yourself (future you needs guidance)
 - Working alone (documentation matters)
 
+## Deterministic First
+
+- Plans should route precision work toward deterministic checks wherever possible.
+- If a task depends on exact output, include the exact command, test, or script to run rather than leaving it to interpretation.
+- Good plans reduce improvisation by making verification explicit.
+
+## Verification
+
+- Every plan should specify how each task will be proven complete.
+- Prefer exact commands, test cases, and expected outputs over vague "verify it works" instructions.
+- If a plan cannot be checked deterministically, tighten the task definition.
+
 ## Bite-Sized Task Granularity
 
 **Each task = 2-5 minutes of focused work.**

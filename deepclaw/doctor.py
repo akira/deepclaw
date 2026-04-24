@@ -7,6 +7,7 @@ from typing import Literal
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, CONFIG_FILE, ENV_FILE, DeepClawConfig
 from deepclaw.service import detect_platform, get_service_path
+from deepclaw.tools.skills import skills_audit, skills_check_resolvable
 
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
@@ -107,6 +108,35 @@ def check_cron_dir() -> Check:
     return Check("Cron directory", STATUS_WARN, f"{CRON_DIR} not found")
 
 
+def check_skills_health() -> Check:
+    """Check whether local skills are loadable and follow baseline skill conventions."""
+    resolvable = skills_check_resolvable()
+    audit = skills_audit()
+
+    if resolvable.get("unresolvable_count", 0):
+        first = (resolvable.get("unresolvable") or [{}])[0]
+        return Check(
+            "Skills health",
+            STATUS_FAIL,
+            f"{resolvable['unresolvable_count']} unresolvable skills; first issue: {first.get('name', 'unknown')} — {first.get('reason', 'unknown reason')}",
+        )
+
+    duplicate_count = audit.get("duplicate_descriptions_count", 0)
+    missing_sections_count = audit.get("skills_missing_required_sections_count", 0)
+    if duplicate_count or missing_sections_count:
+        return Check(
+            "Skills health",
+            STATUS_WARN,
+            f"{audit.get('count', 0)} skills checked; duplicate descriptions: {duplicate_count}; missing required sections: {missing_sections_count}",
+        )
+
+    return Check(
+        "Skills health",
+        STATUS_OK,
+        f"{audit.get('count', 0)} skills checked; all loadable and baseline sections present",
+    )
+
+
 async def run_checks(config: DeepClawConfig) -> list[Check]:
     """Run all diagnostic checks and return the results."""
     return [
@@ -119,6 +149,7 @@ async def run_checks(config: DeepClawConfig) -> list[Check]:
         check_checkpointer_path(),
         check_service_installed(),
         check_cron_dir(),
+        check_skills_health(),
     ]
 
 
