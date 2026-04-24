@@ -9,11 +9,13 @@ Intercepts tool calls to enforce safety policies:
 
 import logging
 from collections.abc import Awaitable, Callable
+from json import dumps
 from typing import Any
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command, interrupt
 
+from deepclaw.runtime_hygiene import offload_tool_result
 from deepclaw.safety import (
     check_command,
     check_url_safety_sync,
@@ -42,6 +44,16 @@ _REDACT_OUTPUT_TOOLS = frozenset(
         *_WEB_FETCH_TOOLS,
     }
 )
+
+
+def _stringify_tool_content(content: Any) -> str | None:
+    """Render tool content to text when it can be safely offloaded."""
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list | dict):
+        return dumps(content, ensure_ascii=False, indent=2)
+    return None
 
 
 def _blocked_tool_message(tool_call: dict, reason: str) -> ToolMessage:
@@ -189,6 +201,21 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
                         logger.info("Redacted credentials from %s output", tool_name)
                         result = ToolMessage(
                             content=redacted,
+                            name=result.name,
+                            tool_call_id=result.tool_call_id,
+                            status=result.status,
+                        )
+
+            if isinstance(result, ToolMessage):
+                serialized = _stringify_tool_content(result.content)
+                if serialized is not None:
+                    offloaded, artifact = offload_tool_result(tool_name, serialized)
+                    if artifact is not None:
+                        logger.info(
+                            "Offloaded oversized tool result for %s to %s", tool_name, artifact.path
+                        )
+                        result = ToolMessage(
+                            content=offloaded,
                             name=result.name,
                             tool_call_id=result.tool_call_id,
                             status=result.status,
