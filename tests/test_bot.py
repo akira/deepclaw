@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from deepclaw import runtime_hygiene
-from deepclaw.auth import is_user_allowed
+from deepclaw.auth import get_thread_state, is_user_allowed
 from deepclaw.channels.telegram import (
     ALLOWED_USERS_KEY,
     CONFIG_KEY,
@@ -23,9 +23,11 @@ from deepclaw.channels.telegram import (
     _format_skills_list,
     _looks_like_supported_image,
     _parse_skills_command,
+    _rotate_thread,
     _validate_model,
     authorize_chat,
     cmd_clear,
+    cmd_compact,
     cmd_memory,
     cmd_model,
     cmd_retry,
@@ -127,6 +129,29 @@ class TestGetThreadId:
     def test_other_chat_unaffected(self):
         ctx = _make_context(thread_ids={"12345": "custom-id"})
         assert get_thread_id(ctx, "99999") == "99999"
+
+
+class TestThreadRotationState:
+    def test_rotate_thread_persists_structured_metadata(self):
+        ctx = _make_context(thread_ids={"12345": "thread-old"})
+
+        new_thread = _rotate_thread(
+            ctx,
+            "12345",
+            reason="manual",
+            pending_summary_text="summary",
+            summary_artifact_path="/tmp/summary.md",
+            checkpoint_artifact_path="/tmp/checkpoint.json",
+            raw_history_artifact_paths=["/tmp/raw.md"],
+        )
+
+        state = get_thread_state(ctx.bot_data[THREAD_IDS_KEY], "12345")
+        assert state["current_thread_id"] == new_thread
+        assert state["parent_thread_id"] == "thread-old"
+        assert state["pending_summary_text"] == "summary"
+        assert state["summary_artifact_path"] == "/tmp/summary.md"
+        assert state["checkpoint_artifact_path"] == "/tmp/checkpoint.json"
+        assert state["raw_history_artifact_paths"] == ["/tmp/raw.md"]
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +342,32 @@ class TestGatewayRedaction:
         artifacts = list((tmp_path / "artifacts").rglob("*.txt"))
         assert len(artifacts) == 1
         assert artifacts[0].read_text(encoding="utf-8") == "x" * 120
+
+    @pytest.mark.asyncio
+    async def test_injects_and_clears_pending_handoff_summary(self):
+        agent = _CapturingStreamingAgent()
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        thread_state_store = {
+            "123": {
+                "current_thread_id": "thread-2",
+                "parent_thread_id": "thread-1",
+                "pending_summary_text": "historical handoff",
+            }
+        }
+        gateway = Gateway(
+            agent=agent,
+            streaming_config=streaming,
+            thread_state_store=thread_state_store,
+        )
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="continue the work")
+
+        await gateway.handle_message(channel, incoming, "thread-2")
+
+        content = agent.calls[0]["messages"][0]["content"]
+        assert "historical handoff" in content
+        assert "[NEW USER MESSAGE]" in content
+        assert get_thread_state(thread_state_store, "123")["pending_summary_text"] is None
 
     @pytest.mark.asyncio
     async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):
@@ -692,6 +743,44 @@ class TestCmdClear:
         ctx = _make_slash_context(extra={LAST_MESSAGE_KEY: {"1": "hello"}})
         await cmd_clear(update, ctx)
         assert ctx.bot_data.get(LAST_MESSAGE_KEY, {}).get("1") is None
+
+
+class TestCmdCompact:
+    @pytest.mark.asyncio
+    async def test_compact_reports_artifacts_and_rotates_thread(self):
+        update = _make_slash_update()
+        gateway = MagicMock()
+        gateway.compact_thread = AsyncMock(
+            return_value=SimpleNamespace(
+                old_thread_id="thread-old",
+                new_thread_id="thread-new",
+                summary_artifact_path="/tmp/summary.md",
+                checkpoint_artifact_path="/tmp/checkpoint.json",
+                raw_history_artifact_paths=["/tmp/raw.md"],
+            )
+        )
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway, THREAD_IDS_KEY: {"1": "thread-old"}})
+
+        await cmd_compact(update, ctx)
+
+        gateway.compact_thread.assert_awaited_once_with("1", "thread-old", reason="manual")
+        reply = update.message.reply_text.await_args.args[0]
+        assert "thread-new" in reply
+        assert "/tmp/checkpoint.json" in reply
+        assert "/tmp/raw.md" in reply
+
+    @pytest.mark.asyncio
+    async def test_compact_handles_short_threads(self):
+        update = _make_slash_update()
+        gateway = MagicMock()
+        gateway.compact_thread = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        await cmd_compact(update, ctx)
+
+        update.message.reply_text.assert_awaited_once_with(
+            "Not enough thread history to compact yet."
+        )
 
 
 # ---------------------------------------------------------------------------
