@@ -23,8 +23,12 @@ build/
 *.swp
 *.swo
 
-# Docs (design docs kept local, not tracked)
+# Docs
 docs/
+!docs/
+!docs/deepclaw-context-engineering-redesign.md
+!docs/plans/
+!docs/plans/2026-04-24-context-compaction-implementation.md
 
 # OS
 .DS_Store

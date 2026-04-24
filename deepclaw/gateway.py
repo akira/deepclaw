@@ -4,19 +4,28 @@ This module is channel-agnostic — it depends only on the Channel ABC,
 so adding Discord/Slack/etc. requires zero changes here.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 import time
+from collections.abc import Callable
+from copy import deepcopy
+from datetime import UTC, datetime
 
 from langchain_core.messages import ToolMessage
 
+from deepclaw.auth import get_thread_state
 from deepclaw.channels.base import Channel, IncomingMessage
+from deepclaw.compaction import CompactionResult, _should_auto_compact, get_checkpoint_messages
+from deepclaw.compaction import compact_thread as compact_thread_impl
 from deepclaw.safety import redact_secrets
 
 logger = logging.getLogger(__name__)
 
 CURSOR_INDICATOR = "\u258c"
 THINKING_MESSAGE = "Thinking..."
+_REFERENCE_SUMMARY_LABEL = "[REFERENCE-ONLY SUMMARY FROM PREVIOUS THREAD]"
 
 # Phrases that suggest the model is describing a future action instead of calling a tool
 _NARRATION_OPENERS = (
@@ -57,8 +66,6 @@ _ACTION_WORDS = (
     "call",
     "use",
 )
-# Pre-compiled regex for whole-word action matching — avoids substring false positives
-# such as "use" in "because", "get" in "forget", "list" in "listen".
 _ACTION_RE = re.compile(r"\b(" + "|".join(_ACTION_WORDS) + r")\b")
 _NUDGE_MESSAGE = (
     "You described an action but did not call any tools. "
@@ -85,7 +92,6 @@ def chunk_message(text: str, limit: int = 4096) -> list[str]:
         if len(text) <= limit:
             chunks.append(text)
             break
-        # Try to split at last newline within limit
         split_at = text.rfind("\n", 0, limit)
         if split_at == -1:
             split_at = limit
@@ -97,9 +103,25 @@ def chunk_message(text: str, limit: int = 4096) -> list[str]:
 class Gateway:
     """Shared message handler that invokes the agent and streams responses back through channels."""
 
-    def __init__(self, agent, streaming_config):
+    def __init__(
+        self,
+        agent,
+        streaming_config,
+        *,
+        checkpointer=None,
+        thread_state_store: dict | None = None,
+        persist_thread_state: Callable[[dict], None] | None = None,
+    ):
         self.agent = agent
         self.streaming_config = streaming_config
+        self.checkpointer = checkpointer
+        self.thread_state_store = thread_state_store
+        self.persist_thread_state = persist_thread_state
+
+    def _persist_thread_store(self) -> None:
+        if self.persist_thread_state is None or self.thread_state_store is None:
+            return
+        self.persist_thread_state(self.thread_state_store)
 
     async def _edit_redacted_message(
         self, channel: Channel, chat_id: str, message_id: str, text: str
@@ -111,13 +133,78 @@ class Gateway:
         """Redact secrets before sending a message."""
         return await channel.send(chat_id, redact_secrets(text))
 
+    def _peek_pending_summary(self, chat_id: str) -> str | None:
+        if self.thread_state_store is None:
+            return None
+        state = get_thread_state(self.thread_state_store, chat_id)
+        summary = state.get("pending_summary_text")
+        return str(summary) if summary else None
+
+    def _clear_pending_summary(self, chat_id: str) -> None:
+        if self.thread_state_store is None:
+            return
+        state = get_thread_state(self.thread_state_store, chat_id)
+        if not state.get("pending_summary_text"):
+            return
+        state["pending_summary_text"] = None
+        self._persist_thread_store()
+
+    async def compact_thread(
+        self, chat_id: str, thread_id: str, *, reason: str
+    ) -> CompactionResult | None:
+        """Compact the current thread and rotate chat metadata to a fresh thread id."""
+        result = await compact_thread_impl(
+            self.checkpointer,
+            thread_id=thread_id,
+            chat_id=chat_id,
+            reason=reason,
+        )
+        if result is None or self.thread_state_store is None:
+            return result
+
+        state = get_thread_state(self.thread_state_store, chat_id)
+        state["current_thread_id"] = result.new_thread_id
+        state["parent_thread_id"] = result.old_thread_id
+        state["summary_artifact_path"] = result.summary_artifact_path
+        state["raw_history_artifact_paths"] = deepcopy(result.raw_history_artifact_paths)
+        state["pending_summary_text"] = result.summary_text
+        state["last_compacted_at"] = datetime.now(UTC).isoformat()
+        state["last_compaction_reason"] = result.reason
+        self._persist_thread_store()
+        return result
+
+    async def _maybe_auto_compact(
+        self, message: IncomingMessage, thread_id: str
+    ) -> tuple[str, CompactionResult | None]:
+        if self.checkpointer is None or self.thread_state_store is None:
+            return thread_id, None
+        messages = await get_checkpoint_messages(self.checkpointer, thread_id)
+        if not _should_auto_compact(messages):
+            return thread_id, None
+        result = await self.compact_thread(message.chat_id, thread_id, reason="auto-threshold")
+        if result is None:
+            return thread_id, None
+        logger.info(
+            "Compacted chat %s thread %s -> %s (%s)",
+            message.chat_id,
+            result.old_thread_id,
+            result.new_thread_id,
+            result.reason,
+        )
+        return result.new_thread_id, result
+
+    def _build_effective_user_content(self, chat_id: str, text: str) -> tuple[str, bool]:
+        summary = self._peek_pending_summary(chat_id)
+        if not summary:
+            return text, False
+        return f"{_REFERENCE_SUMMARY_LABEL}\n{summary}\n\n[NEW USER MESSAGE]\n{text}", True
+
     async def handle_message(
         self, channel: Channel, message: IncomingMessage, thread_id: str
     ) -> None:
         """Process an inbound message: invoke agent, stream response, deliver via channel."""
         logger.info("Received message from chat %s: %s", message.chat_id, message.text[:80])
 
-        # Set chat context so tools (e.g., cron) know where to deliver results
         try:
             from deepclaw.tools.cron import set_chat_context
 
@@ -125,8 +212,12 @@ class Gateway:
         except ImportError:
             pass
 
-        await channel.send_typing(message.chat_id)
+        thread_id, _auto_compaction = await self._maybe_auto_compact(message, thread_id)
+        effective_text, used_pending_summary = self._build_effective_user_content(
+            message.chat_id, message.text
+        )
 
+        await channel.send_typing(message.chat_id)
         msg_id = await self._send_redacted_message(channel, message.chat_id, THINKING_MESSAGE)
 
         accumulated = ""
@@ -135,7 +226,6 @@ class Gateway:
         limit = channel.message_limit
 
         async def _stream_once(input_messages: list[dict]) -> bool:
-            """Stream one agent turn. Returns True if any tool calls were seen."""
             nonlocal accumulated, last_edit_time, chars_since_edit
             tool_calls_seen = False
 
@@ -144,12 +234,10 @@ class Gateway:
                 config={"configurable": {"thread_id": thread_id}},
                 stream_mode="messages",
             ):
-                # astream with stream_mode="messages" yields (message, metadata) tuples
                 if not isinstance(chunk, tuple) or len(chunk) != 2:
                     continue
                 message_obj, _metadata = chunk
 
-                # Log tool results from ToolMessages
                 if isinstance(message_obj, ToolMessage):
                     tool_name = getattr(message_obj, "name", "unknown")
                     content = message_obj.content
@@ -157,7 +245,6 @@ class Gateway:
                     logger.info("Tool result [%s]: %s", tool_name, preview)
                     continue
 
-                # Only process AI messages with content_blocks
                 if not hasattr(message_obj, "content_blocks"):
                     continue
 
@@ -203,23 +290,21 @@ class Gateway:
             return tool_calls_seen
 
         try:
-            tool_calls_seen = await _stream_once([{"role": "user", "content": message.text}])
-
-            # If the model described an action without calling any tools, nudge it once.
+            tool_calls_seen = await _stream_once([{"role": "user", "content": effective_text}])
             if not tool_calls_seen and _looks_like_narration(accumulated):
                 logger.info("Narration-without-tool-call detected — sending nudge")
                 accumulated = ""
                 last_edit_time = time.monotonic()
                 chars_since_edit = 0
                 await _stream_once([{"role": "user", "content": _NUDGE_MESSAGE}])
+            if used_pending_summary:
+                self._clear_pending_summary(message.chat_id)
         except Exception:
             logger.exception("Agent streaming failed")
             accumulated = accumulated or "Sorry, something went wrong processing your message."
 
         response_text = accumulated if accumulated else "(no response)"
         response_text = redact_secrets(response_text)
-
-        # Final delivery: send complete text (possibly chunked)
         chunks = chunk_message(response_text, limit)
         await self._edit_redacted_message(channel, message.chat_id, msg_id, chunks[0])
         for extra_chunk in chunks[1:]:

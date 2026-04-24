@@ -25,11 +25,13 @@ from deepclaw.channels.telegram import (
     _validate_model,
     authorize_chat,
     cmd_clear,
+    cmd_compact,
     cmd_memory,
     cmd_model,
     cmd_retry,
     cmd_skills,
     cmd_soul,
+    cmd_status,
     cmd_uptime,
     get_thread_id,
     handle_message,
@@ -120,11 +122,11 @@ class TestGetThreadId:
 
     def test_returns_custom_thread_id(self):
         custom_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        ctx = _make_context(thread_ids={"12345": custom_id})
+        ctx = _make_context(thread_ids={"12345": {"current_thread_id": custom_id}})
         assert get_thread_id(ctx, "12345") == custom_id
 
     def test_other_chat_unaffected(self):
-        ctx = _make_context(thread_ids={"12345": "custom-id"})
+        ctx = _make_context(thread_ids={"12345": {"current_thread_id": "custom-id"}})
         assert get_thread_id(ctx, "99999") == "99999"
 
 
@@ -259,10 +261,26 @@ class TestTelegramBotChannel:
 class _FakeStreamingAgent:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.last_astream_args = None
+        self.last_astream_kwargs = None
 
-    async def astream(self, *_args, **_kwargs):
+    async def astream(self, *args, **kwargs):
+        self.last_astream_args = args
+        self.last_astream_kwargs = kwargs
         for chunk in self._chunks:
             yield chunk
+
+
+class _FailingStreamingAgent:
+    def __init__(self):
+        self.last_astream_args = None
+        self.last_astream_kwargs = None
+
+    async def astream(self, *args, **kwargs):
+        self.last_astream_args = args
+        self.last_astream_kwargs = kwargs
+        raise RuntimeError("boom")
+        yield
 
 
 class TestGatewayRedaction:
@@ -285,6 +303,54 @@ class TestGatewayRedaction:
         assert channel.edits
         assert all(secret not in text for _, _, text in channel.edits)
         assert any("[REDACTED]" in text for _, _, text in channel.edits)
+
+    @pytest.mark.asyncio
+    async def test_injects_pending_summary_into_first_message_after_compaction(self):
+        agent = _FakeStreamingAgent(
+            [
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "ok"}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        state_store = {
+            "123": {
+                "current_thread_id": "thread-2",
+                "pending_summary_text": "summary text",
+                "raw_history_artifact_paths": [],
+            }
+        }
+        gateway = Gateway(agent=agent, streaming_config=streaming, thread_state_store=state_store)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="new work")
+
+        await gateway.handle_message(channel, incoming, "thread-2")
+
+        args = agent.last_astream_args
+        assert args is not None
+        assert "[REFERENCE-ONLY SUMMARY FROM PREVIOUS THREAD]" in args[0]["messages"][0]["content"]
+        assert "summary text" in args[0]["messages"][0]["content"]
+        assert state_store["123"]["pending_summary_text"] is None
+
+    @pytest.mark.asyncio
+    async def test_failed_first_handoff_keeps_pending_summary(self):
+        agent = _FailingStreamingAgent()
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        state_store = {
+            "123": {
+                "current_thread_id": "thread-2",
+                "pending_summary_text": "summary text",
+                "raw_history_artifact_paths": [],
+            }
+        }
+        gateway = Gateway(agent=agent, streaming_config=streaming, thread_state_store=state_store)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="new work")
+
+        await gateway.handle_message(channel, incoming, "thread-2")
+
+        assert state_store["123"]["pending_summary_text"] == "summary text"
+        assert channel.edits
+        assert channel.edits[-1][2] == "Sorry, something went wrong processing your message."
 
     @pytest.mark.asyncio
     async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):
@@ -653,6 +719,7 @@ class TestCmdClear:
         await cmd_clear(update, ctx)
         update.message.reply_text.assert_called_once_with("Conversation cleared.")
         assert "1" in ctx.bot_data[THREAD_IDS_KEY]
+        assert ctx.bot_data[THREAD_IDS_KEY]["1"]["current_thread_id"] != "1"
 
     @pytest.mark.asyncio
     async def test_clear_removes_last_message(self):
@@ -660,6 +727,71 @@ class TestCmdClear:
         ctx = _make_slash_context(extra={LAST_MESSAGE_KEY: {"1": "hello"}})
         await cmd_clear(update, ctx)
         assert ctx.bot_data.get(LAST_MESSAGE_KEY, {}).get("1") is None
+
+
+# ---------------------------------------------------------------------------
+# /compact
+# ---------------------------------------------------------------------------
+
+
+class TestCmdCompact:
+    @pytest.mark.asyncio
+    async def test_compact_rotates_thread_and_reports(self):
+        update = _make_slash_update(text="/compact")
+        gateway = MagicMock()
+        gateway.compact_thread = AsyncMock(
+            return_value=SimpleNamespace(
+                old_thread_id="thread-old",
+                new_thread_id="thread-new",
+                summary_artifact_path="/tmp/summary.md",
+                raw_history_artifact_paths=["/tmp/raw.md"],
+                reason="manual",
+            )
+        )
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        await cmd_compact(update, ctx)
+
+        gateway.compact_thread.assert_awaited_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "thread-new" in text
+        assert "/tmp/summary.md" in text
+        assert "/tmp/raw.md" in text
+
+
+# ---------------------------------------------------------------------------
+# /status
+# ---------------------------------------------------------------------------
+
+
+class TestCmdStatus:
+    @pytest.mark.asyncio
+    async def test_status_includes_compaction_metadata(self):
+        update = _make_slash_update(text="/status")
+        ctx = _make_slash_context(
+            extra={
+                THREAD_IDS_KEY: {
+                    "1": {
+                        "current_thread_id": "thread-new",
+                        "parent_thread_id": "thread-old",
+                        "last_compaction_reason": "manual",
+                        "last_compacted_at": "2026-04-24T10:00:00Z",
+                        "summary_artifact_path": "/tmp/summary.md",
+                        "raw_history_artifact_paths": ["/tmp/raw.md"],
+                    }
+                }
+            }
+        )
+
+        await cmd_status(update, ctx)
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "Thread ID: thread-new" in reply
+        assert "Parent Thread: thread-old" in reply
+        assert "Last Compaction: manual" in reply
+        assert "Last Compacted At: 2026-04-24T10:00:00Z" in reply
+        assert "Summary Artifact: /tmp/summary.md" in reply
+        assert "- /tmp/raw.md" in reply
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ from deepclaw import agent as agent_module
 from deepclaw.agent import create_agent, create_checkpointer
 from deepclaw.auth import (
     REJECTION_MESSAGE,
+    get_thread_state,
     is_user_allowed,
     load_allowed_users,
     load_thread_ids,
@@ -167,8 +168,34 @@ def authorize_chat(update: Update) -> bool:
 
 def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
     """Return the current thread_id for a chat, defaulting to the chat_id itself."""
-    thread_ids: dict[str, str] = context.bot_data.setdefault(THREAD_IDS_KEY, {})
-    return thread_ids.get(chat_id, chat_id)
+    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
+    state = get_thread_state(thread_ids, chat_id)
+    return state["current_thread_id"]
+
+
+def _rotate_thread(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: str,
+    *,
+    reason: str,
+    pending_summary_text: str | None = None,
+    summary_artifact_path: str | None = None,
+    raw_history_artifact_paths: list[str] | None = None,
+) -> str:
+    """Rotate a chat onto a fresh thread and persist compaction metadata."""
+    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
+    state = get_thread_state(thread_ids, chat_id)
+    old_thread = state["current_thread_id"]
+    new_thread = str(uuid.uuid4())
+    state["current_thread_id"] = new_thread
+    state["parent_thread_id"] = old_thread
+    state["pending_summary_text"] = pending_summary_text
+    state["summary_artifact_path"] = summary_artifact_path
+    state["raw_history_artifact_paths"] = list(raw_history_artifact_paths or [])
+    state["last_compacted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    state["last_compaction_reason"] = reason
+    save_thread_ids(thread_ids)
+    return new_thread
 
 
 def _parse_skills_command(raw_text: str) -> tuple[str, str]:
@@ -362,10 +389,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
-    new_thread = str(uuid.uuid4())
-    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
-    thread_ids[chat_id] = new_thread
-    save_thread_ids(thread_ids)
+    new_thread = _rotate_thread(context, chat_id, reason="manual-new")
     logger.info("New thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text(f"Started a new conversation thread.\nThread ID: {new_thread}")
 
@@ -382,6 +406,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Available commands:\n"
         "/new \u2014 Start a fresh conversation thread\n"
         "/clear \u2014 Clear conversation (alias for /new)\n"
+        "/compact \u2014 Compact the current thread into a fresh one with a handoff summary\n"
         "/retry \u2014 Re-send the last message\n"
         "/model [name] — View or set the active model\n"
         "/skills [subcommand] — Browse/view/create/install/delete/audit local skills\n"
@@ -408,7 +433,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
-    thread_id = get_thread_id(context, chat_id)
+    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
+    state = get_thread_state(thread_ids, chat_id)
+    thread_id = state["current_thread_id"]
     model = context.bot_data[CONFIG_KEY].model or "not set"
     allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
     allowlist_status = (
@@ -417,6 +444,19 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     text = (
         f"Chat ID: {chat_id}\nThread ID: {thread_id}\nModel: {model}\nAllowlist: {allowlist_status}"
     )
+    if state.get("parent_thread_id"):
+        text += f"\nParent Thread: {state['parent_thread_id']}"
+    if state.get("last_compaction_reason"):
+        text += f"\nLast Compaction: {state['last_compaction_reason']}"
+    if state.get("last_compacted_at"):
+        text += f"\nLast Compacted At: {state['last_compacted_at']}"
+    if state.get("summary_artifact_path"):
+        text += f"\nSummary Artifact: {state['summary_artifact_path']}"
+    raw_paths = state.get("raw_history_artifact_paths") or []
+    if raw_paths:
+        text += "\nRaw History Artifacts:"
+        for path in raw_paths:
+            text += f"\n- {path}"
     await update.message.reply_text(text)
 
 
@@ -496,13 +536,38 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
-    new_thread = str(uuid.uuid4())
-    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
-    thread_ids[chat_id] = new_thread
-    save_thread_ids(thread_ids)
+    new_thread = _rotate_thread(context, chat_id, reason="manual-clear")
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
     logger.info("Cleared thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text("Conversation cleared.")
+
+
+async def cmd_compact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /compact -- summarize/offload current thread and rotate to a fresh one."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    thread_id = get_thread_id(context, chat_id)
+    gateway: Gateway | None = context.bot_data.get(GATEWAY_KEY)
+    if gateway is None:
+        await update.message.reply_text("Gateway is not initialized yet.")
+        return
+    result = await gateway.compact_thread(chat_id, thread_id, reason="manual")
+    if result is None:
+        await update.message.reply_text("Not enough thread history to compact yet.")
+        return
+    context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
+    raw_paths = "\n".join(f"- {p}" for p in result.raw_history_artifact_paths) or "- (none)"
+    await update.message.reply_text(
+        "Compacted current thread into a fresh conversation.\n"
+        f"Old thread: {result.old_thread_id}\n"
+        f"New thread: {result.new_thread_id}\n"
+        f"Summary artifact: {result.summary_artifact_path or '(none)'}\n"
+        f"Raw history artifacts:\n{raw_paths}"
+    )
 
 
 KNOWN_PROVIDERS = ("anthropic", "openai", "google", "groq", "mistral", "bedrock", "vertex")
@@ -553,7 +618,13 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Failed to switch to model {model_arg} — agent creation failed. Keeping current model."
             )
             return
-        new_gateway = Gateway(agent=new_agent, streaming_config=new_config.telegram.streaming)
+        new_gateway = Gateway(
+            agent=new_agent,
+            streaming_config=new_config.telegram.streaming,
+            checkpointer=checkpointer,
+            thread_state_store=context.bot_data.setdefault(THREAD_IDS_KEY, {}),
+            persist_thread_state=save_thread_ids,
+        )
 
         # Commit atomically — all-or-nothing from here
         context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
@@ -572,7 +643,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("Agent reloaded with model: %s", model_arg)
 
         await update.message.reply_text(
-            f"Model switched to: {model_arg}\nAgent reloaded — use /clear to start a fresh thread."
+            f"Model switched to: {model_arg}\nAgent reloaded — use /compact or /clear before continuing in a fresh thread."
         )
     else:
         override = context.bot_data.get(MODEL_OVERRIDE_KEY)
@@ -952,17 +1023,23 @@ async def post_init(application: Application) -> None:
     agent = create_agent(config, checkpointer)
     application.bot_data["agent"] = agent
 
+    # Restore thread metadata from disk so /new survives bot restarts
+    application.bot_data[THREAD_IDS_KEY] = load_thread_ids()
+
     # Create the shared gateway
-    gateway = Gateway(agent=agent, streaming_config=config.telegram.streaming)
+    gateway = Gateway(
+        agent=agent,
+        streaming_config=config.telegram.streaming,
+        checkpointer=checkpointer,
+        thread_state_store=application.bot_data[THREAD_IDS_KEY],
+        persist_thread_state=save_thread_ids,
+    )
     application.bot_data[GATEWAY_KEY] = gateway
 
     # Load allowed users: config + persisted file
     allowed_users = set(config.telegram.allowed_users)
     allowed_users.update(load_allowed_users())
     application.bot_data[ALLOWED_USERS_KEY] = allowed_users
-
-    # Restore thread IDs from disk so /new survives bot restarts
-    application.bot_data[THREAD_IDS_KEY] = load_thread_ids()
 
     # Generate pairing code for new user onboarding
     pairing_code = uuid.uuid4().hex[:8]
@@ -1007,6 +1084,7 @@ async def post_init(application: Application) -> None:
         [
             BotCommand("new", "Start a fresh conversation thread"),
             BotCommand("clear", "Clear conversation (alias for /new)"),
+            BotCommand("compact", "Compact current thread into a fresh one"),
             BotCommand("retry", "Re-send the last message"),
             BotCommand("model", "View or set the active model"),
             BotCommand("skills", "Browse or manage local skills"),
@@ -1063,6 +1141,7 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("pair", cmd_pair))
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("clear", cmd_clear))
+    application.add_handler(CommandHandler("compact", cmd_compact))
     application.add_handler(CommandHandler("retry", cmd_retry))
     application.add_handler(CommandHandler("model", cmd_model))
     application.add_handler(CommandHandler("skills", cmd_skills))
