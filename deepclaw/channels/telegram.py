@@ -624,6 +624,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             checkpointer=checkpointer,
             thread_state_store=context.bot_data.setdefault(THREAD_IDS_KEY, {}),
             persist_thread_state=save_thread_ids,
+            model_name=new_config.model,
         )
 
         # Commit atomically — all-or-nothing from here
@@ -1033,6 +1034,7 @@ async def post_init(application: Application) -> None:
         checkpointer=checkpointer,
         thread_state_store=application.bot_data[THREAD_IDS_KEY],
         persist_thread_state=save_thread_ids,
+        model_name=config.model,
     )
     application.bot_data[GATEWAY_KEY] = gateway
 

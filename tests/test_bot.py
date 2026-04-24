@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
@@ -351,6 +351,38 @@ class TestGatewayRedaction:
         assert state_store["123"]["pending_summary_text"] == "summary text"
         assert channel.edits
         assert channel.edits[-1][2] == "Sorry, something went wrong processing your message."
+
+    @pytest.mark.asyncio
+    async def test_auto_compaction_uses_token_budget_reason(self, monkeypatch):
+        agent = _FakeStreamingAgent([])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(
+            agent=agent,
+            streaming_config=streaming,
+            checkpointer=object(),
+            thread_state_store={},
+            model_name="anthropic:claude-sonnet-4-6-20250514",
+        )
+        gateway.compact_thread = AsyncMock(
+            return_value=SimpleNamespace(
+                old_thread_id="thread-old",
+                new_thread_id="thread-new",
+                reason="auto-token-budget",
+            )
+        )
+        monkeypatch.setattr(
+            "deepclaw.gateway.get_checkpoint_messages",
+            AsyncMock(return_value=[HumanMessage(content="x" * 70000)]),
+        )
+        incoming = SimpleNamespace(chat_id="123", text="new work")
+
+        thread_id, result = await gateway._maybe_auto_compact(incoming, "thread-old")
+
+        assert thread_id == "thread-new"
+        assert result is not None
+        gateway.compact_thread.assert_awaited_once_with(
+            "123", "thread-old", reason="auto-token-budget"
+        )
 
     @pytest.mark.asyncio
     async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):

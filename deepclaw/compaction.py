@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,7 +21,27 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 logger = logging.getLogger(__name__)
 
 AUTO_COMPACT_MESSAGE_COUNT = 40
+AUTO_COMPACT_CONTEXT_RATIO = 0.08
+AUTO_COMPACT_MIN_TOKEN_BUDGET = 3000
+AUTO_COMPACT_MAX_TOKEN_BUDGET = 24000
+DEFAULT_MODEL_CONTEXT_WINDOW = 128000
 COMPACTION_ROOT = Path("~/.deepclaw/workspace/compactions").expanduser()
+
+_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus": 200000,
+    "claude-sonnet": 200000,
+    "claude-haiku": 200000,
+    "gpt-5": 128000,
+    "gpt-4.1": 1047576,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "o3": 200000,
+    "o4-mini": 200000,
+    "gemini": 1000000,
+    "gemma": 128000,
+    "llama": 128000,
+    "mistral": 128000,
+}
 
 
 @dataclass
@@ -33,6 +54,16 @@ class CompactionResult:
     reason: str
     used_offload: bool
     used_summary: bool
+
+
+@dataclass
+class AutoCompactionDecision:
+    should_compact: bool
+    reason: str | None
+    estimated_tokens: int
+    token_budget: int
+    message_count: int
+    message_limit: int
 
 
 async def get_checkpoint_messages(checkpointer, thread_id: str) -> list[AnyMessage]:
@@ -215,8 +246,135 @@ def _format_messages_markdown(messages: list[AnyMessage]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _context_window_for_model(model_name: str | None) -> int:
+    normalized = (model_name or "").lower()
+    for hint, window in _MODEL_CONTEXT_WINDOWS.items():
+        if hint in normalized:
+            return window
+    return DEFAULT_MODEL_CONTEXT_WINDOW
+
+
+def _token_budget_for_model(model_name: str | None) -> int:
+    context_window = _context_window_for_model(model_name)
+    return min(
+        AUTO_COMPACT_MAX_TOKEN_BUDGET,
+        max(AUTO_COMPACT_MIN_TOKEN_BUDGET, int(context_window * AUTO_COMPACT_CONTEXT_RATIO)),
+    )
+
+
+def _estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text.encode("utf-8")) / 4))
+
+
+def _jsonish_text(value: object) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _content_for_token_estimation(msg: AnyMessage) -> str:
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    has_structured_attrs = any(
+        getattr(msg, attr, None) for attr in ("tool_calls", "invalid_tool_calls", "artifact")
+    )
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif not has_structured_attrs:
+                parts.append(_jsonish_text(block))
+        else:
+            parts.append(str(block))
+    return "\n".join(part for part in parts if part)
+
+
+def _tokenizable_message_parts(msg: AnyMessage) -> list[str]:
+    parts = [_content_for_token_estimation(msg)]
+    has_structured_attrs = False
+    for attr in ("tool_calls", "invalid_tool_calls", "artifact"):
+        value = getattr(msg, attr, None)
+        if value:
+            has_structured_attrs = True
+            parts.append(_jsonish_text(value))
+    additional_kwargs = getattr(msg, "additional_kwargs", None)
+    if additional_kwargs:
+        filtered_kwargs = dict(additional_kwargs)
+        if has_structured_attrs:
+            for key in ("tool_calls", "invalid_tool_calls", "artifact"):
+                filtered_kwargs.pop(key, None)
+        if filtered_kwargs:
+            parts.append(_jsonish_text(filtered_kwargs))
+    return [part for part in parts if part]
+
+
+def estimate_message_tokens(msg: AnyMessage) -> int:
+    token_estimate = 4
+    for part in _tokenizable_message_parts(msg):
+        token_estimate += _estimate_text_tokens(part)
+    if isinstance(msg, ToolMessage):
+        token_estimate += 12
+    elif isinstance(msg, SystemMessage):
+        token_estimate += 8
+    return token_estimate
+
+
+def estimate_thread_tokens(messages: list[AnyMessage]) -> int:
+    return sum(estimate_message_tokens(msg) for msg in messages)
+
+
+def get_auto_compaction_decision(
+    messages: list[AnyMessage],
+    *,
+    model_name: str | None = None,
+    threshold: int = AUTO_COMPACT_MESSAGE_COUNT,
+) -> AutoCompactionDecision:
+    estimated_tokens = estimate_thread_tokens(messages)
+    token_budget = _token_budget_for_model(model_name)
+    message_count = len(messages)
+    if message_count > threshold:
+        return AutoCompactionDecision(
+            should_compact=True,
+            reason="message-count",
+            estimated_tokens=estimated_tokens,
+            token_budget=token_budget,
+            message_count=message_count,
+            message_limit=threshold,
+        )
+    if estimated_tokens > token_budget:
+        return AutoCompactionDecision(
+            should_compact=True,
+            reason="token-budget",
+            estimated_tokens=estimated_tokens,
+            token_budget=token_budget,
+            message_count=message_count,
+            message_limit=threshold,
+        )
+    return AutoCompactionDecision(
+        should_compact=False,
+        reason=None,
+        estimated_tokens=estimated_tokens,
+        token_budget=token_budget,
+        message_count=message_count,
+        message_limit=threshold,
+    )
+
+
 def _should_auto_compact(
-    messages: list[AnyMessage], *, threshold: int = AUTO_COMPACT_MESSAGE_COUNT
+    messages: list[AnyMessage],
+    *,
+    model_name: str | None = None,
+    threshold: int = AUTO_COMPACT_MESSAGE_COUNT,
 ) -> bool:
     """Return True if a thread is large enough to warrant DeepClaw-level compaction."""
-    return len(messages) > threshold
+    return get_auto_compaction_decision(
+        messages, model_name=model_name, threshold=threshold
+    ).should_compact

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -11,6 +12,8 @@ from deepclaw.compaction import (
     _format_messages_markdown,
     _should_auto_compact,
     compact_thread,
+    estimate_thread_tokens,
+    get_auto_compaction_decision,
 )
 
 
@@ -54,6 +57,95 @@ def test_save_and_load_thread_ids_round_trip(tmp_path, monkeypatch):
 def test_should_auto_compact_uses_message_threshold():
     assert _should_auto_compact([object()] * 40) is False
     assert _should_auto_compact([object()] * 41) is True
+
+
+def test_estimate_thread_tokens_counts_message_content():
+    messages = [
+        SystemMessage(content="system rule"),
+        HumanMessage(content="hello"),
+        ToolMessage(content="very long tool output" * 20, tool_call_id="call-1", name="read_file"),
+    ]
+    assert estimate_thread_tokens(messages) > 100
+
+
+def test_estimate_thread_tokens_counts_ai_tool_calls():
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"path": "/tmp/demo.txt", "padding": "x" * 4000},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+    ]
+    assert estimate_thread_tokens(messages) > 500
+
+
+def test_estimate_thread_tokens_deduplicates_tool_calls_from_additional_kwargs():
+    raw_tool_calls = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": json.dumps({"path": "/tmp/demo.txt", "padding": "x" * 4000}),
+            },
+        }
+    ]
+    normalized_tool_calls = [
+        {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.txt", "padding": "x" * 4000},
+            "id": "call-1",
+            "type": "tool_call",
+        }
+    ]
+    duplicated = AIMessage(
+        content=[
+            {
+                "type": "tool_use",
+                "id": "call-1",
+                "name": "read_file",
+                "input": {"path": "/tmp/demo.txt", "padding": "x" * 4000},
+            }
+        ],
+        tool_calls=normalized_tool_calls,
+        additional_kwargs={"tool_calls": raw_tool_calls, "stop_reason": "tool_use"},
+    )
+    without_duplicate_payloads = AIMessage(
+        content="",
+        tool_calls=normalized_tool_calls,
+        additional_kwargs={"stop_reason": "tool_use"},
+    )
+    duplicated_tokens = estimate_thread_tokens([duplicated])
+    baseline_tokens = estimate_thread_tokens([without_duplicate_payloads])
+    assert duplicated_tokens >= baseline_tokens
+    assert duplicated_tokens - baseline_tokens < 80
+
+
+def test_auto_compaction_decision_uses_token_budget(monkeypatch):
+    monkeypatch.setattr("deepclaw.compaction.AUTO_COMPACT_MIN_TOKEN_BUDGET", 30)
+    monkeypatch.setattr("deepclaw.compaction.AUTO_COMPACT_MAX_TOKEN_BUDGET", 30)
+    messages = [HumanMessage(content="x" * 400)]
+    decision = get_auto_compaction_decision(
+        messages,
+        model_name="anthropic:claude-sonnet-4-6-20250514",
+        threshold=99,
+    )
+    assert decision.should_compact is True
+    assert decision.reason == "token-budget"
+    assert decision.token_budget == 30
+
+
+def test_auto_compaction_decision_budget_varies_by_model_window():
+    messages = [HumanMessage(content="short")]
+    small = get_auto_compaction_decision(messages, model_name="openai:gpt-4o", threshold=99)
+    large = get_auto_compaction_decision(messages, model_name="google:gemini-2.5-pro", threshold=99)
+    assert small.token_budget < large.token_budget
 
 
 def test_format_messages_markdown_renders_roles_and_content():

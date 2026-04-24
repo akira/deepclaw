@@ -17,7 +17,12 @@ from langchain_core.messages import ToolMessage
 
 from deepclaw.auth import get_thread_state
 from deepclaw.channels.base import Channel, IncomingMessage
-from deepclaw.compaction import CompactionResult, _should_auto_compact, get_checkpoint_messages
+from deepclaw.compaction import (
+    AutoCompactionDecision,
+    CompactionResult,
+    get_auto_compaction_decision,
+    get_checkpoint_messages,
+)
 from deepclaw.compaction import compact_thread as compact_thread_impl
 from deepclaw.safety import redact_secrets
 
@@ -111,12 +116,14 @@ class Gateway:
         checkpointer=None,
         thread_state_store: dict | None = None,
         persist_thread_state: Callable[[dict], None] | None = None,
+        model_name: str | None = None,
     ):
         self.agent = agent
         self.streaming_config = streaming_config
         self.checkpointer = checkpointer
         self.thread_state_store = thread_state_store
         self.persist_thread_state = persist_thread_state
+        self.model_name = model_name
 
     def _persist_thread_store(self) -> None:
         if self.persist_thread_state is None or self.thread_state_store is None:
@@ -179,17 +186,25 @@ class Gateway:
         if self.checkpointer is None or self.thread_state_store is None:
             return thread_id, None
         messages = await get_checkpoint_messages(self.checkpointer, thread_id)
-        if not _should_auto_compact(messages):
+        decision: AutoCompactionDecision = get_auto_compaction_decision(
+            messages, model_name=self.model_name
+        )
+        if not decision.should_compact:
             return thread_id, None
-        result = await self.compact_thread(message.chat_id, thread_id, reason="auto-threshold")
+        result = await self.compact_thread(
+            message.chat_id, thread_id, reason=f"auto-{decision.reason}"
+        )
         if result is None:
             return thread_id, None
         logger.info(
-            "Compacted chat %s thread %s -> %s (%s)",
+            "Compacted chat %s thread %s -> %s (%s, est_tokens=%s, budget=%s, messages=%s)",
             message.chat_id,
             result.old_thread_id,
             result.new_thread_id,
             result.reason,
+            decision.estimated_tokens,
+            decision.token_budget,
+            decision.message_count,
         )
         return result.new_thread_id, result
 
