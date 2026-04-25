@@ -1,0 +1,38 @@
+[
+  {
+    "trace_id": "019dc326-47df-7432-a029-6189d22fa45c",
+    "label": "skill-update-mutation",
+    "requires_tool_call": true,
+    "notes": "Skill update request that previously produced promise-only narration."
+  },
+  {
+    "trace_id": "019dc336-5311-79f2-8a48-8c340dc8b828",
+    "label": "false-completion-skill-update",
+    "requires_tool_call": true,
+    "notes": "False completion for mutation request without tool calls."
+  },
+  {
+    "trace_id": "019dc360-1343-7390-acd3-d0aebdfaedfc",
+    "label": "remember-preference",
+    "requires_tool_call": true,
+    "notes": "Memory/preference request that previously got acknowledgement without any tool."
+  },
+  {
+    "trace_id": "019dc4ea-0ab7-7ea1-b831-4a84a4f49cfa",
+    "label": "remember-preference-direct",
+    "requires_tool_call": true,
+    "notes": "Direct follow-up asking DeepClaw to actually remember the preference."
+  },
+  {
+    "trace_id": "019dc501-a90c-7f40-bc29-9b9a273caf14",
+    "label": "lint-fix-request",
+    "requires_tool_call": true,
+    "notes": "Concrete repo-fix request that should immediately trigger shell/file tools."
+  },
+  {
+    "trace_id": "019dc502-b42a-75f2-a1d3-3378ecf0e232",
+    "label": "install-ruff",
+    "requires_tool_call": true,
+    "notes": "Simple install request that should invoke the shell tool."
+  }
+]
