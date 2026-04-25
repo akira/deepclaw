@@ -109,7 +109,9 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
-        monkeypatch.setattr(agent_mod, "_append_summarization_middleware", fake_append_summarization)
+        monkeypatch.setattr(
+            agent_mod, "_append_summarization_middleware", fake_append_summarization
+        )
 
         config = DeepClawConfig(model="test:model", workspace_root=str(tmp_path))
 
