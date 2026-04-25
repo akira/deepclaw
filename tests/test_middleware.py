@@ -1,14 +1,9 @@
 """Tests for deepclaw.middleware module."""
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-try:
-    from langchain_core.messages import ToolMessage
-except ImportError:
-    ToolMessage = None
+from langchain_core.messages import ToolMessage
 
 from deepclaw.middleware import (
     _blocked_tool_message,
@@ -26,12 +21,6 @@ def _make_tool_call(name: str, args: dict, call_id: str = "call_1") -> dict:
     return {"name": name, "args": args, "id": call_id}
 
 
-def _tool_message_like(result):
-    if ToolMessage is not None:
-        return result
-    return SimpleNamespace(**result)
-
-
 # ---------------------------------------------------------------------------
 # _blocked_tool_message
 # ---------------------------------------------------------------------------
@@ -39,8 +28,6 @@ def _tool_message_like(result):
 
 class TestBlockedToolMessage:
     def test_returns_error_tool_message(self):
-        if ToolMessage is None:
-            pytest.skip("langchain-core not installed")
         tc = _make_tool_call("execute", {"command": "rm -rf /"})
         msg = _blocked_tool_message(tc, "too dangerous")
         assert isinstance(msg, ToolMessage)
@@ -63,16 +50,17 @@ class TestCheckExecute:
 
     def test_critical_command_blocked(self):
         tc = _make_tool_call("execute", {"command": "rm -rf /"})
-        result = _tool_message_like(_check_execute(tc))
+        result = _check_execute(tc)
         assert result is not None
-        assert getattr(result, "status", None) == "error"
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
         assert "BLOCKED" in result.content
 
     def test_critical_dd_blocked(self):
         tc = _make_tool_call("execute", {"command": "dd if=/dev/zero of=/dev/sda"})
-        result = _tool_message_like(_check_execute(tc))
+        result = _check_execute(tc)
         assert result is not None
-        assert getattr(result, "status", None) == "error"
+        assert result.status == "error"
 
     def test_critical_drop_table_blocked(self):
         tc = _make_tool_call("execute", {"command": "psql -c 'DROP TABLE users'"})
@@ -109,16 +97,16 @@ class TestCheckExecute:
     def test_warning_command_triggers_interrupt_reject(self, mock_interrupt):
         mock_interrupt.return_value = {"type": "reject", "message": "No force push!"}
         tc = _make_tool_call("execute", {"command": "git push --force origin main"})
-        result = _tool_message_like(_check_execute(tc))
+        result = _check_execute(tc)
         assert result is not None
-        assert getattr(result, "status", None) == "error"
+        assert result.status == "error"
         assert "No force push!" in result.content
 
     @patch("deepclaw.middleware.interrupt")
     def test_warning_command_reject_default_message(self, mock_interrupt):
         mock_interrupt.return_value = {"type": "reject"}
         tc = _make_tool_call("execute", {"command": "git reset --hard HEAD~5"})
-        result = _tool_message_like(_check_execute(tc))
+        result = _check_execute(tc)
         assert result is not None
         assert "rejected" in result.content.lower()
 
@@ -135,9 +123,9 @@ class TestCheckWritePath:
 
     def test_ssh_key_blocked(self):
         tc = _make_tool_call("write_file", {"path": "~/.ssh/id_rsa"})
-        result = _tool_message_like(_check_write_path(tc))
+        result = _check_write_path(tc)
         assert result is not None
-        assert getattr(result, "status", None) == "error"
+        assert result.status == "error"
         assert "BLOCKED" in result.content
 
     def test_bashrc_blocked(self):
@@ -180,15 +168,15 @@ class TestCheckUrl:
     def test_private_ip_blocked(self, mock_getaddrinfo):
         mock_getaddrinfo.return_value = [(2, 1, 0, "", ("10.0.0.1", 0))]
         tc = _make_tool_call("web_fetch", {"url": "https://internal.corp"})
-        result = _tool_message_like(_check_url(tc))
+        result = _check_url(tc)
         assert result is not None
-        assert getattr(result, "status", None) == "error"
+        assert result.status == "error"
 
     def test_metadata_endpoint_blocked(self):
         tc = _make_tool_call("web_fetch", {"url": "https://metadata.google.internal"})
-        result = _tool_message_like(_check_url(tc))
+        result = _check_url(tc)
         assert result is not None
-        assert getattr(result, "status", None) == "error"
+        assert result.status == "error"
 
     def test_empty_url_returns_none(self):
         tc = _make_tool_call("web_fetch", {"url": ""})

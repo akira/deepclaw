@@ -6,19 +6,13 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired, Protocol, cast, runtime_checkable
 
-try:
-    from langchain.agents.middleware.types import (
-        AgentMiddleware,
-        AgentState,
-        ModelRequest,
-        ModelResponse,
-        PrivateStateAttr,
-    )
-except ImportError as exc:  # pragma: no cover - optional dependency fallback
-    AgentMiddleware = object
-    AgentState = dict
-    ModelRequest = ModelResponse = PrivateStateAttr = object
-    _LANGCHAIN_IMPORT_ERROR = exc
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ModelResponse,
+    PrivateStateAttr,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

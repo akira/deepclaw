@@ -5,10 +5,7 @@ via the `task` tool. Subagents run in isolated conversations with their
 own system prompt, and return a clean summary to the main agent.
 """
 
-try:
-    from deepagents.middleware.subagents import SubAgent
-except ImportError:
-    SubAgent = dict
+from deepagents.middleware.subagents import SubAgent
 
 RESEARCHER: SubAgent = {
     "name": "researcher",
