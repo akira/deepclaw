@@ -20,10 +20,21 @@ Use the `deepclaw` dataset as the source of truth. Add or edit examples there di
   --results-path /tmp/deepclaw-evals/results.json
 ```
 
+## Dataset contract
+The dataset examples are the evaluation contract. At minimum, examples should include:
+- `requires_tool_call`
+- `label`
+
+Recommended fields for stronger regression coverage:
+- `expected_tool_names`
+- `must_succeed_first_pass`
+- `category`
+
 ## What the script evaluates
-The current regression harness uses two metrics:
+The current regression harness uses three metrics:
 - `tool_call_required` — whether the run made a tool call when the dataset example requires one
-- `retried_after_no_tool` — whether the run needed a retry/nudge after a no-tool first pass
+- `expected_tool_names` — whether the run used the expected tool(s) when specified by the dataset example
+- `first_pass_tool_use` — whether the run succeeded on the first pass when the dataset requires first-pass success
 
 ## Notes
 - The dataset examples are the evaluation contract; this harness intentionally assumes the dataset already exists in LangSmith.

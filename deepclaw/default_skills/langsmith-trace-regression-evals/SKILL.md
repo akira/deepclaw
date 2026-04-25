@@ -92,7 +92,13 @@ Inputs:
 Outputs:
 
 ```json
-{"requires_tool_call": true, "label": "push-pr-no-tool"}
+{
+  "requires_tool_call": true,
+  "label": "push-pr-no-tool",
+  "expected_tool_names": ["execute"],
+  "must_succeed_first_pass": true,
+  "category": "git"
+}
 ```
 
 Metadata:
@@ -277,9 +283,10 @@ What the harness does:
 - writes a local JSON summary
 - records LangSmith experiment URLs
 
-Current metrics:
+### Current metrics
 - `tool_call_required`
-- `retried_after_no_tool`
+- `expected_tool_names`
+- `first_pass_tool_use`
 
 ### Read the Results Correctly
 

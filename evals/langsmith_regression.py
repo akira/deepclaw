@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Populate and evaluate the LangSmith "deepclaw" regression dataset.
-
-Uses selected DeepClaw traces as source examples, then runs the current or baseline
-DeepClaw code against those prompts and scores whether tool use happened.
-"""
+"""Evaluate the LangSmith "deepclaw" regression dataset against DeepClaw revisions."""
 
 from __future__ import annotations
 
@@ -149,6 +145,32 @@ def get_client() -> Client:
     return Client()
 
 
+def _get_outputs(obj) -> dict[str, Any]:
+    if hasattr(obj, "outputs"):
+        return obj.outputs or {}
+    if isinstance(obj, dict):
+        return obj.get("outputs", {}) or {}
+    return {}
+
+
+def _get_inputs(obj) -> dict[str, Any]:
+    if hasattr(obj, "inputs"):
+        return obj.inputs or {}
+    if isinstance(obj, dict):
+        return obj.get("inputs", {}) or {}
+    return {}
+
+
+def _normalize_tool_names(names: Any) -> list[str]:
+    if not isinstance(names, list):
+        return []
+    normalized = []
+    for name in names:
+        if isinstance(name, str) and name:
+            normalized.append(name)
+    return normalized
+
+
 def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
     worker = WORKER_TEMPLATE.format(
         repo_path=repo_path,
@@ -174,10 +196,10 @@ def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
 
 
 def evaluator_tool_call(run, example):
-    outputs = run.outputs if hasattr(run, "outputs") else run.get("outputs", {})
-    expected = example.outputs if hasattr(example, "outputs") else example.get("outputs", {})
-    required = bool((expected or {}).get("requires_tool_call"))
-    observed = bool((outputs or {}).get("tool_calls_seen"))
+    outputs = _get_outputs(run)
+    expected = _get_outputs(example)
+    required = bool(expected.get("requires_tool_call"))
+    observed = bool(outputs.get("tool_calls_seen"))
     return {
         "key": "tool_call_required",
         "score": 1 if observed == required else 0,
@@ -185,13 +207,48 @@ def evaluator_tool_call(run, example):
     }
 
 
-def evaluator_retry(run, example):
-    outputs = run.outputs if hasattr(run, "outputs") else run.get("outputs", {})
-    retried = bool((outputs or {}).get("retried"))
+def evaluator_expected_tool_names(run, example):
+    outputs = _get_outputs(run)
+    expected = _get_outputs(example)
+    expected_names = _normalize_tool_names(expected.get("expected_tool_names"))
+    if not expected_names:
+        return {
+            "key": "expected_tool_names",
+            "score": 1,
+            "comment": "no expected tool names specified",
+        }
+    observed_names = _normalize_tool_names(outputs.get("tool_names"))
+    matched = all(name in observed_names for name in expected_names)
     return {
-        "key": "retried_after_no_tool",
-        "score": 1 if retried else 0,
-        "comment": f"retried={retried}",
+        "key": "expected_tool_names",
+        "score": 1 if matched else 0,
+        "comment": f"expected={expected_names!r} observed={observed_names!r}",
+    }
+
+
+def evaluator_first_pass_tool_use(run, example):
+    outputs = _get_outputs(run)
+    expected = _get_outputs(example)
+    required = bool(expected.get("requires_tool_call"))
+    must_succeed_first_pass = bool(expected.get("must_succeed_first_pass"))
+    if not required or not must_succeed_first_pass:
+        return {
+            "key": "first_pass_tool_use",
+            "score": 1,
+            "comment": (
+                "required="
+                f"{required} must_succeed_first_pass={must_succeed_first_pass} first_pass_tool_calls_seen="
+                f"{bool(outputs.get('first_pass_tool_calls_seen'))}"
+            ),
+        }
+    first_pass_tool_calls_seen = bool(outputs.get("first_pass_tool_calls_seen"))
+    return {
+        "key": "first_pass_tool_use",
+        "score": 1 if first_pass_tool_calls_seen else 0,
+        "comment": (
+            "required="
+            f"{required} must_succeed_first_pass={must_succeed_first_pass} first_pass_tool_calls_seen={first_pass_tool_calls_seen}"
+        ),
     }
 
 
@@ -204,7 +261,11 @@ def run_eval(
     results = evaluate(
         target,
         data=dataset_name,
-        evaluators=[evaluator_tool_call, evaluator_retry],
+        evaluators=[
+            evaluator_tool_call,
+            evaluator_expected_tool_names,
+            evaluator_first_pass_tool_use,
+        ],
         client=client,
         experiment_prefix=experiment_prefix,
         description=f"DeepClaw regression eval for {repo_path}",
@@ -237,12 +298,9 @@ def run_eval(
             metrics[key] = score
             if score is not None:
                 score_buckets[key].append(float(score))
-        run_outputs = getattr(run_obj, "outputs", None) or (
-            run_obj.get("outputs", {}) if isinstance(run_obj, dict) else {}
-        )
-        example_inputs = getattr(example_obj, "inputs", None) or (
-            example_obj.get("inputs", {}) if isinstance(example_obj, dict) else {}
-        )
+        run_outputs = _get_outputs(run_obj)
+        example_inputs = _get_inputs(example_obj)
+        example_outputs = _get_outputs(example_obj)
         example_id = getattr(example_obj, "id", None) or (
             example_obj.get("id") if isinstance(example_obj, dict) else None
         )
@@ -250,11 +308,13 @@ def run_eval(
             {
                 "example_id": str(example_id),
                 "user_text": example_inputs.get("user_text"),
+                "category": example_outputs.get("category"),
                 "metrics": metrics,
                 "tool_calls_seen": run_outputs.get("tool_calls_seen"),
                 "tool_names": run_outputs.get("tool_names"),
                 "retried": run_outputs.get("retried"),
                 "attempts": run_outputs.get("attempts"),
+                "first_pass_tool_calls_seen": run_outputs.get("first_pass_tool_calls_seen"),
             }
         )
     summary = {

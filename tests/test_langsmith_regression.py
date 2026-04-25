@@ -16,29 +16,34 @@ def _load_module():
     return module
 
 
-def test_ensure_baseline_worktree_refreshes_existing_path(monkeypatch, tmp_path):
+def test_evaluator_expected_tool_names_fails_on_wrong_tool():
     module = _load_module()
-    source_repo = tmp_path / "repo"
-    worktree = tmp_path / "worktree"
-    source_repo.mkdir()
-    worktree.mkdir()
-    calls = []
 
-    def fake_run(cmd, cwd=None, check=None, **_kwargs):
-        calls.append((tuple(cmd), Path(cwd) if cwd else None, check))
-        return subprocess.CompletedProcess(cmd, 0)
+    result = module.evaluator_expected_tool_names(
+        {"outputs": {"tool_names": ["web_search"]}},
+        {"outputs": {"expected_tool_names": ["execute"]}},
+    )
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    assert result == {
+        "key": "expected_tool_names",
+        "score": 0,
+        "comment": "expected=['execute'] observed=['web_search']",
+    }
 
-    result = module.ensure_baseline_worktree("origin/main", str(worktree), str(source_repo))
 
-    assert result == str(worktree)
-    assert calls == [
-        (("git", "fetch", "origin"), source_repo, True),
-        (("git", "checkout", "--detach", "origin/main"), worktree, True),
-        (("git", "reset", "--hard", "origin/main"), worktree, True),
-        (("git", "clean", "-fd"), worktree, True),
-    ]
+def test_evaluator_first_pass_succeeds_only_when_required_first_pass_happens():
+    module = _load_module()
+
+    result = module.evaluator_first_pass_tool_use(
+        {"outputs": {"first_pass_tool_calls_seen": False}},
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "first_pass_tool_use",
+        "score": 0,
+        "comment": "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=False",
+    }
 
 
 def test_run_eval_supports_dict_rows(monkeypatch):
@@ -50,6 +55,7 @@ def test_run_eval_supports_dict_rows(monkeypatch):
             "tool_names": ["execute"],
             "retried": False,
             "attempts": 1,
+            "first_pass_tool_calls_seen": True,
             "final_text": f"handled {user_text}",
         }
 
@@ -66,16 +72,24 @@ def test_run_eval_supports_dict_rows(monkeypatch):
                         "tool_names": ["execute"],
                         "retried": False,
                         "attempts": 1,
+                        "first_pass_tool_calls_seen": True,
                     }
                 },
                 "example": {
                     "id": "ex-1",
                     "inputs": {"user_text": "Install ruff"},
+                    "outputs": {
+                        "requires_tool_call": True,
+                        "expected_tool_names": ["execute"],
+                        "must_succeed_first_pass": True,
+                        "category": "tool-use",
+                    },
                 },
                 "evaluation_results": {
                     "results": [
                         {"key": "tool_call_required", "score": 1},
-                        {"key": "retried_after_no_tool", "score": 0},
+                        {"key": "expected_tool_names", "score": 1},
+                        {"key": "first_pass_tool_use", "score": 1},
                     ]
                 },
             }
@@ -98,19 +112,48 @@ def test_run_eval_supports_dict_rows(monkeypatch):
     assert result["experiment_name"] == "exp-name"
     assert result["summary"] == {
         "tool_call_required": 1.0,
-        "retried_after_no_tool": 0.0,
+        "expected_tool_names": 1.0,
+        "first_pass_tool_use": 1.0,
     }
     assert result["examples"] == [
         {
             "example_id": "ex-1",
             "user_text": "Install ruff",
+            "category": "tool-use",
             "metrics": {
                 "tool_call_required": 1,
-                "retried_after_no_tool": 0,
+                "expected_tool_names": 1,
+                "first_pass_tool_use": 1,
             },
             "tool_calls_seen": True,
             "tool_names": ["execute"],
             "retried": False,
             "attempts": 1,
+            "first_pass_tool_calls_seen": True,
         }
+    ]
+
+
+def test_ensure_baseline_worktree_refreshes_existing_path(monkeypatch, tmp_path):
+    module = _load_module()
+    source_repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    source_repo.mkdir()
+    worktree.mkdir()
+    calls = []
+
+    def fake_run(cmd, cwd=None, check=None, **_kwargs):
+        calls.append((tuple(cmd), Path(cwd) if cwd else None, check))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = module.ensure_baseline_worktree("origin/main", str(worktree), str(source_repo))
+
+    assert result == str(worktree)
+    assert calls == [
+        (("git", "fetch", "origin"), source_repo, True),
+        (("git", "checkout", "--detach", "origin/main"), worktree, True),
+        (("git", "reset", "--hard", "origin/main"), worktree, True),
+        (("git", "clean", "-fd"), worktree, True),
     ]
