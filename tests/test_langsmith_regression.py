@@ -31,6 +31,21 @@ def test_evaluator_expected_tool_names_fails_on_wrong_tool():
     }
 
 
+def test_evaluator_expected_tool_names_is_null_when_not_specified():
+    module = _load_module()
+
+    result = module.evaluator_expected_tool_names(
+        {"outputs": {"tool_names": []}},
+        {"outputs": {"requires_tool_call": True}},
+    )
+
+    assert result == {
+        "key": "expected_tool_names",
+        "score": None,
+        "comment": "no expected tool names specified",
+    }
+
+
 def test_evaluator_first_pass_succeeds_only_when_required_first_pass_happens():
     module = _load_module()
 
@@ -43,6 +58,93 @@ def test_evaluator_first_pass_succeeds_only_when_required_first_pass_happens():
         "key": "first_pass_tool_use",
         "score": 0,
         "comment": "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=False",
+    }
+
+
+def test_evaluator_first_pass_is_null_when_not_required():
+    module = _load_module()
+
+    result = module.evaluator_first_pass_tool_use(
+        {"outputs": {"first_pass_tool_calls_seen": False}},
+        {"outputs": {"requires_tool_call": True}},
+    )
+
+    assert result == {
+        "key": "first_pass_tool_use",
+        "score": None,
+        "comment": "required=True must_succeed_first_pass=False first_pass_tool_calls_seen=False",
+    }
+
+
+def test_evaluator_secondary_tool_recovery_scores_recovered_second_pass():
+    module = _load_module()
+
+    result = module.evaluator_secondary_tool_recovery(
+        {
+            "outputs": {
+                "tool_calls_seen": True,
+                "first_pass_tool_calls_seen": False,
+                "retried": True,
+            }
+        },
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "secondary_tool_recovery",
+        "score": 1,
+        "comment": (
+            "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=False "
+            "retried=True tool_calls_seen=True"
+        ),
+    }
+
+
+def test_evaluator_secondary_tool_recovery_scores_failed_recovery_when_retry_did_not_help():
+    module = _load_module()
+
+    result = module.evaluator_secondary_tool_recovery(
+        {
+            "outputs": {
+                "tool_calls_seen": False,
+                "first_pass_tool_calls_seen": False,
+                "retried": True,
+            }
+        },
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "secondary_tool_recovery",
+        "score": 0,
+        "comment": (
+            "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=False "
+            "retried=True tool_calls_seen=False"
+        ),
+    }
+
+
+def test_evaluator_secondary_tool_recovery_is_null_when_first_pass_already_succeeded():
+    module = _load_module()
+
+    result = module.evaluator_secondary_tool_recovery(
+        {
+            "outputs": {
+                "tool_calls_seen": True,
+                "first_pass_tool_calls_seen": True,
+                "retried": False,
+            }
+        },
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "secondary_tool_recovery",
+        "score": None,
+        "comment": (
+            "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=True "
+            "retried=False tool_calls_seen=True"
+        ),
     }
 
 
@@ -79,7 +181,7 @@ def test_run_case_invokes_repo_worker_file(monkeypatch):
     ]
 
 
-def test_run_eval_supports_dict_rows(monkeypatch):
+def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
     module = _load_module()
 
     def fake_run_case(*, repo_path, user_text, model_name):
@@ -123,16 +225,25 @@ def test_run_eval_supports_dict_rows(monkeypatch):
                         {"key": "tool_call_required", "score": 1},
                         {"key": "expected_tool_names", "score": 1},
                         {"key": "first_pass_tool_use", "score": 1},
+                        {"key": "secondary_tool_recovery", "score": None},
                     ]
                 },
             }
 
-    def fake_evaluate(target, **_kwargs):
+    evaluate_calls = []
+
+    def fake_evaluate(target, **kwargs):
+        evaluate_calls.append(kwargs)
         assert target({"user_text": "Install ruff"})["tool_calls_seen"] is True
         return FakeResults()
 
     monkeypatch.setattr(module, "run_case", fake_run_case)
     monkeypatch.setattr(module, "evaluate", fake_evaluate)
+    monkeypatch.setattr(
+        module,
+        "git_metadata_for_repo",
+        lambda repo_path: {"branch": "feat/test", "commit": "abc123"},
+    )
 
     result = module.run_eval(
         client=None,
@@ -140,8 +251,34 @@ def test_run_eval_supports_dict_rows(monkeypatch):
         repo_path="/tmp/repo",
         experiment_prefix="deepclaw-post",
         model_name="openai:gpt-5.3-codex",
+        baseline_commit="origin/main",
+        run_kind="post",
     )
 
+    assert evaluate_calls == [
+        {
+            "data": "deepclaw",
+            "evaluators": [
+                module.evaluator_tool_call,
+                module.evaluator_expected_tool_names,
+                module.evaluator_first_pass_tool_use,
+                module.evaluator_secondary_tool_recovery,
+            ],
+            "client": None,
+            "experiment_prefix": "deepclaw-post",
+            "description": "DeepClaw regression eval for /tmp/repo",
+            "max_concurrency": 1,
+            "blocking": True,
+            "metadata": {
+                "model": "openai:gpt-5.3-codex",
+                "repo_path": "/tmp/repo",
+                "run_kind": "post",
+                "baseline_commit": "origin/main",
+                "target_git_branch": "feat/test",
+                "target_git_commit": "abc123",
+            },
+        }
+    ]
     assert result["experiment_name"] == "exp-name"
     assert result["summary"] == {
         "tool_call_required": 1.0,
@@ -157,12 +294,14 @@ def test_run_eval_supports_dict_rows(monkeypatch):
                 "tool_call_required": 1,
                 "expected_tool_names": 1,
                 "first_pass_tool_use": 1,
+                "secondary_tool_recovery": None,
             },
             "tool_calls_seen": True,
             "tool_names": ["execute"],
             "retried": False,
             "attempts": 1,
             "first_pass_tool_calls_seen": True,
+            "first_pass_text": None,
         }
     ]
 

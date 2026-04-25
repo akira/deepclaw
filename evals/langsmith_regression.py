@@ -57,6 +57,29 @@ def _normalize_tool_names(names: Any) -> list[str]:
     return normalized
 
 
+def git_metadata_for_repo(repo_path: str) -> dict[str, str | None]:
+    def _run_git(*args: str) -> str | None:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return value or None
+
+    branch = _run_git("branch", "--show-current")
+    if branch is None:
+        branch = _run_git("rev-parse", "--short", "HEAD")
+    return {
+        "branch": branch,
+        "commit": _run_git("rev-parse", "HEAD"),
+    }
+
+
 def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
     completed = subprocess.run(
         [
@@ -105,7 +128,7 @@ def evaluator_expected_tool_names(run, example):
     if not expected_names:
         return {
             "key": "expected_tool_names",
-            "score": 1,
+            "score": None,
             "comment": "no expected tool names specified",
         }
     observed_names = _normalize_tool_names(outputs.get("tool_names"))
@@ -125,7 +148,7 @@ def evaluator_first_pass_tool_use(run, example):
     if not required or not must_succeed_first_pass:
         return {
             "key": "first_pass_tool_use",
-            "score": 1,
+            "score": None,
             "comment": (
                 "required="
                 f"{required} must_succeed_first_pass={must_succeed_first_pass} first_pass_tool_calls_seen="
@@ -143,12 +166,53 @@ def evaluator_first_pass_tool_use(run, example):
     }
 
 
+def evaluator_secondary_tool_recovery(run, example):
+    outputs = _get_outputs(run)
+    expected = _get_outputs(example)
+    required = bool(expected.get("requires_tool_call"))
+    must_succeed_first_pass = bool(expected.get("must_succeed_first_pass"))
+    first_pass_tool_calls_seen = bool(outputs.get("first_pass_tool_calls_seen"))
+    retried = bool(outputs.get("retried"))
+    eventual_tool_calls_seen = bool(outputs.get("tool_calls_seen"))
+
+    if not required or not must_succeed_first_pass or first_pass_tool_calls_seen:
+        return {
+            "key": "secondary_tool_recovery",
+            "score": None,
+            "comment": (
+                "required="
+                f"{required} must_succeed_first_pass={must_succeed_first_pass} "
+                f"first_pass_tool_calls_seen={first_pass_tool_calls_seen} retried={retried} "
+                f"tool_calls_seen={eventual_tool_calls_seen}"
+            ),
+        }
+
+    return {
+        "key": "secondary_tool_recovery",
+        "score": 1 if retried and eventual_tool_calls_seen else 0,
+        "comment": (
+            "required="
+            f"{required} must_succeed_first_pass={must_succeed_first_pass} "
+            f"first_pass_tool_calls_seen={first_pass_tool_calls_seen} retried={retried} "
+            f"tool_calls_seen={eventual_tool_calls_seen}"
+        ),
+    }
+
+
 def run_eval(
-    client: Client, dataset_name: str, repo_path: str, experiment_prefix: str, model_name: str
+    client: Client,
+    dataset_name: str,
+    repo_path: str,
+    experiment_prefix: str,
+    model_name: str,
+    *,
+    baseline_commit: str,
+    run_kind: str,
 ):
     def target(inputs: dict[str, Any]) -> dict[str, Any]:
         return run_case(repo_path=repo_path, user_text=inputs["user_text"], model_name=model_name)
 
+    git_metadata = git_metadata_for_repo(repo_path)
     results = evaluate(
         target,
         data=dataset_name,
@@ -156,12 +220,21 @@ def run_eval(
             evaluator_tool_call,
             evaluator_expected_tool_names,
             evaluator_first_pass_tool_use,
+            evaluator_secondary_tool_recovery,
         ],
         client=client,
         experiment_prefix=experiment_prefix,
         description=f"DeepClaw regression eval for {repo_path}",
         max_concurrency=1,
         blocking=True,
+        metadata={
+            "model": model_name,
+            "repo_path": repo_path,
+            "run_kind": run_kind,
+            "baseline_commit": baseline_commit,
+            "target_git_branch": git_metadata.get("branch"),
+            "target_git_commit": git_metadata.get("commit"),
+        },
     )
     rows = list(results)
     score_buckets: dict[str, list[float]] = defaultdict(list)
@@ -206,6 +279,7 @@ def run_eval(
                 "retried": run_outputs.get("retried"),
                 "attempts": run_outputs.get("attempts"),
                 "first_pass_tool_calls_seen": run_outputs.get("first_pass_tool_calls_seen"),
+                "first_pass_text": run_outputs.get("first_pass_text"),
             }
         )
     summary = {
@@ -257,6 +331,8 @@ def main() -> None:
         repo_path=baseline_repo,
         experiment_prefix="deepclaw-pre",
         model_name=args.model,
+        baseline_commit=args.baseline_commit,
+        run_kind="baseline",
     )
     post = run_eval(
         client=client,
@@ -264,6 +340,8 @@ def main() -> None:
         repo_path=args.repo,
         experiment_prefix="deepclaw-post",
         model_name=args.model,
+        baseline_commit=args.baseline_commit,
+        run_kind="post",
     )
     result_payload = {"baseline": baseline, "post": post}
     results_path = Path(args.results_path)

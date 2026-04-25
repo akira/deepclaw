@@ -32,10 +32,11 @@ Recommended fields for stronger regression coverage:
 - `category`
 
 ## What the script evaluates
-The current regression harness uses three metrics:
+The current regression harness uses four metrics:
 - `tool_call_required` — whether the run made a tool call when the dataset example requires one
 - `expected_tool_names` — whether the run used the expected tool(s) when specified by the dataset example
 - `first_pass_tool_use` — whether the run succeeded on the first pass when the dataset requires first-pass success
+- `secondary_tool_recovery` — whether the gateway's retry/nudge path recovered tool use after a missed first pass, when first-pass success was required
 
 ## Notes
 - The dataset examples are the evaluation contract; this harness intentionally assumes the dataset already exists in LangSmith.

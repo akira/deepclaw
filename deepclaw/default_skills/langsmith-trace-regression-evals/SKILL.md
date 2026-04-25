@@ -287,6 +287,7 @@ What the harness does:
 - `tool_call_required`
 - `expected_tool_names`
 - `first_pass_tool_use`
+- `secondary_tool_recovery`
 
 ### Read the Results Correctly
 
