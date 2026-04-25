@@ -1,6 +1,7 @@
 """Tests for deepclaw.agent helpers."""
 
 from deepclaw import agent as agent_mod
+from deepclaw.config import DeepClawConfig
 
 
 class TestSetupSkills:
@@ -70,3 +71,61 @@ class TestSetupSkills:
         result = agent_mod._setup_skills()
 
         assert result == [str(installed_dir)]
+
+
+class TestCreateAgent:
+    def test_wires_cli_style_context_backends_and_summarization(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class FakeShellBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def execute(self, command, *, timeout=None):
+                return None
+
+        class FakeFilesystemBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeCompositeBackend:
+            def __init__(self, *, default, routes):
+                self.default = default
+                self.routes = routes
+
+        def fake_create_deep_agent(**kwargs):
+            captured.update(kwargs)
+            return "agent"
+
+        def fake_append_summarization(middleware, model, backend):
+            middleware.append(("summarization", model, backend))
+
+        monkeypatch.setattr(agent_mod, "_setup_auth", lambda: None)
+        monkeypatch.setattr(agent_mod, "_load_soul", lambda: "soul")
+        monkeypatch.setattr(agent_mod, "_setup_memory", lambda: ["/memory/AGENTS.md"])
+        monkeypatch.setattr(agent_mod, "_setup_skills", lambda: ["/skills"])
+        monkeypatch.setattr(agent_mod, "discover_tools", list)
+        monkeypatch.setattr(agent_mod, "LocalShellBackend", FakeShellBackend)
+        monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
+        monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
+        monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(agent_mod, "_append_summarization_middleware", fake_append_summarization)
+
+        config = DeepClawConfig(model="test:model", workspace_root=str(tmp_path))
+
+        result = agent_mod.create_agent(config, checkpointer="checkpointer")
+
+        assert result == "agent"
+        assert isinstance(captured["backend"], FakeCompositeBackend)
+        assert "/large_tool_results/" in captured["backend"].routes
+        assert "/conversation_history/" in captured["backend"].routes
+        assert captured["backend"].default.kwargs["root_dir"] == tmp_path
+        assert any(
+            isinstance(middleware, agent_mod.LocalContextMiddleware)
+            for middleware in captured["middleware"]
+        )
+        assert any(
+            middleware[0] == "summarization" and middleware[1] == "test:model"
+            for middleware in captured["middleware"]
+            if isinstance(middleware, tuple)
+        )
