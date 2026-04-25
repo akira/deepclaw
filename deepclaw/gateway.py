@@ -69,11 +69,42 @@ _NUDGE_MESSAGE = (
     "You described an action but did not call any tools. "
     "Please call the appropriate tool now to carry out what you described."
 )
+_MUTATION_REQUEST_WORDS = (
+    "update",
+    "save",
+    "edit",
+    "patch",
+    "modify",
+    "write",
+    "add",
+    "create",
+    "install",
+    "restart",
+)
+_MUTATION_REQUEST_RE = re.compile(r"\b(" + "|".join(_MUTATION_REQUEST_WORDS) + r")\b")
+_COMPLETION_CLAIM_WORDS = (
+    "done",
+    "updated",
+    "saved",
+    "edited",
+    "patched",
+    "modified",
+    "added",
+    "created",
+    "installed",
+    "restarted",
+    "incorporated",
+)
+_COMPLETION_CLAIM_RE = re.compile(r"\b(" + "|".join(_COMPLETION_CLAIM_WORDS) + r")\b")
+
+
+def _normalize_text(text: str) -> str:
+    return text.lower().replace("’", "'").replace("‘", "'")
 
 
 def _looks_like_narration(text: str) -> bool:
     """Return True if text describes a tool action without having called any tools."""
-    lower = text.lower().replace("’", "'").replace("‘", "'")
+    lower = _normalize_text(text)
     has_opener = any(
         lower.lstrip().startswith(op)
         or f"\n{op}" in lower
@@ -84,6 +115,15 @@ def _looks_like_narration(text: str) -> bool:
     )
     has_action = bool(_ACTION_RE.search(lower))
     return has_opener and has_action
+
+
+def _looks_like_false_completion(user_text: str, assistant_text: str) -> bool:
+    """Return True when the user asked for a mutation and the assistant claimed completion without tools."""
+    user_lower = _normalize_text(user_text)
+    assistant_lower = _normalize_text(assistant_text)
+    requested_mutation = bool(_MUTATION_REQUEST_RE.search(user_lower))
+    claimed_completion = bool(_COMPLETION_CLAIM_RE.search(assistant_lower))
+    return requested_mutation and claimed_completion
 
 
 def chunk_message(text: str, limit: int = 4096) -> list[str]:
@@ -215,9 +255,12 @@ class Gateway:
         try:
             tool_calls_seen = await _stream_once([{"role": "user", "content": message.text}])
 
-            # If the model described an action without calling any tools, nudge it once.
-            if not tool_calls_seen and _looks_like_narration(accumulated):
-                logger.info("Narration-without-tool-call detected — sending nudge")
+            # If the model described an action or falsely claimed completion without calling any tools, nudge it once.
+            if not tool_calls_seen and (
+                _looks_like_narration(accumulated)
+                or _looks_like_false_completion(message.text, accumulated)
+            ):
+                logger.info("Narration/false-completion without tool-call detected — sending nudge")
                 accumulated = ""
                 last_edit_time = time.monotonic()
                 chars_since_edit = 0
