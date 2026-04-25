@@ -108,11 +108,15 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "LocalShellBackend", FakeShellBackend)
         monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
+        monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(
             agent_mod, "_append_summarization_middleware", fake_append_summarization
         )
 
+        stale_file = tmp_path / "runtime" / "large_tool_results" / "stale.txt"
+        stale_file.parent.mkdir(parents=True)
+        stale_file.write_text("stale", encoding="utf-8")
         config = DeepClawConfig(model="test:model", workspace_root=str(tmp_path))
 
         result = agent_mod.create_agent(config, checkpointer="checkpointer")
@@ -122,6 +126,15 @@ class TestCreateAgent:
         assert "/large_tool_results/" in captured["backend"].routes
         assert "/conversation_history/" in captured["backend"].routes
         assert captured["backend"].default.kwargs["root_dir"] == tmp_path
+        assert not stale_file.exists()
+        assert (
+            captured["backend"].routes["/large_tool_results/"].kwargs["root_dir"]
+            == tmp_path / "runtime" / "large_tool_results"
+        )
+        assert (
+            captured["backend"].routes["/conversation_history/"].kwargs["root_dir"]
+            == tmp_path / "runtime" / "conversation_history"
+        )
         assert any(
             isinstance(middleware, agent_mod.LocalContextMiddleware)
             for middleware in captured["middleware"]

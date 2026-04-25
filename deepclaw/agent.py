@@ -3,7 +3,6 @@
 import logging
 import os
 import shutil
-import tempfile
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -32,6 +31,7 @@ SOUL_FILE = CONFIG_DIR / "SOUL.md"
 MEMORY_FILE = CONFIG_DIR / "AGENTS.md"
 SKILLS_DIR = CONFIG_DIR / "skills"
 BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "default_skills"
+RUNTIME_DIR = CONFIG_DIR / "runtime"
 
 DEFAULT_SOUL = """\
 You are DeepClaw — a sharp, resourceful AI that lives in the terminal and gets things done.
@@ -223,12 +223,18 @@ def _shell_backend(config):
 
 def _composite_backend(default_backend):
     """Route bulky context artifacts out of the active workspace."""
+    large_results_dir = RUNTIME_DIR / "large_tool_results"
+    conversation_history_dir = RUNTIME_DIR / "conversation_history"
+    for runtime_dir in (large_results_dir, conversation_history_dir):
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
     large_results_backend = _filesystem_backend(
-        Path(tempfile.mkdtemp(prefix="deepclaw_large_results_")),
+        large_results_dir,
         virtual_mode=True,
     )
     conversation_history_backend = _filesystem_backend(
-        Path(tempfile.mkdtemp(prefix="deepclaw_conversation_history_")),
+        conversation_history_dir,
         virtual_mode=True,
     )
     return CompositeBackend(
