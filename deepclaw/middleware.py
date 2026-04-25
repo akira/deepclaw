@@ -11,8 +11,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain_core.messages import ToolMessage
-from langgraph.types import Command, interrupt
+try:
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command, interrupt
+except ImportError as exc:  # pragma: no cover - optional dependency fallback
+    ToolMessage = None
+    Command = object
+    interrupt = None
+    _LANGCHAIN_CORE_IMPORT_ERROR = exc
 
 from deepclaw.safety import (
     check_command,
@@ -44,8 +50,15 @@ _REDACT_OUTPUT_TOOLS = frozenset(
 )
 
 
-def _blocked_tool_message(tool_call: dict, reason: str) -> ToolMessage:
+def _blocked_tool_message(tool_call: dict, reason: str):
     """Create an error ToolMessage for a blocked tool call."""
+    if ToolMessage is None:
+        return {
+            "content": f"BLOCKED: {reason}",
+            "name": tool_call["name"],
+            "tool_call_id": tool_call["id"],
+            "status": "error",
+        }
     return ToolMessage(
         content=f"BLOCKED: {reason}",
         name=tool_call["name"],
@@ -54,7 +67,7 @@ def _blocked_tool_message(tool_call: dict, reason: str) -> ToolMessage:
     )
 
 
-def _check_execute(tool_call: dict) -> ToolMessage | None:
+def _check_execute(tool_call: dict):
     """Check a shell command for dangerous patterns.
 
     Returns a ToolMessage if the command should be blocked, None otherwise.
@@ -97,7 +110,7 @@ def _check_execute(tool_call: dict) -> ToolMessage | None:
     return _blocked_tool_message(tool_call, reason)
 
 
-def _check_write_path(tool_call: dict) -> ToolMessage | None:
+def _check_write_path(tool_call: dict):
     """Check a file write/edit path against the deny list."""
     path = tool_call.get("args", {}).get("path", "")
     if not path:
@@ -111,7 +124,7 @@ def _check_write_path(tool_call: dict) -> ToolMessage | None:
     return _blocked_tool_message(tool_call, reason)
 
 
-def _check_url(tool_call: dict) -> ToolMessage | None:
+def _check_url(tool_call: dict):
     """Check a URL against the SSRF blocklist."""
     url = tool_call.get("args", {}).get("url", "")
     if not url:
@@ -139,7 +152,7 @@ try:
 except ImportError:
     ToolCallRequest = None  # type: ignore[assignment, misc]
 
-if AgentMiddleware is not None and ToolCallRequest is not None:
+if AgentMiddleware is not None and ToolCallRequest is not None and ToolMessage is not None and interrupt is not None:
     StateT = Any
 
     class SafetyMiddleware(AgentMiddleware[StateT, ContextT, ResponseT]):

@@ -5,13 +5,27 @@ import os
 import shutil
 from pathlib import Path
 
-from deepagents import create_deep_agent
-from deepagents.backends import LocalShellBackend
-from deepagents.backends.composite import CompositeBackend
-from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.middleware.memory import MemoryMiddleware
-from deepagents.middleware.skills import SkillsMiddleware
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+try:
+    from deepagents import create_deep_agent
+    from deepagents.backends import LocalShellBackend
+    from deepagents.backends.composite import CompositeBackend
+    from deepagents.backends.filesystem import FilesystemBackend
+    from deepagents.middleware.memory import MemoryMiddleware
+    from deepagents.middleware.skills import SkillsMiddleware
+except ImportError as exc:  # pragma: no cover - optional dependency fallback
+    create_deep_agent = None
+    LocalShellBackend = None
+    CompositeBackend = None
+    FilesystemBackend = None
+    MemoryMiddleware = None
+    SkillsMiddleware = None
+    _DEEPAGENTS_IMPORT_ERROR = exc
+
+try:
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+except ImportError as exc:  # pragma: no cover - optional dependency fallback
+    AsyncSqliteSaver = None
+    _LANGGRAPH_IMPORT_ERROR = exc
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
 from deepclaw.local_context import (
@@ -215,6 +229,8 @@ def _setup_skills() -> list[str]:
 
 def create_checkpointer():
     """Create and return an async SQLite checkpointer context manager."""
+    if AsyncSqliteSaver is None:
+        raise ImportError("langgraph-checkpoint-sqlite is required to create a checkpointer") from _LANGGRAPH_IMPORT_ERROR
     CHECKPOINTER_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return AsyncSqliteSaver.from_conn_string(str(CHECKPOINTER_DB_PATH))
 
@@ -333,21 +349,23 @@ def create_agent(config, checkpointer):
 
     # Memory (AGENTS.md — agent learns and persists across sessions)
     memory_sources = _setup_memory()
-    middleware.append(
-        MemoryMiddleware(
-            backend=fs_backend,
-            sources=memory_sources,
+    if MemoryMiddleware is not None:
+        middleware.append(
+            MemoryMiddleware(
+                backend=fs_backend,
+                sources=memory_sources,
+            )
         )
-    )
 
     # Skills
     skills_sources = _setup_skills()
-    middleware.append(
-        SkillsMiddleware(
-            backend=fs_backend,
-            sources=skills_sources,
+    if SkillsMiddleware is not None:
+        middleware.append(
+            SkillsMiddleware(
+                backend=fs_backend,
+                sources=skills_sources,
+            )
         )
-    )
 
     # Deepagents CLI-style local context: detected once, cached in thread state,
     # and refreshed after conversation compaction.
