@@ -76,6 +76,78 @@ def test_evaluator_first_pass_is_null_when_not_required():
     }
 
 
+def test_evaluator_secondary_tool_recovery_scores_recovered_second_pass():
+    module = _load_module()
+
+    result = module.evaluator_secondary_tool_recovery(
+        {
+            "outputs": {
+                "tool_calls_seen": True,
+                "first_pass_tool_calls_seen": False,
+                "retried": True,
+            }
+        },
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "secondary_tool_recovery",
+        "score": 1,
+        "comment": (
+            "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=False "
+            "retried=True tool_calls_seen=True"
+        ),
+    }
+
+
+def test_evaluator_secondary_tool_recovery_scores_failed_recovery_when_retry_did_not_help():
+    module = _load_module()
+
+    result = module.evaluator_secondary_tool_recovery(
+        {
+            "outputs": {
+                "tool_calls_seen": False,
+                "first_pass_tool_calls_seen": False,
+                "retried": True,
+            }
+        },
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "secondary_tool_recovery",
+        "score": 0,
+        "comment": (
+            "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=False "
+            "retried=True tool_calls_seen=False"
+        ),
+    }
+
+
+def test_evaluator_secondary_tool_recovery_is_null_when_first_pass_already_succeeded():
+    module = _load_module()
+
+    result = module.evaluator_secondary_tool_recovery(
+        {
+            "outputs": {
+                "tool_calls_seen": True,
+                "first_pass_tool_calls_seen": True,
+                "retried": False,
+            }
+        },
+        {"outputs": {"requires_tool_call": True, "must_succeed_first_pass": True}},
+    )
+
+    assert result == {
+        "key": "secondary_tool_recovery",
+        "score": None,
+        "comment": (
+            "required=True must_succeed_first_pass=True first_pass_tool_calls_seen=True "
+            "retried=False tool_calls_seen=True"
+        ),
+    }
+
+
 def test_run_case_invokes_repo_worker_file(monkeypatch):
     module = _load_module()
     calls = []
@@ -153,6 +225,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                         {"key": "tool_call_required", "score": 1},
                         {"key": "expected_tool_names", "score": 1},
                         {"key": "first_pass_tool_use", "score": 1},
+                        {"key": "secondary_tool_recovery", "score": None},
                     ]
                 },
             }
@@ -189,6 +262,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                 module.evaluator_tool_call,
                 module.evaluator_expected_tool_names,
                 module.evaluator_first_pass_tool_use,
+                module.evaluator_secondary_tool_recovery,
             ],
             "client": None,
             "experiment_prefix": "deepclaw-post",
@@ -220,12 +294,14 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                 "tool_call_required": 1,
                 "expected_tool_names": 1,
                 "first_pass_tool_use": 1,
+                "secondary_tool_recovery": None,
             },
             "tool_calls_seen": True,
             "tool_names": ["execute"],
             "retried": False,
             "attempts": 1,
             "first_pass_tool_calls_seen": True,
+            "first_pass_text": None,
         }
     ]
 

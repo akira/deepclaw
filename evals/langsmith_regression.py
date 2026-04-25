@@ -166,6 +166,39 @@ def evaluator_first_pass_tool_use(run, example):
     }
 
 
+def evaluator_secondary_tool_recovery(run, example):
+    outputs = _get_outputs(run)
+    expected = _get_outputs(example)
+    required = bool(expected.get("requires_tool_call"))
+    must_succeed_first_pass = bool(expected.get("must_succeed_first_pass"))
+    first_pass_tool_calls_seen = bool(outputs.get("first_pass_tool_calls_seen"))
+    retried = bool(outputs.get("retried"))
+    eventual_tool_calls_seen = bool(outputs.get("tool_calls_seen"))
+
+    if not required or not must_succeed_first_pass or first_pass_tool_calls_seen:
+        return {
+            "key": "secondary_tool_recovery",
+            "score": None,
+            "comment": (
+                "required="
+                f"{required} must_succeed_first_pass={must_succeed_first_pass} "
+                f"first_pass_tool_calls_seen={first_pass_tool_calls_seen} retried={retried} "
+                f"tool_calls_seen={eventual_tool_calls_seen}"
+            ),
+        }
+
+    return {
+        "key": "secondary_tool_recovery",
+        "score": 1 if retried and eventual_tool_calls_seen else 0,
+        "comment": (
+            "required="
+            f"{required} must_succeed_first_pass={must_succeed_first_pass} "
+            f"first_pass_tool_calls_seen={first_pass_tool_calls_seen} retried={retried} "
+            f"tool_calls_seen={eventual_tool_calls_seen}"
+        ),
+    }
+
+
 def run_eval(
     client: Client,
     dataset_name: str,
@@ -187,6 +220,7 @@ def run_eval(
             evaluator_tool_call,
             evaluator_expected_tool_names,
             evaluator_first_pass_tool_use,
+            evaluator_secondary_tool_recovery,
         ],
         client=client,
         experiment_prefix=experiment_prefix,
@@ -245,6 +279,7 @@ def run_eval(
                 "retried": run_outputs.get("retried"),
                 "attempts": run_outputs.get("attempts"),
                 "first_pass_tool_calls_seen": run_outputs.get("first_pass_tool_calls_seen"),
+                "first_pass_text": run_outputs.get("first_pass_text"),
             }
         )
     summary = {
