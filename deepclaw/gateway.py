@@ -56,6 +56,11 @@ _ACTION_WORDS = (
     "examine",
     "call",
     "use",
+    "save",
+    "edit",
+    "patch",
+    "modify",
+    "restart",
 )
 # Pre-compiled regex for whole-word action matching — avoids substring false positives
 # such as "use" in "because", "get" in "forget", "list" in "listen".
@@ -68,9 +73,14 @@ _NUDGE_MESSAGE = (
 
 def _looks_like_narration(text: str) -> bool:
     """Return True if text describes a tool action without having called any tools."""
-    lower = text.lower()
+    lower = text.lower().replace("’", "'").replace("‘", "'")
     has_opener = any(
-        lower.lstrip().startswith(op) or f"\n{op}" in lower for op in _NARRATION_OPENERS
+        lower.lstrip().startswith(op)
+        or f"\n{op}" in lower
+        or f". {op}" in lower
+        or f"! {op}" in lower
+        or f"? {op}" in lower
+        for op in _NARRATION_OPENERS
     )
     has_action = bool(_ACTION_RE.search(lower))
     return has_opener and has_action

@@ -344,6 +344,9 @@ class TestLooksLikeNarration:
             "I should look at the logs.",
             "Now I'll execute the command.",
             "First I'll scan the codebase.",
+            "Absolutely. I’ll update the skill with this learning.",
+            "I’ll save this to the skill now.",
+            "Let me edit the prompt and restart the service.",
         ],
     )
     def test_detects_narration(self, text):
