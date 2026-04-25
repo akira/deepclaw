@@ -5,12 +5,14 @@ description = "Multi-platform AI agent gateway built on DeepAgents"
 requires-python = ">=3.11,<4.0"
 dependencies = [
     "deepagents==0.5.3",
+    "langchain-nvidia-ai-endpoints>=0.3.0",
     "deepagents-cli>=0.0.38",
     "python-telegram-bot>=22.0,<23.0",
     "langgraph-checkpoint-sqlite>=3.0.0,<4.0.0",
     "croniter>=2.0,<4.0",
     "browserbase>=1.7.0",
     "playwright>=1.58.0",
+    "ruff>=0.15.12",
 ]
 
 [project.optional-dependencies]
