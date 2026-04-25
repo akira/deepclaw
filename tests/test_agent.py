@@ -178,7 +178,9 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
-        monkeypatch.setattr(agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+        )
 
         config = DeepClawConfig(model="openai:gpt-5.3-codex", workspace_root=str(tmp_path))
         result = agent_mod.create_agent(config, checkpointer="checkpointer")
@@ -220,7 +222,9 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
-        monkeypatch.setattr(agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+        )
 
         config = DeepClawConfig(model="anthropic:claude-sonnet-4-6", workspace_root=str(tmp_path))
         result = agent_mod.create_agent(config, checkpointer="checkpointer")
