@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import subprocess
 from pathlib import Path
-
-import pytest
 
 
 def _load_module():
@@ -17,73 +14,6 @@ def _load_module():
     assert spec is not None and spec.loader is not None
     spec.loader.exec_module(module)
     return module
-
-
-def test_load_seed_traces_reads_json_list(tmp_path):
-    module = _load_module()
-    seed_path = tmp_path / "seed.json"
-    seed_path.write_text(
-        json.dumps(
-            [
-                {
-                    "trace_id": "trace-1",
-                    "label": "case-1",
-                    "requires_tool_call": True,
-                    "notes": "example",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    loaded = module.load_seed_traces(str(seed_path))
-
-    assert loaded == [
-        {
-            "trace_id": "trace-1",
-            "label": "case-1",
-            "requires_tool_call": True,
-            "notes": "example",
-        }
-    ]
-
-
-def test_load_seed_traces_missing_file_raises(tmp_path):
-    module = _load_module()
-
-    with pytest.raises(FileNotFoundError):
-        module.load_seed_traces(str(tmp_path / "missing.json"))
-
-
-class _FakeExample:
-    def __init__(self, trace_id):
-        self.metadata = {"source_trace_id": trace_id}
-
-
-def test_list_existing_trace_ids_paginates(monkeypatch):
-    module = _load_module()
-
-    class FakeClient:
-        def __init__(self):
-            self.calls = []
-
-        def list_examples(self, *, dataset_id, offset=0, limit=None):
-            self.calls.append((dataset_id, offset, limit))
-            if offset == 0:
-                return [_FakeExample(f"trace-{idx}") for idx in range(100)]
-            if offset == 100:
-                return [_FakeExample("trace-100")]
-            return []
-
-    client = FakeClient()
-
-    result = module.list_existing_trace_ids(client, "dataset-1")
-
-    assert result == {f"trace-{idx}" for idx in range(101)}
-    assert client.calls == [
-        ("dataset-1", 0, 100),
-        ("dataset-1", 100, 100),
-    ]
 
 
 def test_ensure_baseline_worktree_refreshes_existing_path(monkeypatch, tmp_path):

@@ -16,15 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from langsmith import Client, schemas
+from langsmith import Client
 from langsmith.evaluation import evaluate
 
 WORKSPACE_ENV = "/home/ubuntu/.deepclaw/.env"
 DEFAULT_DATASET = "deepclaw"
-DEFAULT_PROJECT = "default"
 DEFAULT_MODEL = "openai:gpt-5.3-codex"
 DEFAULT_RESULTS_PATH = "/tmp/deepclaw-evals/results.json"
-DEFAULT_SEED_TRACES_PATH = str(Path(__file__).with_name("datasets") / "deepclaw_seed_traces.json")
 
 WORKER_TEMPLATE = r"""
 from __future__ import annotations
@@ -149,131 +147,6 @@ def load_env() -> None:
 def get_client() -> Client:
     load_env()
     return Client()
-
-
-def ensure_dataset(client: Client, dataset_name: str) -> schemas.Dataset:
-    datasets = list(client.list_datasets(dataset_name=dataset_name, limit=5))
-    if datasets:
-        return datasets[0]
-    return client.create_dataset(
-        dataset_name,
-        description="DeepClaw regression dataset sourced from real LangSmith traces.",
-        data_type=schemas.DataType.kv,
-        metadata={"project": "deepclaw", "purpose": "trace-sourced-regression-evals"},
-    )
-
-
-def get_root_run(client: Client, trace_id: str, project_name: str):
-    roots = list(
-        client.list_runs(project_name=project_name, trace_id=trace_id, is_root=True, limit=5)
-    )
-    if not roots:
-        raise RuntimeError(f"No root run found for trace {trace_id}")
-    return roots[0]
-
-
-def get_trace_stats(client: Client, trace_id: str, project_name: str) -> dict[str, Any]:
-    runs = list(client.list_runs(project_name=project_name, trace_id=trace_id, limit=100))
-    tool_runs = [run for run in runs if run.run_type == "tool"]
-    llm_runs = [run for run in runs if run.run_type == "llm"]
-    return {
-        "observed_tool_runs": len(tool_runs),
-        "observed_tool_names": sorted({run.name for run in tool_runs}),
-        "observed_llm_runs": len(llm_runs),
-        "observed_run_count": len(runs),
-    }
-
-
-def latest_ai_text(root_run) -> str:
-    outputs = root_run.outputs or {}
-    messages = outputs.get("messages") or []
-    for msg in reversed(messages):
-        if msg.get("type") != "ai":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-            return "\n".join(part for part in parts if part)
-    return ""
-
-
-def load_seed_traces(seed_traces_path: str) -> list[dict[str, Any]]:
-    path = Path(seed_traces_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Seed traces file not found: {path}")
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(loaded, list):
-        raise ValueError(f"Seed traces file must contain a JSON list: {path}")
-    return loaded
-
-
-def list_existing_trace_ids(client: Client, dataset_id: str) -> set[str]:
-    trace_ids: set[str] = set()
-    offset = 0
-    page_size = 100
-    while True:
-        examples = list(client.list_examples(dataset_id=dataset_id, offset=offset, limit=page_size))
-        if not examples:
-            break
-        for example in examples:
-            trace_id = (example.metadata or {}).get("source_trace_id")
-            if trace_id:
-                trace_ids.add(trace_id)
-        if len(examples) < page_size:
-            break
-        offset += page_size
-    return trace_ids
-
-
-def populate_dataset(
-    client: Client, dataset_name: str, project_name: str, seed_traces_path: str
-) -> tuple[schemas.Dataset, int]:
-    dataset = ensure_dataset(client, dataset_name)
-    existing_trace_ids = list_existing_trace_ids(client, str(dataset.id))
-
-    new_examples = []
-    trace_specs = load_seed_traces(seed_traces_path)
-    for spec in trace_specs:
-        if spec["trace_id"] in existing_trace_ids:
-            continue
-        root_run = get_root_run(client, spec["trace_id"], project_name)
-        stats = get_trace_stats(client, spec["trace_id"], project_name)
-        messages = (root_run.inputs or {}).get("messages") or []
-        if not messages:
-            continue
-        user_text = messages[0].get("content")
-        if not user_text:
-            continue
-        assistant_text = latest_ai_text(root_run)
-        new_examples.append(
-            {
-                "inputs": {
-                    "user_text": user_text,
-                },
-                "outputs": {
-                    "requires_tool_call": spec["requires_tool_call"],
-                    "label": spec["label"],
-                },
-                "source_run_id": str(root_run.id),
-                "metadata": {
-                    "source_trace_id": spec["trace_id"],
-                    "label": spec["label"],
-                    "notes": spec["notes"],
-                    "source_project": project_name,
-                    "reference_assistant_text": assistant_text[:1000],
-                    **stats,
-                },
-            }
-        )
-
-    if new_examples:
-        client.create_examples(dataset_id=dataset.id, examples=new_examples)
-    return dataset, len(new_examples)
 
 
 def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
@@ -416,31 +289,14 @@ def ensure_baseline_worktree(commitish: str, path: str, source_repo: str) -> str
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
-    parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--baseline-commit", default="origin/main")
     parser.add_argument("--baseline-worktree", default="/tmp/deepclaw-eval-baseline")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--results-path", default=DEFAULT_RESULTS_PATH)
-    parser.add_argument("--seed-traces-path", default=DEFAULT_SEED_TRACES_PATH)
-    parser.add_argument("--populate-only", action="store_true")
     args = parser.parse_args()
 
     client = get_client()
-    dataset, created = populate_dataset(client, args.dataset, args.project, args.seed_traces_path)
-    sys.stdout.write(
-        json.dumps(
-            {
-                "dataset": args.dataset,
-                "dataset_id": str(dataset.id),
-                "examples_added": created,
-            }
-        )
-        + "\n"
-    )
-    if args.populate_only:
-        return
-
     baseline_repo = ensure_baseline_worktree(
         args.baseline_commit, args.baseline_worktree, args.repo
     )
