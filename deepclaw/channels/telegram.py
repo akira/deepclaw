@@ -505,7 +505,16 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Conversation cleared.")
 
 
-KNOWN_PROVIDERS = ("anthropic", "openai", "google", "groq", "mistral", "bedrock", "vertex", "nvidia")
+KNOWN_PROVIDERS = (
+    "anthropic",
+    "openai",
+    "google",
+    "groq",
+    "mistral",
+    "bedrock",
+    "vertex",
+    "nvidia",
+)
 
 
 def _validate_model(model: str) -> str | None:
