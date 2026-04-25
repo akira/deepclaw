@@ -429,7 +429,7 @@ class TestLooksLikeMemoryRequest:
         [
             (
                 "Can you remember that when I ask you to push the pr use deepclaw dev skill and also open a pr as well",
-                "Got it — I’ll treat \"push the PR\" as using the deepclaw-development skill and opening the PR automatically.",
+                'Got it — I’ll treat "push the PR" as using the deepclaw-development skill and opening the PR automatically.',
             ),
             (
                 "From now on, prefer the deepclaw-development skill for PR pushes",

@@ -150,7 +150,9 @@ def _looks_like_memory_request(user_text: str, assistant_text: str) -> bool:
     user_lower = _normalize_text(user_text)
     assistant_lower = _normalize_text(assistant_text)
     requested_memory = any(pattern.search(user_lower) for pattern in _MEMORY_REQUEST_PATTERNS)
-    acknowledged_preference = any(pattern.search(assistant_lower) for pattern in _MEMORY_ACK_PATTERNS)
+    acknowledged_preference = any(
+        pattern.search(assistant_lower) for pattern in _MEMORY_ACK_PATTERNS
+    )
     claimed_completion = bool(_COMPLETION_CLAIM_RE.search(assistant_lower))
     return requested_memory and acknowledged_preference and not claimed_completion
 
