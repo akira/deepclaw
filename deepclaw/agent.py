@@ -7,12 +7,18 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
+from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR
+from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
+from deepclaw.local_context import (
+    AsyncExecutableBackend,
+    ExecutableBackend,
+    LocalContextMiddleware,
+)
 from deepclaw.middleware import SafetyMiddleware
 from deepclaw.oauth import resolve_token
 from deepclaw.safety import scrub_env
@@ -25,6 +31,7 @@ SOUL_FILE = CONFIG_DIR / "SOUL.md"
 MEMORY_FILE = CONFIG_DIR / "AGENTS.md"
 SKILLS_DIR = CONFIG_DIR / "skills"
 BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "default_skills"
+RUNTIME_DIR = CONFIG_DIR / "runtime"
 
 DEFAULT_SOUL = """\
 You are DeepClaw — a sharp, resourceful AI that lives in the terminal and gets things done.
@@ -171,10 +178,95 @@ def _setup_auth() -> None:
         logger.info("Using API key for authentication")
 
 
+def _filesystem_backend(root_dir: Path | None = None, *, virtual_mode: bool = False):
+    """Create a filesystem backend while tolerating SDK constructor drift."""
+    kwargs = {}
+    if root_dir is not None:
+        kwargs["root_dir"] = root_dir
+    if virtual_mode:
+        kwargs["virtual_mode"] = True
+    try:
+        return FilesystemBackend(**kwargs)
+    except TypeError:
+        if root_dir is not None:
+            logger.warning(
+                "Installed deepagents FilesystemBackend does not accept root_dir; "
+                "falling back to process working directory"
+            )
+        try:
+            return FilesystemBackend(virtual_mode=virtual_mode)
+        except TypeError:
+            return FilesystemBackend()
+
+
+def _shell_backend(config):
+    """Create the primary shell/filesystem backend for the configured workspace."""
+    workspace_root = Path(config.workspace_root).expanduser()
+    workspace_root.mkdir(parents=True, exist_ok=True)
+
+    kwargs = {
+        "virtual_mode": False,
+        "env": scrub_env(),
+        "timeout": config.command_timeout,
+        "root_dir": workspace_root,
+    }
+    try:
+        return LocalShellBackend(**kwargs)
+    except TypeError:
+        logger.warning(
+            "Installed deepagents LocalShellBackend does not accept root_dir; "
+            "falling back to process working directory"
+        )
+        kwargs.pop("root_dir", None)
+        return LocalShellBackend(**kwargs)
+
+
+def _composite_backend(default_backend):
+    """Route bulky context artifacts out of the active workspace."""
+    large_results_dir = RUNTIME_DIR / "large_tool_results"
+    conversation_history_dir = RUNTIME_DIR / "conversation_history"
+    for runtime_dir in (large_results_dir, conversation_history_dir):
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    large_results_backend = _filesystem_backend(
+        large_results_dir,
+        virtual_mode=True,
+    )
+    conversation_history_backend = _filesystem_backend(
+        conversation_history_dir,
+        virtual_mode=True,
+    )
+    return CompositeBackend(
+        default=default_backend,
+        routes={
+            "/large_tool_results/": large_results_backend,
+            "/conversation_history/": conversation_history_backend,
+        },
+    )
+
+
+def _append_summarization_middleware(middleware: list, model: str, backend) -> None:
+    """Add Deepagents compact/offload middleware when the SDK supports it."""
+    try:
+        from deepagents.middleware.summarization import (  # noqa: PLC0415
+            create_summarization_tool_middleware,
+        )
+    except ImportError:
+        logger.warning(
+            "Installed deepagents version does not provide summarization middleware; "
+            "compact_conversation is unavailable"
+        )
+        return
+
+    middleware.append(create_summarization_tool_middleware(model, backend))
+
+
 def create_agent(config, checkpointer):
     """Create a DeepAgents agent with the given config and checkpointer."""
     _setup_auth()
-    backend = LocalShellBackend(virtual_mode=False, env=scrub_env(), timeout=config.command_timeout)
+    backend = _shell_backend(config)
+    composite_backend = _composite_backend(backend)
 
     # Middleware stack
     middleware = []
@@ -183,7 +275,7 @@ def create_agent(config, checkpointer):
     else:
         logger.warning("SafetyMiddleware is not available — safety checks disabled")
 
-    fs_backend = FilesystemBackend()
+    fs_backend = _filesystem_backend()
 
     # Memory (AGENTS.md — agent learns and persists across sessions)
     memory_sources = _setup_memory()
@@ -203,6 +295,22 @@ def create_agent(config, checkpointer):
         )
     )
 
+    # Deepagents CLI-style local context: detected once, cached in thread state,
+    # and refreshed after conversation compaction.
+    if isinstance(backend, (ExecutableBackend, AsyncExecutableBackend)):
+        middleware.append(LocalContextMiddleware(backend=backend))
+    else:
+        logger.warning("Local context middleware skipped; backend cannot execute commands")
+
+    # Deepagents CLI-style context compaction/offload. This adds the
+    # compact_conversation tool and stores historical messages under the
+    # composite backend's /conversation_history/ route.
+    _append_summarization_middleware(
+        middleware,
+        config.model or DeepClawConfig.model,
+        composite_backend,
+    )
+
     # System prompt from SOUL.md, always followed by tool-use enforcement
     soul = _load_soul()
     system_prompt = (soul + "\n\n" + TOOL_USE_ENFORCEMENT) if soul else TOOL_USE_ENFORCEMENT
@@ -212,7 +320,7 @@ def create_agent(config, checkpointer):
 
     return create_deep_agent(
         model=config.model or None,
-        backend=backend,
+        backend=composite_backend,
         checkpointer=checkpointer,
         middleware=middleware,
         system_prompt=system_prompt,
