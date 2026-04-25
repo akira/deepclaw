@@ -4,6 +4,8 @@ This module is channel-agnostic — it depends only on the Channel ABC,
 so adding Discord/Slack/etc. requires zero changes here.
 """
 
+import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -175,9 +177,21 @@ class Gateway:
         except ImportError:
             pass
 
-        await channel.send_typing(message.chat_id)
-
         msg_id = await self._send_redacted_message(channel, message.chat_id, THINKING_MESSAGE)
+
+        stop_typing = asyncio.Event()
+
+        async def _typing_heartbeat() -> None:
+            """Keep Telegram typing indicator alive while agent is processing."""
+            while not stop_typing.is_set():
+                with contextlib.suppress(Exception):
+                    await channel.send_typing(message.chat_id)
+                try:
+                    await asyncio.wait_for(stop_typing.wait(), timeout=4.5)
+                except TimeoutError:
+                    continue
+
+        typing_task = asyncio.create_task(_typing_heartbeat())
 
         accumulated = ""
         last_edit_time = time.monotonic()
@@ -268,6 +282,11 @@ class Gateway:
         except Exception:
             logger.exception("Agent streaming failed")
             accumulated = accumulated or "Sorry, something went wrong processing your message."
+
+        stop_typing.set()
+        typing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typing_task
 
         response_text = accumulated if accumulated else "(no response)"
         response_text = redact_secrets(response_text)
