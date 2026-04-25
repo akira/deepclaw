@@ -3,6 +3,7 @@
 import pytest
 
 from deepclaw.config import (
+    ENV_COMMAND_TIMEOUT,
     _parse_env_file,
     _resolve,
     load_config,
@@ -328,3 +329,23 @@ class TestDirectoryCreation:
         assert not new_dir.exists()
         load_config()
         assert new_dir.exists()
+
+
+class TestCommandTimeout:
+    def test_command_timeout_from_yaml(self, config_dir, monkeypatch):
+        monkeypatch.delenv(ENV_COMMAND_TIMEOUT, raising=False)
+        _write_yaml(config_dir, "command_timeout: 123\n")
+        cfg = load_config()
+        assert cfg.command_timeout == 123
+
+    def test_command_timeout_env_overrides_yaml(self, config_dir, monkeypatch):
+        _write_yaml(config_dir, "command_timeout: 123\n")
+        monkeypatch.setenv(ENV_COMMAND_TIMEOUT, "456")
+        cfg = load_config()
+        assert cfg.command_timeout == 456
+
+    def test_command_timeout_invalid_falls_back_to_default(self, config_dir, monkeypatch):
+        _write_yaml(config_dir, "command_timeout: nope\n")
+        monkeypatch.delenv(ENV_COMMAND_TIMEOUT, raising=False)
+        cfg = load_config()
+        assert cfg.command_timeout == 300

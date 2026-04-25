@@ -11,6 +11,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -25,6 +26,7 @@ CHECKPOINTER_DB_PATH = Path("~/.deepagents/checkpoints.db").expanduser()
 ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 ENV_DEEPCLAW_MODEL = "DEEPCLAW_MODEL"
 ENV_DEEPCLAW_ALLOWED_USERS = "DEEPCLAW_ALLOWED_USERS"
+ENV_COMMAND_TIMEOUT = "DEEPCLAW_COMMAND_TIMEOUT"
 
 
 @dataclass
@@ -91,20 +93,76 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return env_vars
 
 
-def _resolve(env_name: str, dot_env: dict[str, str], yaml_value: str | None) -> str | None:
-    """Return the highest-precedence non-empty value across the three layers."""
-    # Shell env takes priority
+def _resolve(env_name: str, dot_env: dict[str, str], yaml_value: Any) -> str | None:
+    """Return the highest-precedence non-empty value across env, .env, and yaml."""
     shell_val = os.environ.get(env_name)
-    if shell_val is not None and shell_val != "":
+    if shell_val:
         return shell_val
-    # .env file next
+
     dot_val = dot_env.get(env_name)
-    if dot_val is not None and dot_val != "":
+    if dot_val:
         return dot_val
-    # config.yaml value last
-    if yaml_value is not None and yaml_value != "":
-        return str(yaml_value)
+
+    if yaml_value is None:
+        return None
+
+    yaml_str = str(yaml_value)
+    if yaml_str:
+        return yaml_str
+
     return None
+
+
+def _to_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load YAML dict from disk, returning {} for missing/invalid/non-dict content."""
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = yaml.safe_load(f)
+    except Exception:
+        logger.warning("Could not parse config file: %s", path, exc_info=True)
+        return {}
+
+    if isinstance(loaded, dict):
+        return loaded
+    return {}
 
 
 DEFAULT_CONFIG_YAML = """\
@@ -151,60 +209,36 @@ def _seed_config() -> None:
 
 def load_config() -> DeepClawConfig:
     """Load and merge configuration from all sources, returning a DeepClawConfig."""
-    # Ensure config directory exists and seed defaults
     _seed_config()
-
-    # Load .env
     dot_env = _parse_env_file(ENV_FILE)
 
-    # Expose .env vars to third-party SDKs (e.g. LangSmith) that read os.environ
-    # directly. Shell env takes precedence — never overwrite.
     for key, value in dot_env.items():
         if key not in os.environ:
             os.environ[key] = value
 
-    # Load config.yaml
-    yaml_data: dict = {}
-    if CONFIG_FILE.is_file():
-        try:
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                loaded = yaml.safe_load(f)
-                if isinstance(loaded, dict):
-                    yaml_data = loaded
-        except Exception:
-            logger.warning("Could not parse config file: %s", CONFIG_FILE, exc_info=True)
+    yaml_data = _load_yaml(CONFIG_FILE)
+    yaml_telegram = yaml_data.get("telegram", {}) or {}
+    yaml_streaming = yaml_telegram.get("streaming", {}) or {}
+    yaml_workspace = yaml_data.get("workspace", {}) or {}
+    yaml_heartbeat = yaml_data.get("heartbeat", {}) or {}
 
-    # Extract yaml sections
-    yaml_telegram: dict = yaml_data.get("telegram", {}) or {}
-    yaml_streaming: dict = yaml_telegram.get("streaming", {}) or {}
-    yaml_workspace: dict = yaml_data.get("workspace", {}) or {}
-
-    # Build streaming config
     streaming = TelegramStreamingConfig(
-        enabled=yaml_streaming.get("enabled", TelegramStreamingConfig.enabled),
-        edit_interval=float(
-            yaml_streaming.get("edit_interval", TelegramStreamingConfig.edit_interval)
+        enabled=_to_bool(yaml_streaming.get("enabled"), TelegramStreamingConfig.enabled),
+        edit_interval=_to_float(
+            yaml_streaming.get("edit_interval"), TelegramStreamingConfig.edit_interval
         ),
-        buffer_threshold=int(
-            yaml_streaming.get("buffer_threshold", TelegramStreamingConfig.buffer_threshold)
+        buffer_threshold=_to_int(
+            yaml_streaming.get("buffer_threshold"), TelegramStreamingConfig.buffer_threshold
         ),
     )
 
-    # Resolve bot_token
-    yaml_bot_token = yaml_telegram.get("bot_token")
-    bot_token = _resolve(ENV_TELEGRAM_BOT_TOKEN, dot_env, yaml_bot_token) or ""
-
-    # Resolve allowed_users — env var is comma-separated, yaml is a list
-    yaml_allowed: list = yaml_telegram.get("allowed_users", []) or []
-    yaml_allowed_str = [str(u) for u in yaml_allowed]
+    bot_token = _resolve(ENV_TELEGRAM_BOT_TOKEN, dot_env, yaml_telegram.get("bot_token")) or ""
 
     env_allowed_raw = _resolve(ENV_DEEPCLAW_ALLOWED_USERS, dot_env, None)
     if env_allowed_raw is not None:
-        allowed_users = [u.strip() for u in env_allowed_raw.split(",") if u.strip()]
-    elif yaml_allowed_str:
-        allowed_users = yaml_allowed_str
+        allowed_users = _to_str_list(env_allowed_raw)
     else:
-        allowed_users = []
+        allowed_users = _to_str_list(yaml_telegram.get("allowed_users", []))
 
     telegram = TelegramConfig(
         bot_token=bot_token,
@@ -212,35 +246,32 @@ def load_config() -> DeepClawConfig:
         streaming=streaming,
     )
 
-    # Resolve model
-    yaml_model = yaml_data.get("model")
-    model = _resolve(ENV_DEEPCLAW_MODEL, dot_env, yaml_model) or ""
+    model = _resolve(ENV_DEEPCLAW_MODEL, dot_env, yaml_data.get("model")) or ""
 
-    # Workspace root
-    workspace_root = yaml_workspace.get("root", DeepClawConfig.workspace_root)
+    workspace_root = str(yaml_workspace.get("root", DeepClawConfig.workspace_root))
 
-    # Build heartbeat config
-    yaml_heartbeat: dict = yaml_data.get("heartbeat", {}) or {}
     heartbeat = HeartbeatConfig(
-        enabled=yaml_heartbeat.get("enabled", HeartbeatConfig.enabled),
-        interval_minutes=int(
-            yaml_heartbeat.get("interval_minutes", HeartbeatConfig.interval_minutes)
+        enabled=_to_bool(yaml_heartbeat.get("enabled"), HeartbeatConfig.enabled),
+        interval_minutes=_to_int(
+            yaml_heartbeat.get("interval_minutes"), HeartbeatConfig.interval_minutes
         ),
         quiet_hours_start=yaml_heartbeat.get("quiet_hours_start"),
         quiet_hours_end=yaml_heartbeat.get("quiet_hours_end"),
-        timezone=yaml_heartbeat.get("timezone", HeartbeatConfig.timezone),
-        max_failures=int(yaml_heartbeat.get("max_failures", HeartbeatConfig.max_failures)),
+        timezone=str(yaml_heartbeat.get("timezone", HeartbeatConfig.timezone)),
+        max_failures=_to_int(yaml_heartbeat.get("max_failures"), HeartbeatConfig.max_failures),
         notify_chat_id=str(yaml_heartbeat.get("notify_chat_id", "")),
     )
 
-    # Command timeout
-    command_timeout = int(yaml_data.get("command_timeout", DeepClawConfig.command_timeout))
+    command_timeout = _to_int(
+        _resolve(ENV_COMMAND_TIMEOUT, dot_env, yaml_data.get("command_timeout")),
+        DeepClawConfig.command_timeout,
+    )
 
     config = DeepClawConfig(
         model=model,
         telegram=telegram,
         heartbeat=heartbeat,
-        workspace_root=str(workspace_root),
+        workspace_root=workspace_root,
         command_timeout=command_timeout,
     )
 
