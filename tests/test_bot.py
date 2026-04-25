@@ -39,6 +39,7 @@ from deepclaw.gateway import (
     CURSOR_INDICATOR,
     Gateway,
     _looks_like_false_completion,
+    _looks_like_memory_request,
     _looks_like_narration,
     chunk_message,
 )
@@ -422,6 +423,42 @@ class TestLooksLikeFalseCompletion:
         assert _looks_like_false_completion(user_text, assistant_text) is False
 
 
+class TestLooksLikeMemoryRequest:
+    @pytest.mark.parametrize(
+        ("user_text", "assistant_text"),
+        [
+            (
+                "Can you remember that when I ask you to push the pr use deepclaw dev skill and also open a pr as well",
+                "Got it — I’ll treat \"push the PR\" as using the deepclaw-development skill and opening the PR automatically.",
+            ),
+            (
+                "From now on, prefer the deepclaw-development skill for PR pushes",
+                "Absolutely — from now on I’ll prefer that workflow.",
+            ),
+            (
+                "Please remember I prefer Telegram for reports",
+                "Understood — I’ll remember that preference going forward.",
+            ),
+        ],
+    )
+    def test_detects_memory_request_ack_without_tools(self, user_text, assistant_text):
+        assert _looks_like_memory_request(user_text, assistant_text) is True
+
+    @pytest.mark.parametrize(
+        ("user_text", "assistant_text"),
+        [
+            (
+                "Can you remember that when I ask you to push the pr use deepclaw dev skill and also open a pr as well",
+                "I saved that preference to memory.",
+            ),
+            ("What do you remember about me?", "You prefer Telegram for reports."),
+            ("Prefer concise replies", "Okay."),
+        ],
+    )
+    def test_ignores_non_memory_request_or_non_acknowledgement(self, user_text, assistant_text):
+        assert _looks_like_memory_request(user_text, assistant_text) is False
+
+
 # ---------------------------------------------------------------------------
 # Narration nudge in Gateway
 # ---------------------------------------------------------------------------
@@ -568,6 +605,42 @@ class TestGatewayNarrationNudge:
 
         final_edit = channel.edits[-1][2]
         assert "Found it: 42." in final_edit
+
+    @pytest.mark.asyncio
+    async def test_nudges_when_memory_request_ack_and_no_tools(self):
+        """Preference/memory acknowledgements without tools should trigger one retry."""
+        memory_ack_chunk = (
+            SimpleNamespace(
+                content_blocks=[
+                    {
+                        "type": "text",
+                        "text": 'Got it — I’ll treat "push the PR" as using the deepclaw-development skill and opening the PR automatically.',
+                    }
+                ]
+            ),
+            {},
+        )
+        recovery_chunk = (
+            SimpleNamespace(
+                content_blocks=[
+                    {"type": "tool_call", "name": "memory_add", "args": {"content": "..."}},
+                    {"type": "text", "text": "Saved."},
+                ]
+            ),
+            {},
+        )
+        agent = _MultiCallStreamingAgent([[memory_ack_chunk], [recovery_chunk]])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(
+            chat_id="42",
+            text="Can you remember that when I ask you to push the pr use deepclaw dev skill and also open a pr as well",
+        )
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert agent.call_count == 2
 
 
 # ---------------------------------------------------------------------------
