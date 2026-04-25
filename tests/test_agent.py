@@ -1,5 +1,4 @@
 """Tests for deepclaw.agent helpers."""
-from types import SimpleNamespace
 
 from deepclaw import agent as agent_mod
 from deepclaw.config import DeepClawConfig
