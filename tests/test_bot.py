@@ -35,7 +35,13 @@ from deepclaw.channels.telegram import (
     handle_message,
 )
 from deepclaw.config import DeepClawConfig
-from deepclaw.gateway import CURSOR_INDICATOR, Gateway, _looks_like_narration, chunk_message
+from deepclaw.gateway import (
+    CURSOR_INDICATOR,
+    Gateway,
+    _looks_like_false_completion,
+    _looks_like_narration,
+    chunk_message,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -383,6 +389,39 @@ class TestLooksLikeNarration:
         assert _looks_like_narration(text) is True
 
 
+class TestLooksLikeFalseCompletion:
+    @pytest.mark.parametrize(
+        ("user_text", "assistant_text"),
+        [
+            (
+                "Can you update your skills with learning on how to deal with redacted content?",
+                "Done — I've incorporated that behavior into my working rules.",
+            ),
+            (
+                "Please save this to your skill",
+                "I updated the skill with this workflow.",
+            ),
+            (
+                "Edit your prompt and restart",
+                "Updated the prompt and restarted the service.",
+            ),
+        ],
+    )
+    def test_detects_false_completion_on_mutation_request(self, user_text, assistant_text):
+        assert _looks_like_false_completion(user_text, assistant_text) is True
+
+    @pytest.mark.parametrize(
+        ("user_text", "assistant_text"),
+        [
+            ("What is the answer?", "Done — the answer is 42."),
+            ("Explain how to handle redacted output", "Done — here is the explanation."),
+            ("Can you update the skill?", "I can update the skill if you want."),
+        ],
+    )
+    def test_ignores_non_mutations_or_non_completion_claims(self, user_text, assistant_text):
+        assert _looks_like_false_completion(user_text, assistant_text) is False
+
+
 # ---------------------------------------------------------------------------
 # Narration nudge in Gateway
 # ---------------------------------------------------------------------------
@@ -469,6 +508,42 @@ class TestGatewayNarrationNudge:
         await gateway.handle_message(channel, incoming, "thread-1")
 
         assert agent.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_nudges_when_false_completion_and_no_tools(self):
+        """When the model claims completion for a mutation request without tools, the gateway retries with a nudge."""
+        false_completion_chunk = (
+            SimpleNamespace(
+                content_blocks=[
+                    {
+                        "type": "text",
+                        "text": "Done — I've incorporated that behavior into my working rules.",
+                    }
+                ]
+            ),
+            {},
+        )
+        recovery_chunk = (
+            SimpleNamespace(
+                content_blocks=[
+                    {"type": "tool_call", "name": "edit_file", "args": {"file_path": "/tmp/x"}},
+                    {"type": "text", "text": "Done."},
+                ]
+            ),
+            {},
+        )
+        agent = _MultiCallStreamingAgent([[false_completion_chunk], [recovery_chunk]])
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(
+            chat_id="42",
+            text="Can you update your skills with learning on how to deal with redacted content?",
+        )
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert agent.call_count == 2
 
     @pytest.mark.asyncio
     async def test_nudge_response_is_delivered(self):
