@@ -1,9 +1,9 @@
 """Tests for deepclaw.middleware module."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from types import SimpleNamespace
 
 try:
     from langchain_core.messages import ToolMessage

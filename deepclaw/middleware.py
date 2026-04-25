@@ -152,7 +152,12 @@ try:
 except ImportError:
     ToolCallRequest = None  # type: ignore[assignment, misc]
 
-if AgentMiddleware is not None and ToolCallRequest is not None and ToolMessage is not None and interrupt is not None:
+if (
+    AgentMiddleware is not None
+    and ToolCallRequest is not None
+    and ToolMessage is not None
+    and interrupt is not None
+):
     StateT = Any
 
     class SafetyMiddleware(AgentMiddleware[StateT, ContextT, ResponseT]):

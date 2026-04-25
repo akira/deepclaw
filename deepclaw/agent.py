@@ -230,7 +230,9 @@ def _setup_skills() -> list[str]:
 def create_checkpointer():
     """Create and return an async SQLite checkpointer context manager."""
     if AsyncSqliteSaver is None:
-        raise ImportError("langgraph-checkpoint-sqlite is required to create a checkpointer") from _LANGGRAPH_IMPORT_ERROR
+        raise ImportError(
+            "langgraph-checkpoint-sqlite is required to create a checkpointer"
+        ) from _LANGGRAPH_IMPORT_ERROR
     CHECKPOINTER_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return AsyncSqliteSaver.from_conn_string(str(CHECKPOINTER_DB_PATH))
 
