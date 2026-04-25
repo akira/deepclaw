@@ -19,121 +19,7 @@ WORKSPACE_ENV = "/home/ubuntu/.deepclaw/.env"
 DEFAULT_DATASET = "deepclaw"
 DEFAULT_MODEL = "openai:gpt-5.3-codex"
 DEFAULT_RESULTS_PATH = "/tmp/deepclaw-evals/results.json"
-
-WORKER_TEMPLATE = r"""
-from __future__ import annotations
-
-import asyncio
-import json
-import os
-import sys
-import tempfile
-import uuid
-from pathlib import Path
-
-from dotenv import load_dotenv
-
-repo_path = {repo_path!r}
-user_text = {user_text!r}
-model_name = {model_name!r}
-workspace_env = {workspace_env!r}
-
-home_dir = tempfile.mkdtemp(prefix="deepclaw-eval-home-")
-os.environ["HOME"] = home_dir
-os.environ.setdefault("LANGSMITH_TRACING", "false")
-load_dotenv(workspace_env, override=True)
-
-repo_root = Path(repo_path).resolve()
-os.chdir(repo_root)
-sys.path.insert(0, str(repo_root))
-
-from deepclaw.agent import create_agent, create_checkpointer
-from deepclaw.config import DeepClawConfig
-from deepclaw import gateway as gateway_mod
-from langchain_core.messages import ToolMessage
-
-_NUDGE_MESSAGE = getattr(
-    gateway_mod,
-    "_NUDGE_MESSAGE",
-    "You described an action but did not call any tools. Please call the appropriate tool now to carry out what you described.",
-)
-_looks_like_narration = getattr(gateway_mod, "_looks_like_narration", lambda _text: False)
-_looks_like_false_completion = getattr(
-    gateway_mod, "_looks_like_false_completion", lambda _user, _assistant: False
-)
-_looks_like_memory_request = getattr(
-    gateway_mod, "_looks_like_memory_request", lambda _user, _assistant: False
-)
-
-
-async def run_once(agent, thread_id: str, input_messages: list[dict]):
-    tool_calls_seen = False
-    tool_names = []
-    accumulated = ""
-    async for chunk in agent.astream(
-        {{"messages": input_messages}},
-        config={{"configurable": {{"thread_id": thread_id}}}},
-        stream_mode="messages",
-    ):
-        if not isinstance(chunk, tuple) or len(chunk) != 2:
-            continue
-        message_obj, _metadata = chunk
-        if isinstance(message_obj, ToolMessage):
-            continue
-        if not hasattr(message_obj, "content_blocks"):
-            continue
-        for block in message_obj.content_blocks:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            if block_type in ("tool_call", "tool_call_chunk"):
-                tool_calls_seen = True
-                name = block.get("name")
-                if name:
-                    tool_names.append(name)
-            elif block_type == "text":
-                accumulated += block.get("text", "")
-    return {{
-        "tool_calls_seen": tool_calls_seen,
-        "tool_names": tool_names,
-        "text": accumulated,
-    }}
-
-
-async def main():
-    config = DeepClawConfig(model=model_name, workspace_root=str(repo_root))
-    async with create_checkpointer() as checkpointer:
-        agent = create_agent(config, checkpointer)
-        thread_id = f"eval-{{uuid.uuid4()}}"
-        first = await run_once(agent, thread_id, [{{"role": "user", "content": user_text}}])
-        attempts = 1
-        retried = False
-        final = first
-        if (not first["tool_calls_seen"]) and (
-            _looks_like_narration(first["text"])
-            or _looks_like_false_completion(user_text, first["text"])
-            or _looks_like_memory_request(user_text, first["text"])
-        ):
-            retried = True
-            attempts += 1
-            second = await run_once(agent, thread_id, [{{"role": "user", "content": _NUDGE_MESSAGE}}])
-            final = {{
-                "tool_calls_seen": second["tool_calls_seen"],
-                "tool_names": first["tool_names"] + second["tool_names"],
-                "text": second["text"],
-            }}
-        print(json.dumps({{
-            "final_text": final["text"],
-            "tool_calls_seen": final["tool_calls_seen"] or first["tool_calls_seen"],
-            "tool_names": final["tool_names"],
-            "attempts": attempts,
-            "retried": retried,
-            "first_pass_tool_calls_seen": first["tool_calls_seen"],
-            "first_pass_text": first["text"],
-        }}))
-
-asyncio.run(main())
-"""
+WORKER_SCRIPT_PATH = Path(__file__).with_name("worker_run_case.py")
 
 
 def load_env() -> None:
@@ -172,14 +58,19 @@ def _normalize_tool_names(names: Any) -> list[str]:
 
 
 def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
-    worker = WORKER_TEMPLATE.format(
-        repo_path=repo_path,
-        user_text=user_text,
-        model_name=model_name,
-        workspace_env=WORKSPACE_ENV,
-    )
     completed = subprocess.run(
-        [sys.executable, "-c", worker],
+        [
+            sys.executable,
+            str(WORKER_SCRIPT_PATH),
+            "--repo",
+            repo_path,
+            "--user-text",
+            user_text,
+            "--model",
+            model_name,
+            "--workspace-env",
+            WORKSPACE_ENV,
+        ],
         capture_output=True,
         text=True,
         check=False,

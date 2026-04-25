@@ -4,6 +4,7 @@ This directory contains reusable LangSmith evaluation helpers for DeepClaw.
 
 ## Files
 - `langsmith_regression.py` — run baseline vs current-code experiments against an existing LangSmith dataset
+- `worker_run_case.py` — execute a single eval case against a specific repo checkout and print JSON for the harness
 
 ## Typical workflow
 

@@ -46,6 +46,37 @@ def test_evaluator_first_pass_succeeds_only_when_required_first_pass_happens():
     }
 
 
+def test_run_case_invokes_repo_worker_file(monkeypatch):
+    module = _load_module()
+    calls = []
+
+    def fake_run(cmd, capture_output=None, text=None, check=None, **_kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"tool_calls_seen": true}\n', stderr='')
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = module.run_case(
+        repo_path="/tmp/repo",
+        user_text="Install ruff",
+        model_name="openai:gpt-5.3-codex",
+    )
+
+    assert result == {"tool_calls_seen": True}
+    assert calls == [[
+        module.sys.executable,
+        str(module.WORKER_SCRIPT_PATH),
+        "--repo",
+        "/tmp/repo",
+        "--user-text",
+        "Install ruff",
+        "--model",
+        "openai:gpt-5.3-codex",
+        "--workspace-env",
+        module.WORKSPACE_ENV,
+    ]]
+
+
 def test_run_eval_supports_dict_rows(monkeypatch):
     module = _load_module()
 
