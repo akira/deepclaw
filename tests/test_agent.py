@@ -144,3 +144,91 @@ class TestCreateAgent:
             for middleware in captured["middleware"]
             if isinstance(middleware, tuple)
         )
+
+    def test_includes_openai_execution_guidance_for_gpt_models(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class FakeShellBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def execute(self, command, *, timeout=None):
+                return None
+
+        class FakeFilesystemBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeCompositeBackend:
+            def __init__(self, *, default, routes):
+                self.default = default
+                self.routes = routes
+
+        def fake_create_deep_agent(**kwargs):
+            captured.update(kwargs)
+            return "agent"
+
+        monkeypatch.setattr(agent_mod, "_setup_auth", lambda: None)
+        monkeypatch.setattr(agent_mod, "_load_soul", lambda: "soul")
+        monkeypatch.setattr(agent_mod, "_setup_memory", lambda: ["/memory/AGENTS.md"])
+        monkeypatch.setattr(agent_mod, "_setup_skills", lambda: ["/skills"])
+        monkeypatch.setattr(agent_mod, "discover_tools", list)
+        monkeypatch.setattr(agent_mod, "LocalShellBackend", FakeShellBackend)
+        monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
+        monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
+        monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
+        monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(
+            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+        )
+
+        config = DeepClawConfig(model="openai:gpt-5.3-codex", workspace_root=str(tmp_path))
+        result = agent_mod.create_agent(config, checkpointer="checkpointer")
+
+        assert result == "agent"
+        assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
+        assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE in captured["system_prompt"]
+
+    def test_skips_openai_execution_guidance_for_non_gpt_models(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class FakeShellBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def execute(self, command, *, timeout=None):
+                return None
+
+        class FakeFilesystemBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeCompositeBackend:
+            def __init__(self, *, default, routes):
+                self.default = default
+                self.routes = routes
+
+        def fake_create_deep_agent(**kwargs):
+            captured.update(kwargs)
+            return "agent"
+
+        monkeypatch.setattr(agent_mod, "_setup_auth", lambda: None)
+        monkeypatch.setattr(agent_mod, "_load_soul", lambda: "soul")
+        monkeypatch.setattr(agent_mod, "_setup_memory", lambda: ["/memory/AGENTS.md"])
+        monkeypatch.setattr(agent_mod, "_setup_skills", lambda: ["/skills"])
+        monkeypatch.setattr(agent_mod, "discover_tools", list)
+        monkeypatch.setattr(agent_mod, "LocalShellBackend", FakeShellBackend)
+        monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
+        monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
+        monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
+        monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(
+            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+        )
+
+        config = DeepClawConfig(model="anthropic:claude-sonnet-4-6", workspace_root=str(tmp_path))
+        result = agent_mod.create_agent(config, checkpointer="checkpointer")
+
+        assert result == "agent"
+        assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
+        assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE not in captured["system_prompt"]

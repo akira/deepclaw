@@ -332,6 +332,7 @@ class TestSkillInstall:
             "_download_github_directory",
             lambda repo, path: {"notes.txt": b"extra"},
         )
+        monkeypatch.setattr(skills_mod, "_find_github_skill_path", lambda repo, skill_name: None)
 
         result = skills_mod.skill_install(
             "https://skills.sh/vercel-labs/agent-browser/agent-browser"

@@ -82,6 +82,7 @@ _MUTATION_REQUEST_WORDS = (
     "create",
     "install",
     "restart",
+    "remember",
 )
 _MUTATION_REQUEST_RE = re.compile(r"\b(" + "|".join(_MUTATION_REQUEST_WORDS) + r")\b")
 _COMPLETION_CLAIM_WORDS = (
@@ -98,6 +99,22 @@ _COMPLETION_CLAIM_WORDS = (
     "incorporated",
 )
 _COMPLETION_CLAIM_RE = re.compile(r"\b(" + "|".join(_COMPLETION_CLAIM_WORDS) + r")\b")
+_MEMORY_REQUEST_PATTERNS = (
+    re.compile(r"\bremember\b"),
+    re.compile(r"\bprefer\b"),
+    re.compile(r"\bpreference\b"),
+    re.compile(r"\bfrom now on\b"),
+    re.compile(r"\bwhen i ask you to\b"),
+)
+_MEMORY_ACK_PATTERNS = (
+    re.compile(r"\bi(?:'ll| will) remember\b"),
+    re.compile(r"\bi(?:'ll| will) prefer\b"),
+    re.compile(r"\bfrom now on\b"),
+    re.compile(r"\bi(?:'ll| will) treat\b"),
+    re.compile(r"\btreat .* as\b"),
+    re.compile(r"\bprefer that workflow\b"),
+    re.compile(r"\bpreference going forward\b"),
+)
 
 
 def _normalize_text(text: str) -> str:
@@ -126,6 +143,18 @@ def _looks_like_false_completion(user_text: str, assistant_text: str) -> bool:
     requested_mutation = bool(_MUTATION_REQUEST_RE.search(user_lower))
     claimed_completion = bool(_COMPLETION_CLAIM_RE.search(assistant_lower))
     return requested_mutation and claimed_completion
+
+
+def _looks_like_memory_request(user_text: str, assistant_text: str) -> bool:
+    """Return True when the user asked to remember a preference and the assistant only acknowledged it."""
+    user_lower = _normalize_text(user_text)
+    assistant_lower = _normalize_text(assistant_text)
+    requested_memory = any(pattern.search(user_lower) for pattern in _MEMORY_REQUEST_PATTERNS)
+    acknowledged_preference = any(
+        pattern.search(assistant_lower) for pattern in _MEMORY_ACK_PATTERNS
+    )
+    claimed_completion = bool(_COMPLETION_CLAIM_RE.search(assistant_lower))
+    return requested_memory and acknowledged_preference and not claimed_completion
 
 
 def chunk_message(text: str, limit: int = 4096) -> list[str]:
@@ -269,12 +298,15 @@ class Gateway:
         try:
             tool_calls_seen = await _stream_once([{"role": "user", "content": message.text}])
 
-            # If the model described an action or falsely claimed completion without calling any tools, nudge it once.
+            # If the model described an action, claimed completion, or only acknowledged a memory/preference request without calling any tools, nudge it once.
             if not tool_calls_seen and (
                 _looks_like_narration(accumulated)
                 or _looks_like_false_completion(message.text, accumulated)
+                or _looks_like_memory_request(message.text, accumulated)
             ):
-                logger.info("Narration/false-completion without tool-call detected — sending nudge")
+                logger.info(
+                    "Narration/false-completion/memory-ack without tool-call detected — sending nudge"
+                )
                 accumulated = ""
                 last_edit_time = time.monotonic()
                 chars_since_edit = 0

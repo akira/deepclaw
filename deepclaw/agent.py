@@ -94,13 +94,64 @@ Use skills as your procedural memory.
 TOOL_USE_ENFORCEMENT = """\
 ## Tool Use Enforcement
 
-When you need to use a tool, call it immediately — never describe what you are \
-about to do in text first. Do not say "I'll now check X", "Let me search for Y", \
-or "I will run Z" without actually calling the corresponding tool in the same \
-response. Every response must either (a) make progress by calling tools, or \
-(b) deliver a final answer to the user. Responses that only describe intentions \
-without acting are not acceptable.\
+You MUST use your tools to take action — do not describe what you would do or plan to do without actually doing it. When you say you will perform an action (for example: "I will run the tests", "Let me check the file", or "I will create the PR"), you MUST immediately make the corresponding tool call in the same response.
+
+Never end your turn with a promise of future action — execute it now.
+Keep working until the task is actually complete. Do not stop with a summary of what you plan to do next time.
+Every response should either:
+- (a) contain tool calls that make progress, or
+- (b) deliver a real final result to the user.
+
+Responses that only describe intentions without acting are not acceptable.
 """
+
+
+OPENAI_MODEL_EXECUTION_GUIDANCE = """\
+## Execution Discipline
+
+<tool_persistence>
+- Use tools whenever they improve correctness, completeness, or grounding.
+- Do not stop early when another tool call would materially improve the result.
+- If a tool returns empty or partial results, retry with a different query or strategy before giving up.
+- Keep calling tools until: (1) the task is complete, AND (2) you have verified the result.
+</tool_persistence>
+
+<mandatory_tool_use>
+NEVER answer these from memory or mental computation — ALWAYS use a tool:
+- File contents, sizes, and line counts
+- Git history, branches, and diffs
+- System state like OS, processes, ports, memory, or disk
+- Current time/date
+
+Your memory describes the user and environment history, not the current live system state.
+</mandatory_tool_use>
+
+<act_dont_ask>
+When a request has an obvious actionable interpretation, act on it immediately instead of replying with a plan.
+Only ask for clarification when the ambiguity genuinely changes what tool you would call.
+</act_dont_ask>
+
+<prerequisite_checks>
+- Before taking an action, check whether prerequisite discovery, lookup, or context gathering is needed.
+- If a task depends on output from a prior step, resolve that dependency first.
+</prerequisite_checks>
+
+<verification>
+Before finalizing:
+- Verify that the output satisfies the request.
+- Verify that claims about side effects are backed by tool results.
+- Do not declare something done unless the relevant action actually happened.
+</verification>
+
+<missing_context>
+- If required context is missing, do not guess.
+- Retrieve it with tools when possible.
+- If you must proceed with incomplete information, label assumptions explicitly.
+</missing_context>
+"""
+
+
+OPENAI_MODEL_GUIDANCE_MODELS = ("gpt", "codex")
 
 
 def _load_soul() -> str | None:
@@ -314,9 +365,20 @@ def create_agent(config, checkpointer):
         composite_backend,
     )
 
-    # System prompt from SOUL.md, always followed by tool-use enforcement
+    # System prompt from SOUL.md, always followed by tool-use enforcement.
+    # Add stronger execution guidance for GPT/Codex-family models, which are
+    # more likely to narrate plans or declare completion without acting.
     soul = _load_soul()
-    system_prompt = (soul + "\n\n" + TOOL_USE_ENFORCEMENT) if soul else TOOL_USE_ENFORCEMENT
+    system_prompt_parts = []
+    if soul:
+        system_prompt_parts.append(soul)
+    system_prompt_parts.append(TOOL_USE_ENFORCEMENT)
+
+    model_name = (config.model or "").lower()
+    if any(token in model_name for token in OPENAI_MODEL_GUIDANCE_MODELS):
+        system_prompt_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+
+    system_prompt = "\n\n".join(part for part in system_prompt_parts if part)
 
     # Tool plugins
     tools = discover_tools()
