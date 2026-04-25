@@ -306,6 +306,9 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
         from deepagents.middleware.summarization import (  # noqa: PLC0415
             create_summarization_tool_middleware,
         )
+        from langchain.agents.middleware.summarization import (  # noqa: PLC0415
+            SummarizationMiddleware as LCSummarizationMiddleware,
+        )
     except ImportError:
         logger.warning(
             "Installed deepagents version does not provide summarization middleware; "
@@ -313,6 +316,17 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
         )
         return
 
+    # Message-count trigger for long-running threads that haven't hit
+    # deepagents' token-based threshold (~170k tokens). Uses langchain's
+    # before_model + RemoveMessage — doesn't conflict with deepagents'
+    # wrap_model_call + _summarization_event mechanism.
+    middleware.append(
+        LCSummarizationMiddleware(
+            model=model,
+            trigger=("messages", 80),
+            keep=("messages", 30),
+        )
+    )
     middleware.append(create_summarization_tool_middleware(model, backend))
 
 
