@@ -4,6 +4,7 @@ Uses Telegram chat_id as LangGraph thread_id for conversation persistence.
 Streams agent responses by progressively editing a single Telegram message.
 """
 
+import asyncio
 import contextlib
 import logging
 import mimetypes
@@ -71,6 +72,7 @@ GATEWAY_KEY = "gateway"
 LAST_MESSAGE_KEY = "last_user_message"
 MODEL_OVERRIDE_KEY = "model_override"
 PENDING_APPROVALS_KEY = "pending_approvals"
+ACTIVE_RUNS_KEY = "active_runs"
 
 # Bot start time for /uptime
 _BOT_START_TIME: float = time.time()
@@ -189,6 +191,57 @@ def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
 def _pending_approvals(context: ContextTypes.DEFAULT_TYPE) -> dict[str, dict]:
     """Return the mutable pending-approval map stored in bot_data."""
     return context.bot_data.setdefault(PENDING_APPROVALS_KEY, {})
+
+
+def _active_runs(context: ContextTypes.DEFAULT_TYPE) -> dict[str, asyncio.Task]:
+    """Return the mutable per-chat active-run map stored in bot_data."""
+    return context.bot_data.setdefault(ACTIVE_RUNS_KEY, {})
+
+
+def _get_active_run(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> asyncio.Task | None:
+    """Return the active task for a chat, pruning finished tasks."""
+    task = _active_runs(context).get(chat_id)
+    if task is not None and task.done():
+        _active_runs(context).pop(chat_id, None)
+        return None
+    return task
+
+
+async def _cancel_active_run(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
+    """Cancel the current in-flight task for a chat, if any."""
+    task = _get_active_run(context, chat_id)
+    if task is None:
+        return False
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    _active_runs(context).pop(chat_id, None)
+    return True
+
+
+def _begin_active_run(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
+    """Claim the per-chat active-run slot for the current task."""
+    current_task = asyncio.current_task()
+    if current_task is None:
+        return False
+    existing = _get_active_run(context, chat_id)
+    if existing is not None and existing is not current_task:
+        return False
+    _active_runs(context)[chat_id] = current_task
+    return True
+
+
+def _finish_active_run(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> None:
+    """Release the per-chat active-run slot if owned by the current task."""
+    current_task = asyncio.current_task()
+    active_runs = _active_runs(context)
+    if current_task is not None and active_runs.get(chat_id) is current_task:
+        active_runs.pop(chat_id, None)
+
+
+def _active_run_text() -> str:
+    """Return the user-visible message when a task is already running."""
+    return "A task is already running. Use /stop to interrupt it before sending something new."
 
 
 def _pending_approval_text() -> str:
@@ -405,6 +458,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
+    await _cancel_active_run(context, chat_id)
     new_thread = str(uuid.uuid4())
     thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
     thread_ids[chat_id] = new_thread
@@ -427,6 +481,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/new — Start a fresh conversation thread\n"
         "/clear — Clear conversation (alias for /new)\n"
         "/retry — Re-send the last message\n"
+        "/stop — Stop the current in-flight task\n"
         "/approve — Approve a pending safety-reviewed command\n"
         "/deny [reason] — Reject a pending safety-reviewed command\n"
         "/model [name] — View or set the active model\n"
@@ -542,6 +597,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
+    await _cancel_active_run(context, chat_id)
     new_thread = str(uuid.uuid4())
     thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
     thread_ids[chat_id] = new_thread
@@ -689,6 +745,9 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if _pending_approvals(context).get(chat_id):
         await update.message.reply_text(_pending_approval_text())
         return
+    if not _begin_active_run(context, chat_id):
+        await update.message.reply_text(_active_run_text())
+        return
     thread_id = get_thread_id(context, chat_id)
     incoming = IncomingMessage(
         text=last_text,
@@ -701,12 +760,32 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     gateway: Gateway = context.bot_data[GATEWAY_KEY]
     try:
         pending = await gateway.handle_message(channel, incoming, thread_id)
-        if pending:
-            _pending_approvals(context)[chat_id] = pending
-        else:
-            _pending_approvals(context).pop(chat_id, None)
+    except asyncio.CancelledError:
+        logger.info("Cancelled active retry for chat %s", chat_id)
+        return
     finally:
+        _finish_active_run(context, chat_id)
         _STREAM_MESSAGES.pop(chat_id, None)
+    if pending:
+        _pending_approvals(context)[chat_id] = pending
+    else:
+        _pending_approvals(context).pop(chat_id, None)
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stop -- cancel the current in-flight chat task."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    stopped = await _cancel_active_run(context, chat_id)
+    _STREAM_MESSAGES.pop(chat_id, None)
+    if not stopped:
+        await update.message.reply_text("No active task to stop.")
+        return
+    await update.message.reply_text("Stopped the current task.")
 
 
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1107,33 +1186,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
-    thread_id = get_thread_id(context, chat_id)
-    user_text, media_error = await _build_incoming_text(update)
-    if media_error:
-        await update.message.reply_text(media_error)
+    if not _begin_active_run(context, chat_id):
+        await update.message.reply_text(_active_run_text())
         return
-    if not user_text:
-        return
-
-    if _pending_approvals(context).get(chat_id):
-        await update.message.reply_text(_pending_approval_text())
-        return
-
-    # Track last message per chat for /retry
-    context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
-
-    incoming = IncomingMessage(
-        text=user_text,
-        chat_id=chat_id,
-        user_id=str(user.id) if user else "",
-        username=user.username if user else None,
-        source="telegram",
-    )
-
-    channel = TelegramChannel(update, context)
-    gateway: Gateway = context.bot_data[GATEWAY_KEY]
-
     try:
+        thread_id = get_thread_id(context, chat_id)
+        user_text, media_error = await _build_incoming_text(update)
+        if media_error:
+            await update.message.reply_text(media_error)
+            return
+        if not user_text:
+            return
+
+        if _pending_approvals(context).get(chat_id):
+            await update.message.reply_text(_pending_approval_text())
+            return
+
+        # Track last message per chat for /retry
+        context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
+
+        incoming = IncomingMessage(
+            text=user_text,
+            chat_id=chat_id,
+            user_id=str(user.id) if user else "",
+            username=user.username if user else None,
+            source="telegram",
+        )
+
+        channel = TelegramChannel(update, context)
+        gateway: Gateway = context.bot_data[GATEWAY_KEY]
+
         pending = await gateway.handle_message(channel, incoming, thread_id)
         if pending:
             _pending_approvals(context)[chat_id] = pending
@@ -1143,7 +1225,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         else:
             _pending_approvals(context).pop(chat_id, None)
+    except asyncio.CancelledError:
+        logger.info("Cancelled active message run for chat %s", chat_id)
+        return
     finally:
+        _finish_active_run(context, chat_id)
         # Clean up stored message objects for this chat
         _STREAM_MESSAGES.pop(chat_id, None)
 
@@ -1216,6 +1302,7 @@ async def post_init(application: Application) -> None:
             BotCommand("new", "Start a fresh conversation thread"),
             BotCommand("clear", "Clear conversation (alias for /new)"),
             BotCommand("retry", "Re-send the last message"),
+            BotCommand("stop", "Stop the current in-flight task"),
             BotCommand("approve", "Approve a pending safety-reviewed command"),
             BotCommand("deny", "Reject a pending safety-reviewed command"),
             BotCommand("model", "View or set the active model"),
@@ -1273,7 +1360,8 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("pair", cmd_pair))
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("clear", cmd_clear))
-    application.add_handler(CommandHandler("retry", cmd_retry))
+    application.add_handler(CommandHandler("retry", cmd_retry, block=False))
+    application.add_handler(CommandHandler("stop", cmd_stop))
     application.add_handler(CommandHandler("approve", cmd_approve))
     application.add_handler(CommandHandler("deny", cmd_deny))
     application.add_handler(CommandHandler("model", cmd_model))
@@ -1291,9 +1379,13 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("doctor", cmd_doctor))
     application.add_handler(CallbackQueryHandler(cmd_approval_callback, pattern=r"^safety:"))
     application.add_handler(
-        MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message)
+        MessageHandler(
+            (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message, block=False
+        )
     )
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False)
+    )
 
     logger.info("Starting DeepClaw Telegram bot...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

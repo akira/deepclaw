@@ -1,5 +1,7 @@
 """Tests for deepclaw bot modules (auth, channels.telegram, gateway)."""
 
+import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,6 +12,7 @@ from telegram import InlineKeyboardMarkup
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
+    ACTIVE_RUNS_KEY,
     ALLOWED_USERS_KEY,
     CONFIG_KEY,
     GATEWAY_KEY,
@@ -37,6 +40,7 @@ from deepclaw.channels.telegram import (
     cmd_retry,
     cmd_skills,
     cmd_soul,
+    cmd_stop,
     cmd_uptime,
     get_thread_id,
     handle_message,
@@ -855,6 +859,26 @@ class TestTelegramMediaHelpers:
 
 class TestTelegramMediaHandleMessage:
     @pytest.mark.asyncio
+    async def test_handle_message_blocks_while_task_running(self):
+        update = _make_slash_update(text="hello")
+        task = asyncio.create_task(asyncio.sleep(60))
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock()
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway, ACTIVE_RUNS_KEY: {"1": task}})
+
+        try:
+            await handle_message(update, ctx)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        update.message.reply_text.assert_awaited_once_with(
+            "A task is already running. Use /stop to interrupt it before sending something new."
+        )
+        gateway.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_handle_message_routes_photo_to_gateway(self, tmp_path):
         update = _make_slash_update(text="")
         update.message.caption = "Please inspect this"
@@ -1140,6 +1164,56 @@ class TestCmdRetry:
         update.message.reply_text.assert_called_once_with(
             "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
         )
+
+    @pytest.mark.asyncio
+    async def test_retry_blocked_while_task_running(self):
+        update = _make_slash_update(text="/retry")
+        task = asyncio.create_task(asyncio.sleep(60))
+        ctx = _make_slash_context(
+            extra={
+                LAST_MESSAGE_KEY: {"1": "run something"},
+                ACTIVE_RUNS_KEY: {"1": task},
+            }
+        )
+
+        try:
+            await cmd_retry(update, ctx)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        update.message.reply_text.assert_called_once_with(
+            "A task is already running. Use /stop to interrupt it before sending something new."
+        )
+
+
+class TestCmdStop:
+    @pytest.mark.asyncio
+    async def test_stop_without_active_task(self):
+        update = _make_slash_update(text="/stop")
+        ctx = _make_slash_context()
+
+        await cmd_stop(update, ctx)
+
+        update.message.reply_text.assert_called_once_with("No active task to stop.")
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_active_task(self):
+        update = _make_slash_update(text="/stop")
+        blocker = asyncio.Event()
+
+        async def _run_forever():
+            await blocker.wait()
+
+        task = asyncio.create_task(_run_forever())
+        ctx = _make_slash_context(extra={ACTIVE_RUNS_KEY: {"1": task}})
+
+        await cmd_stop(update, ctx)
+
+        assert task.cancelled()
+        assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
+        update.message.reply_text.assert_called_once_with("Stopped the current task.")
 
 
 # ---------------------------------------------------------------------------
