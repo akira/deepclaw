@@ -213,6 +213,18 @@ class Gateway:
         self.agent = agent
         self.streaming_config = streaming_config
 
+    @staticmethod
+    def _run_config(thread_id: str, *, chat_id: str, channel_name: str) -> dict[str, Any]:
+        """Build per-invocation config for checkpointing and trace metadata."""
+        return {
+            "configurable": {"thread_id": thread_id},
+            "metadata": {
+                "active_thread_id": thread_id,
+                "chat_id": chat_id,
+                "channel": channel_name,
+            },
+        }
+
     async def _edit_redacted_message(
         self, channel: Channel, chat_id: str, message_id: str, text: str
     ) -> None:
@@ -223,13 +235,24 @@ class Gateway:
         """Redact secrets before sending a message."""
         return await channel.send(chat_id, redact_secrets(text))
 
-    async def _get_pending_interrupt(self, thread_id: str) -> dict[str, Any] | None:
+    async def _get_pending_interrupt(
+        self,
+        channel: Channel,
+        thread_id: str,
+        *,
+        chat_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Inspect the graph state for a pending safety-review interrupt."""
         get_state = getattr(self.agent, "aget_state", None)
         if get_state is None:
             return None
+        config = self._run_config(
+            thread_id,
+            chat_id=chat_id or thread_id,
+            channel_name=channel.name,
+        )
         try:
-            state = await get_state({"configurable": {"thread_id": thread_id}})
+            state = await get_state(config)
         except Exception:
             logger.exception("Failed to inspect graph state for thread %s", thread_id)
             return None
@@ -271,9 +294,14 @@ class Gateway:
             nonlocal accumulated, last_edit_time, chars_since_edit
             tool_calls_seen = False
 
+            run_config = self._run_config(
+                thread_id,
+                chat_id=chat_id,
+                channel_name=channel.name,
+            )
             async for chunk in self.agent.astream(
                 payload,
-                config={"configurable": {"thread_id": thread_id}},
+                config=run_config,
                 stream_mode="messages",
             ):
                 if not isinstance(chunk, tuple) or len(chunk) != 2:
@@ -331,7 +359,7 @@ class Gateway:
         pending: dict[str, Any] | None = None
         try:
             tool_calls_seen = await _stream_once(graph_input)
-            pending = await self._get_pending_interrupt(thread_id)
+            pending = await self._get_pending_interrupt(channel, thread_id, chat_id=chat_id)
 
             if (
                 original_user_text
@@ -350,7 +378,7 @@ class Gateway:
                 last_edit_time = time.monotonic()
                 chars_since_edit = 0
                 await _stream_once({"messages": [{"role": "user", "content": _NUDGE_MESSAGE}]})
-                pending = await self._get_pending_interrupt(thread_id)
+                pending = await self._get_pending_interrupt(channel, thread_id, chat_id=chat_id)
         except Exception:
             logger.exception("Agent streaming failed")
             accumulated = accumulated or "Sorry, something went wrong processing your message."
