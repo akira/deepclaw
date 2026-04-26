@@ -2,7 +2,6 @@
 name: deepclaw-development
 description: Develop, configure, and extend DeepClaw — adding tool plugins, tuning SOUL.md, managing the venv, and restarting the service.
 version: 1.0.1
-author: Hermes Agent
 platforms: [linux]
 tags: [deepclaw, tool-plugins, configuration]
 required_environment_variables:
