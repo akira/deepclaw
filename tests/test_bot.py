@@ -38,6 +38,7 @@ from deepclaw.channels.telegram import (
     cmd_deny,
     cmd_memory,
     cmd_model,
+    cmd_queue,
     cmd_retry,
     cmd_skills,
     cmd_soul,
@@ -51,9 +52,13 @@ from deepclaw.config import DeepClawConfig
 from deepclaw.gateway import (
     CURSOR_INDICATOR,
     Gateway,
+    _append_progress_history,
+    _append_progress_line,
+    _format_tool_progress_line,
     _looks_like_false_completion,
     _looks_like_memory_request,
     _looks_like_narration,
+    _resolve_tool_args,
     chunk_message,
 )
 
@@ -350,6 +355,50 @@ class _FakeStreamingAgent:
         return SimpleNamespace(interrupts=self._interrupts)
 
 
+class TestGatewayProgressFormatting:
+    def test_format_tool_progress_line_uses_icons_and_summaries(self):
+        assert _format_tool_progress_line("skill_view", {"name": "systematic-debugging"}) == (
+            '📚 skill_view: "systematic-debugging"'
+        )
+        assert _format_tool_progress_line("todo", {"todos": [{}, {}, {}]}) == (
+            '📋 todo: "planning 3 task(s)"'
+        )
+        assert _format_tool_progress_line("patch", {"path": "/tmp/file.py"}) == (
+            '🔧 patch: "/tmp/file.py"'
+        )
+
+    def test_append_progress_line_collapses_duplicates(self):
+        accumulated, delta1 = _append_progress_line("", '🔧 patch: "/tmp/file.py"')
+        accumulated, delta2 = _append_progress_line(accumulated, '🔧 patch: "/tmp/file.py"')
+        accumulated, delta3 = _append_progress_line(accumulated, '🔧 patch: "/tmp/file.py"')
+
+        assert accumulated == '🔧 patch: "/tmp/file.py" (×3)'
+        assert delta1 > 0
+        assert delta2 > 0
+        assert delta3 >= 0
+
+    def test_append_progress_history_collapses_duplicates(self):
+        history = _append_progress_history([], '🔧 patch: "/tmp/file.py"')
+        history = _append_progress_history(history, '🔧 patch: "/tmp/file.py"')
+        history = _append_progress_history(history, '🔧 patch: "/tmp/file.py"')
+
+        assert history == ['🔧 patch: "/tmp/file.py" (×3)']
+
+    def test_resolve_tool_args_falls_back_to_message_tool_calls(self):
+        block = {"type": "tool_call", "id": "call-1", "name": "execute", "args": {}}
+        tool_calls = [
+            {
+                "id": "call-1",
+                "name": "execute",
+                "args": {"command": "sudo apt-get install ripgrep"},
+            }
+        ]
+
+        assert _resolve_tool_args(block, "execute", tool_calls) == {
+            "command": "sudo apt-get install ripgrep"
+        }
+
+
 class TestGatewayRedaction:
     @pytest.mark.asyncio
     async def test_streaming_redacts_before_edit_and_final_send(self):
@@ -410,6 +459,228 @@ class TestGatewayRedaction:
         assert all(
             CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits
         )
+
+    @pytest.mark.asyncio
+    async def test_streaming_status_updates_show_formatted_tool_progress(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "tool_call",
+                                "name": "skill_view",
+                                "args": {"name": "systematic-debugging"},
+                            },
+                            {
+                                "type": "tool_call",
+                                "name": "skill_view",
+                                "args": {"name": "deepclaw-development"},
+                            },
+                            {
+                                "type": "tool_call",
+                                "name": "terminal",
+                                "args": {
+                                    "command": "TRACE_ID='20260426T195032456878Z019dcb57-f508-7650-8e34-5ad6d9612d75' journalctl --user -u deepclaw.service --no-pager"
+                                },
+                            },
+                            {
+                                "type": "tool_call",
+                                "name": "patch",
+                                "args": {"path": "/tmp/file.py"},
+                            },
+                            {
+                                "type": "tool_call",
+                                "name": "patch",
+                                "args": {"path": "/tmp/file.py"},
+                            },
+                        ]
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="show progress")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edits_text = "\n".join(text for _, _, text in channel.edits)
+        assert '📚 skill_view: "systematic-debugging"' in edits_text
+        assert '📚 skill_view: "deepclaw-development"' in edits_text
+        assert '💻 terminal: "TRACE_ID=' in edits_text
+        assert '🔧 patch: "/tmp/file.py" (×2)' in edits_text
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert snapshot["status"] == "completed"
+        assert snapshot["user_text_preview"] == "show progress"
+        assert '🔧 patch: "/tmp/file.py" (×2)' in snapshot["progress_lines"]
+
+    @pytest.mark.asyncio
+    async def test_streaming_shows_resolved_chunk_progress_without_duplicate_final_call(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": {"command": "sudo apt-get install ripgrep"},
+                            }
+                        ],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": {},
+                            },
+                            {
+                                "type": "tool_call",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": {},
+                            },
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="install ripgrep")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edits_text = "\n".join(text for _, _, text in channel.edits)
+        assert '💻 execute: "sudo apt-get install ripgrep"' in edits_text
+        assert "💻 execute (×2)" not in edits_text
+        assert "\n💻 execute\n" not in edits_text
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert snapshot["progress_lines"] == ['💻 execute: "sudo apt-get install ripgrep"']
+
+    @pytest.mark.asyncio
+    async def test_streaming_shows_chunk_progress_even_without_final_tool_call(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": {"command": "sudo apt-get install ripgrep"},
+                            }
+                        ],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": {},
+                            },
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="install ripgrep")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edits_text = "\n".join(text for _, _, text in channel.edits)
+        assert '💻 execute: "sudo apt-get install ripgrep"' in edits_text
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert snapshot["progress_lines"] == ['💻 execute: "sudo apt-get install ripgrep"']
+
+    @pytest.mark.asyncio
+    async def test_streaming_shows_generic_tool_name_when_stream_has_no_args(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "execute", "args": {}}],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            },
+                            {
+                                "type": "tool_call",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            },
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="run command")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edits_text = "\n".join(text for _, _, text in channel.edits)
+        assert "💻 execute" in edits_text
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert snapshot["progress_lines"] == ["💻 execute"]
+
+    @pytest.mark.asyncio
+    async def test_streaming_inserts_newline_between_tool_progress_and_text(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "execute", "args": {}}],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="run command")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        final_text = channel.edits[-1][2]
+        assert "💻 execute\nDone." in final_text
 
     @pytest.mark.asyncio
     async def test_returns_pending_safety_review_when_graph_interrupts(self):
@@ -1159,6 +1430,70 @@ class TestCmdContext:
         assert "Estimated active context subtotal" in text
 
 
+class TestCmdQueue:
+    @pytest.mark.asyncio
+    async def test_queue_shows_recent_tool_activity_and_pending_approval(self):
+        update = _make_slash_update(text="/queue")
+        gateway = MagicMock()
+        gateway.get_queue_snapshot.return_value = {
+            "status": "awaiting_approval",
+            "started_at": 900.0,
+            "updated_at": 995.0,
+            "user_text_preview": "install ripgrep",
+            "progress_lines": [
+                '📚 skill_view: "deepclaw-development"',
+                '💻 terminal: "sudo apt-get install ripgrep"',
+            ],
+            "pending_approval": {
+                "tool": "execute",
+                "warning": "sudo requires approval",
+                "command": "sudo apt-get install ripgrep",
+            },
+            "final_text_preview": "Waiting for approval.",
+        }
+        ctx = _make_slash_context(
+            model="openai:gpt-5",
+            extra={
+                GATEWAY_KEY: gateway,
+                PENDING_APPROVALS_KEY: {
+                    "1": {
+                        "tool": "execute",
+                        "warning": "sudo requires approval",
+                        "command": "sudo apt-get install ripgrep",
+                    }
+                },
+            },
+        )
+
+        with patch("deepclaw.channels.telegram.time.time", return_value=1000.0):
+            await cmd_queue(update, ctx)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "📋 Queue" in text
+        assert "State: awaiting_approval" in text
+        assert "Request: install ripgrep" in text
+        assert '📚 skill_view: "deepclaw-development"' in text
+        assert '💻 terminal: "sudo apt-get install ripgrep"' in text
+        assert "Pending approval:" in text
+        assert "sudo requires approval" in text
+        assert "/approve to continue" in text
+
+    @pytest.mark.asyncio
+    async def test_queue_reports_idle_when_no_activity(self):
+        update = _make_slash_update(text="/queue")
+        gateway = MagicMock()
+        gateway.get_queue_snapshot.return_value = None
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        await cmd_queue(update, ctx)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "📋 Queue" in text
+        assert "State: idle" in text
+        assert "No active task or recent tool activity" in text
+
+
 # ---------------------------------------------------------------------------
 # /uptime
 # ---------------------------------------------------------------------------
@@ -1679,12 +2014,17 @@ class TestCmdSkills:
                 "count": 2,
                 "duplicate_descriptions_count": 1,
                 "skills_missing_required_sections_count": 1,
+                "skills_missing_required_env_declarations_count": 1,
                 "duplicate_descriptions": [
                     {"description": "Shared description", "skills": ["a", "b"]}
                 ],
                 "skills": [
-                    {"name": "a", "missing_sections": ["Verification"]},
-                    {"name": "b", "missing_sections": []},
+                    {
+                        "name": "a",
+                        "missing_sections": ["Verification"],
+                        "undeclared_required_env_vars": ["LANGSMITH_API_KEY"],
+                    },
+                    {"name": "b", "missing_sections": [], "undeclared_required_env_vars": []},
                 ],
             },
         )
@@ -1695,6 +2035,7 @@ class TestCmdSkills:
         assert "Skill audit" in reply
         assert "duplicate descriptions: 1" in reply
         assert "missing required sections: 1" in reply
+        assert "missing env declarations: 1" in reply
 
     @pytest.mark.asyncio
     async def test_skills_resolvable_returns_summary(self, monkeypatch):
