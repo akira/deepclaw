@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import ToolMessage
+from telegram import InlineKeyboardMarkup
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
@@ -14,17 +15,23 @@ from deepclaw.channels.telegram import (
     GATEWAY_KEY,
     LAST_MESSAGE_KEY,
     MODEL_OVERRIDE_KEY,
+    PENDING_APPROVALS_KEY,
     TELEGRAM_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
     TelegramBotChannel,
+    TelegramChannel,
     _build_incoming_text,
     _format_remote_skills,
     _format_skills_list,
     _looks_like_supported_image,
     _parse_skills_command,
+    _pending_approval_markup,
     _validate_model,
     authorize_chat,
+    cmd_approval_callback,
+    cmd_approve,
     cmd_clear,
+    cmd_deny,
     cmd_memory,
     cmd_model,
     cmd_retry,
@@ -263,13 +270,43 @@ class TestTelegramBotChannel:
         assert message_id == "101"
 
 
-class _FakeStreamingAgent:
-    def __init__(self, chunks):
-        self._chunks = chunks
+class TestTelegramChannel:
+    @pytest.mark.asyncio
+    async def test_send_uses_reply_text_for_message_updates(self):
+        update = _make_slash_update(text="hello")
+        ctx = _make_slash_context()
+        channel = TelegramChannel(update, ctx)
 
-    async def astream(self, *_args, **_kwargs):
+        message_id = await channel.send("1", "Thinking...")
+
+        update.message.reply_text.assert_awaited_once_with("Thinking...")
+        assert message_id == "200"
+
+    @pytest.mark.asyncio
+    async def test_send_falls_back_to_callback_message_reply_text(self):
+        update = _make_callback_update(data="safety:approve")
+        ctx = _make_slash_context()
+        channel = TelegramChannel(update, ctx)
+
+        message_id = await channel.send("1", "Thinking...")
+
+        update.callback_query.message.reply_text.assert_awaited_once_with("Thinking...")
+        assert message_id == "201"
+
+
+class _FakeStreamingAgent:
+    def __init__(self, chunks, interrupts=()):
+        self._chunks = chunks
+        self._interrupts = interrupts
+        self.astream_calls = []
+
+    async def astream(self, *args, **kwargs):
+        self.astream_calls.append((args, kwargs))
         for chunk in self._chunks:
             yield chunk
+
+    async def aget_state(self, _config):
+        return SimpleNamespace(interrupts=self._interrupts)
 
 
 class TestGatewayRedaction:
@@ -332,6 +369,61 @@ class TestGatewayRedaction:
         assert all(
             CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits
         )
+
+    @pytest.mark.asyncio
+    async def test_returns_pending_safety_review_when_graph_interrupts(self):
+        interrupt = SimpleNamespace(
+            id="interrupt-1",
+            value={
+                "type": "safety_review",
+                "tool": "execute",
+                "command": "python -c 'print(1)'",
+                "warning": "Inline Python execution",
+                "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
+            },
+        )
+        agent = _FakeStreamingAgent([], interrupts=(interrupt,))
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="run eval")
+
+        pending = await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert pending == {
+            "id": "interrupt-1",
+            "thread_id": "thread-1",
+            "type": "safety_review",
+            "tool": "execute",
+            "command": "python -c 'print(1)'",
+            "warning": "Inline Python execution",
+            "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
+        }
+        assert channel.edits[-1][2].endswith(
+            "Use /approve to continue or /deny <reason> to reject."
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_interrupt_uses_command_resume_payload(self):
+        agent = _FakeStreamingAgent(
+            [(SimpleNamespace(content_blocks=[{"type": "text", "text": "Approved and ran."}]), {})]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+
+        pending = await gateway.resume_interrupt(
+            channel,
+            chat_id="123",
+            thread_id="thread-1",
+            decision={"type": "approve"},
+        )
+
+        assert pending is None
+        args, kwargs = agent.astream_calls[0]
+        assert args[0].resume == {"type": "approve"}
+        assert kwargs["config"] == {"configurable": {"thread_id": "thread-1"}}
+        assert channel.edits[-1][2] == "Approved and ran."
 
 
 # ---------------------------------------------------------------------------
@@ -761,7 +853,7 @@ def _make_slash_update(user_id: int = 1, text: str = "/cmd", username: str = "al
     user = SimpleNamespace(id=user_id, username=username)
     chat = SimpleNamespace(id=user_id, type="private")
     message = MagicMock()
-    message.reply_text = AsyncMock()
+    message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=200))
     message.text = text
     message.caption = None
     message.photo = []
@@ -770,6 +862,26 @@ def _make_slash_update(user_id: int = 1, text: str = "/cmd", username: str = "al
     update.effective_user = user
     update.effective_chat = chat
     update.message = message
+    update.callback_query = None
+    return update
+
+
+def _make_callback_update(user_id: int = 1, data: str = "approve", username: str = "alice"):
+    """Build a mock Update for inline keyboard callback tests."""
+    user = SimpleNamespace(id=user_id, username=username)
+    chat = SimpleNamespace(id=user_id, type="private")
+    message = MagicMock()
+    message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=201))
+    message.edit_reply_markup = AsyncMock()
+    callback_query = MagicMock()
+    callback_query.data = data
+    callback_query.answer = AsyncMock()
+    callback_query.message = message
+    update = MagicMock()
+    update.effective_user = user
+    update.effective_chat = chat
+    update.message = None
+    update.callback_query = callback_query
     return update
 
 
@@ -953,6 +1065,227 @@ class TestCmdRetry:
         ctx = _make_slash_context()
         await cmd_retry(update, ctx)
         update.message.reply_text.assert_called_once_with("No previous message to retry.")
+
+    @pytest.mark.asyncio
+    async def test_retry_blocked_while_approval_pending(self):
+        update = _make_slash_update(text="/retry")
+        ctx = _make_slash_context(
+            extra={
+                LAST_MESSAGE_KEY: {"1": "run something"},
+                PENDING_APPROVALS_KEY: {"1": {"id": "interrupt-1", "thread_id": "thread-1"}},
+            }
+        )
+
+        await cmd_retry(update, ctx)
+
+        update.message.reply_text.assert_called_once_with(
+            "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
+        )
+
+
+# ---------------------------------------------------------------------------
+# /approve and /deny
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyApprovalCommands:
+    def test_pending_approval_markup_has_approve_and_deny_buttons(self):
+        markup = _pending_approval_markup("interrupt-1")
+
+        assert isinstance(markup, InlineKeyboardMarkup)
+        rows = markup.inline_keyboard
+        assert len(rows) == 1
+        assert rows[0][0].text == "Approve"
+        assert rows[0][0].callback_data == "safety:approve:interrupt-1"
+        assert rows[0][1].text == "Deny"
+        assert rows[0][1].callback_data == "safety:deny:interrupt-1"
+
+    @pytest.mark.asyncio
+    async def test_approve_without_pending_request(self):
+        update = _make_slash_update(text="/approve")
+        ctx = _make_slash_context()
+
+        await cmd_approve(update, ctx)
+
+        update.message.reply_text.assert_called_once_with(
+            "No pending safety approval for this chat."
+        )
+
+    @pytest.mark.asyncio
+    async def test_deny_without_pending_request(self):
+        update = _make_slash_update(text="/deny")
+        ctx = _make_slash_context()
+
+        await cmd_deny(update, ctx)
+
+        update.message.reply_text.assert_called_once_with(
+            "No pending safety approval for this chat."
+        )
+
+    @pytest.mark.asyncio
+    async def test_approve_resumes_pending_interrupt_and_clears_it(self):
+        update = _make_slash_update(text="/approve")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approve(update, ctx)
+
+        gateway.resume_interrupt.assert_awaited_once()
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["thread_id"] == "thread-1"
+        assert kwargs["decision"] == {"type": "approve"}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+        update.message.reply_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deny_resumes_pending_interrupt_with_reason(self):
+        update = _make_slash_update(text="/deny too risky")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_deny(update, ctx)
+
+        gateway.resume_interrupt.assert_awaited_once()
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["decision"] == {"type": "reject", "message": "too risky"}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+
+    @pytest.mark.asyncio
+    async def test_callback_approve_resumes_pending_interrupt_and_clears_buttons(self):
+        update = _make_callback_update(data="safety:approve:interrupt-1")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approval_callback(update, ctx)
+
+        update.callback_query.answer.assert_awaited_once()
+        gateway.resume_interrupt.assert_awaited_once()
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["decision"] == {"type": "approve"}
+        update.callback_query.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+
+    @pytest.mark.asyncio
+    async def test_callback_deny_rejects_pending_interrupt(self):
+        update = _make_callback_update(data="safety:deny:interrupt-1")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approval_callback(update, ctx)
+
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["decision"] == {
+            "type": "reject",
+            "message": "Command rejected via inline deny button",
+        }
+
+    @pytest.mark.asyncio
+    async def test_callback_stale_button_does_not_resume_newer_pending_interrupt(self):
+        update = _make_callback_update(data="safety:approve:old-interrupt")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approval_callback(update, ctx)
+
+        gateway.resume_interrupt.assert_not_awaited()
+        update.callback_query.message.reply_text.assert_awaited_once_with(
+            "That approval button is stale. Please use the latest safety review prompt."
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_message_stores_pending_safety_review(self):
+        update = _make_slash_update(text="run evals")
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(
+            return_value={
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        )
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        await handle_message(update, ctx)
+
+        assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"]["id"] == "interrupt-1"
+        assert update.message.reply_text.await_count == 1
+        _, kwargs = update.message.reply_text.await_args
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve:interrupt-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_message_blocks_new_requests_while_approval_pending(self):
+        update = _make_slash_update(text="do something else")
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock()
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                PENDING_APPROVALS_KEY: {
+                    "1": {
+                        "id": "interrupt-1",
+                        "thread_id": "thread-1",
+                        "type": "safety_review",
+                        "message": "Approve or deny?",
+                    }
+                },
+            }
+        )
+
+        await handle_message(update, ctx)
+
+        gateway.handle_message.assert_not_awaited()
+        update.message.reply_text.assert_called_once_with(
+            "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
+        )
 
 
 # ---------------------------------------------------------------------------

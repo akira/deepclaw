@@ -4,6 +4,7 @@ Uses Telegram chat_id as LangGraph thread_id for conversation persistence.
 Streams agent responses by progressively editing a single Telegram message.
 """
 
+import contextlib
 import logging
 import mimetypes
 import time
@@ -11,11 +12,12 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -68,6 +70,7 @@ JOBS_PATH_KEY = "jobs_path"
 GATEWAY_KEY = "gateway"
 LAST_MESSAGE_KEY = "last_user_message"
 MODEL_OVERRIDE_KEY = "model_override"
+PENDING_APPROVALS_KEY = "pending_approvals"
 
 # Bot start time for /uptime
 _BOT_START_TIME: float = time.time()
@@ -169,6 +172,34 @@ def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
     """Return the current thread_id for a chat, defaulting to the chat_id itself."""
     thread_ids: dict[str, str] = context.bot_data.setdefault(THREAD_IDS_KEY, {})
     return thread_ids.get(chat_id, chat_id)
+
+
+def _pending_approvals(context: ContextTypes.DEFAULT_TYPE) -> dict[str, dict]:
+    """Return the mutable pending-approval map stored in bot_data."""
+    return context.bot_data.setdefault(PENDING_APPROVALS_KEY, {})
+
+
+def _pending_approval_text() -> str:
+    """Return the user-visible message for an unresolved safety review."""
+    return "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
+
+
+def _pending_approval_markup(pending_id: str) -> InlineKeyboardMarkup:
+    """Return Telegram inline buttons for safety approval."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Approve", callback_data=f"safety:approve:{pending_id}"),
+                InlineKeyboardButton("Deny", callback_data=f"safety:deny:{pending_id}"),
+            ]
+        ]
+    )
+
+
+def _parse_deny_reason(raw_text: str) -> str:
+    """Extract an optional reason from `/deny ...`."""
+    parts = (raw_text or "").split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 def _parse_skills_command(raw_text: str) -> tuple[str, str]:
@@ -366,6 +397,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
     thread_ids[chat_id] = new_thread
     save_thread_ids(thread_ids)
+    _pending_approvals(context).pop(chat_id, None)
     logger.info("New thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text(f"Started a new conversation thread.\nThread ID: {new_thread}")
 
@@ -380,9 +412,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
     text = (
         "Available commands:\n"
-        "/new \u2014 Start a fresh conversation thread\n"
-        "/clear \u2014 Clear conversation (alias for /new)\n"
-        "/retry \u2014 Re-send the last message\n"
+        "/new — Start a fresh conversation thread\n"
+        "/clear — Clear conversation (alias for /new)\n"
+        "/retry — Re-send the last message\n"
+        "/approve — Approve a pending safety-reviewed command\n"
+        "/deny [reason] — Reject a pending safety-reviewed command\n"
         "/model [name] — View or set the active model\n"
         "/skills [subcommand] — Browse/view/create/install/delete/audit local skills\n"
         "/memory — Show MEMORY.md\n"
@@ -501,6 +535,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     thread_ids[chat_id] = new_thread
     save_thread_ids(thread_ids)
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
+    _pending_approvals(context).pop(chat_id, None)
     logger.info("Cleared thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text("Conversation cleared.")
 
@@ -639,6 +674,9 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not last_text:
         await update.message.reply_text("No previous message to retry.")
         return
+    if _pending_approvals(context).get(chat_id):
+        await update.message.reply_text(_pending_approval_text())
+        return
     thread_id = get_thread_id(context, chat_id)
     incoming = IncomingMessage(
         text=last_text,
@@ -650,7 +688,136 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     channel = TelegramChannel(update, context)
     gateway: Gateway = context.bot_data[GATEWAY_KEY]
     try:
-        await gateway.handle_message(channel, incoming, thread_id)
+        pending = await gateway.handle_message(channel, incoming, thread_id)
+        if pending:
+            _pending_approvals(context)[chat_id] = pending
+        else:
+            _pending_approvals(context).pop(chat_id, None)
+    finally:
+        _STREAM_MESSAGES.pop(chat_id, None)
+
+
+async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /approve -- resume a pending safety-reviewed command."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    pending = _pending_approvals(context).get(chat_id)
+    if not pending:
+        await update.message.reply_text("No pending safety approval for this chat.")
+        return
+    channel = TelegramChannel(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
+    try:
+        next_pending = await gateway.resume_interrupt(
+            channel,
+            chat_id=chat_id,
+            thread_id=pending["thread_id"],
+            decision={"type": "approve"},
+        )
+        approvals = _pending_approvals(context)
+        if next_pending:
+            approvals[chat_id] = next_pending
+        else:
+            approvals.pop(chat_id, None)
+    finally:
+        _STREAM_MESSAGES.pop(chat_id, None)
+
+
+async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /deny [reason] -- reject a pending safety-reviewed command."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    pending = _pending_approvals(context).get(chat_id)
+    if not pending:
+        await update.message.reply_text("No pending safety approval for this chat.")
+        return
+    reason = _parse_deny_reason(update.message.text)
+    decision = {"type": "reject"}
+    if reason:
+        decision["message"] = reason
+    channel = TelegramChannel(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
+    try:
+        next_pending = await gateway.resume_interrupt(
+            channel,
+            chat_id=chat_id,
+            thread_id=pending["thread_id"],
+            decision=decision,
+        )
+        approvals = _pending_approvals(context)
+        if next_pending:
+            approvals[chat_id] = next_pending
+        else:
+            approvals.pop(chat_id, None)
+    finally:
+        _STREAM_MESSAGES.pop(chat_id, None)
+
+
+async def cmd_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline safety approval buttons."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        if query.message is not None:
+            with contextlib.suppress(Exception):
+                await query.message.reply_text(REJECTION_MESSAGE)
+        return
+    chat_id = str(update.effective_chat.id)
+    pending = _pending_approvals(context).get(chat_id)
+    if not pending:
+        if query.message is not None:
+            with contextlib.suppress(Exception):
+                await query.message.reply_text("No pending safety approval for this chat.")
+        return
+
+    parts = (query.data or "").split(":", maxsplit=2)
+    if len(parts) != 3:
+        return
+    _prefix, action, pending_id = parts
+    if pending.get("id") != pending_id:
+        if query.message is not None:
+            with contextlib.suppress(Exception):
+                await query.message.reply_text(
+                    "That approval button is stale. Please use the latest safety review prompt."
+                )
+        return
+
+    if action == "approve":
+        decision = {"type": "approve"}
+    elif action == "deny":
+        decision = {"type": "reject", "message": "Command rejected via inline deny button"}
+    else:
+        return
+
+    channel = TelegramChannel(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
+    try:
+        next_pending = await gateway.resume_interrupt(
+            channel,
+            chat_id=chat_id,
+            thread_id=pending["thread_id"],
+            decision=decision,
+        )
+        approvals = _pending_approvals(context)
+        if next_pending:
+            approvals[chat_id] = next_pending
+        else:
+            approvals.pop(chat_id, None)
+        if query.message is not None:
+            with contextlib.suppress(Exception):
+                await query.message.edit_reply_markup(reply_markup=None)
     finally:
         _STREAM_MESSAGES.pop(chat_id, None)
 
@@ -885,7 +1052,15 @@ class TelegramChannel(Channel):
 
     async def send(self, chat_id: str, text: str) -> str:
         """Send a text message via reply_text. Returns a string message_id."""
-        msg = await self._update.message.reply_text(text)
+        if self._update.message is not None:
+            msg = await self._update.message.reply_text(text)
+        elif (
+            self._update.callback_query is not None
+            and self._update.callback_query.message is not None
+        ):
+            msg = await self._update.callback_query.message.reply_text(text)
+        else:
+            raise RuntimeError("No Telegram message context available for send()")
         msg_id = str(msg.message_id)
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
@@ -928,6 +1103,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user_text:
         return
 
+    if _pending_approvals(context).get(chat_id):
+        await update.message.reply_text(_pending_approval_text())
+        return
+
     # Track last message per chat for /retry
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
 
@@ -943,7 +1122,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     gateway: Gateway = context.bot_data[GATEWAY_KEY]
 
     try:
-        await gateway.handle_message(channel, incoming, thread_id)
+        pending = await gateway.handle_message(channel, incoming, thread_id)
+        if pending:
+            _pending_approvals(context)[chat_id] = pending
+            await update.message.reply_text(
+                pending.get("message") or "Safety review required.",
+                reply_markup=_pending_approval_markup(pending["id"]),
+            )
+        else:
+            _pending_approvals(context).pop(chat_id, None)
     finally:
         # Clean up stored message objects for this chat
         _STREAM_MESSAGES.pop(chat_id, None)
@@ -1017,6 +1204,8 @@ async def post_init(application: Application) -> None:
             BotCommand("new", "Start a fresh conversation thread"),
             BotCommand("clear", "Clear conversation (alias for /new)"),
             BotCommand("retry", "Re-send the last message"),
+            BotCommand("approve", "Approve a pending safety-reviewed command"),
+            BotCommand("deny", "Reject a pending safety-reviewed command"),
             BotCommand("model", "View or set the active model"),
             BotCommand("skills", "Browse or manage local skills"),
             BotCommand("memory", "Show MEMORY.md"),
@@ -1073,6 +1262,8 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("clear", cmd_clear))
     application.add_handler(CommandHandler("retry", cmd_retry))
+    application.add_handler(CommandHandler("approve", cmd_approve))
+    application.add_handler(CommandHandler("deny", cmd_deny))
     application.add_handler(CommandHandler("model", cmd_model))
     application.add_handler(CommandHandler("skills", cmd_skills))
     application.add_handler(CommandHandler("memory", cmd_memory))
@@ -1086,6 +1277,7 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("cron_rm", cmd_cron_rm))
     application.add_handler(CommandHandler("safety_test", cmd_safety_test))
     application.add_handler(CommandHandler("doctor", cmd_doctor))
+    application.add_handler(CallbackQueryHandler(cmd_approval_callback, pattern=r"^safety:"))
     application.add_handler(
         MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message)
     )
