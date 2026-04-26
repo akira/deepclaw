@@ -128,9 +128,42 @@ class TestChunkMessage:
 
 
 class TestGetThreadId:
-    def test_default_returns_chat_id(self):
+    def test_missing_mapping_generates_and_persists_uuid(self, monkeypatch):
         ctx = _make_context()
-        assert get_thread_id(ctx, "12345") == "12345"
+        saved: dict[str, str] = {}
+
+        def _save(thread_ids):
+            saved.update(thread_ids)
+
+        monkeypatch.setattr(
+            "deepclaw.channels.telegram.save_thread_ids",
+            _save,
+        )
+        monkeypatch.setattr("deepclaw.channels.telegram.uuid.uuid4", lambda: "generated-uuid")
+
+        thread_id = get_thread_id(ctx, "12345")
+
+        assert thread_id == "generated-uuid"
+        assert ctx.bot_data[THREAD_IDS_KEY]["12345"] == "generated-uuid"
+        assert saved == {"12345": "generated-uuid"}
+
+    def test_missing_mapping_logs_warning(self, monkeypatch):
+        ctx = _make_context()
+        monkeypatch.setattr("deepclaw.channels.telegram.save_thread_ids", lambda _thread_ids: None)
+        monkeypatch.setattr("deepclaw.channels.telegram.uuid.uuid4", lambda: "generated-uuid")
+        warnings: list[str] = []
+
+        def _capture(message, *args, **_kwargs):
+            warnings.append(message % args if args else message)
+
+        monkeypatch.setattr("deepclaw.channels.telegram.logger.warning", _capture)
+
+        thread_id = get_thread_id(ctx, "12345")
+
+        assert thread_id == "generated-uuid"
+        assert warnings == [
+            "Missing thread ID mapping for chat 12345; generated replacement thread generated-uuid"
+        ]
 
     def test_returns_custom_thread_id(self):
         custom_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -139,7 +172,7 @@ class TestGetThreadId:
 
     def test_other_chat_unaffected(self):
         ctx = _make_context(thread_ids={"12345": "custom-id"})
-        assert get_thread_id(ctx, "99999") == "99999"
+        assert get_thread_id(ctx, "12345") == "custom-id"
 
 
 # ---------------------------------------------------------------------------
@@ -299,13 +332,15 @@ class _FakeStreamingAgent:
         self._chunks = chunks
         self._interrupts = interrupts
         self.astream_calls = []
+        self.aget_state_calls = []
 
     async def astream(self, *args, **kwargs):
         self.astream_calls.append((args, kwargs))
         for chunk in self._chunks:
             yield chunk
 
-    async def aget_state(self, _config):
+    async def aget_state(self, config):
+        self.aget_state_calls.append(config)
         return SimpleNamespace(interrupts=self._interrupts)
 
 
@@ -399,6 +434,22 @@ class TestGatewayRedaction:
             "warning": "Inline Python execution",
             "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
         }
+        assert agent.astream_calls[0][1]["config"] == {
+            "configurable": {"thread_id": "thread-1"},
+            "metadata": {
+                "active_thread_id": "thread-1",
+                "chat_id": "123",
+                "channel": "telegram",
+            },
+        }
+        assert agent.aget_state_calls[0] == {
+            "configurable": {"thread_id": "thread-1"},
+            "metadata": {
+                "active_thread_id": "thread-1",
+                "chat_id": "123",
+                "channel": "telegram",
+            },
+        }
         assert channel.edits[-1][2].endswith(
             "Use /approve to continue or /deny <reason> to reject."
         )
@@ -422,7 +473,14 @@ class TestGatewayRedaction:
         assert pending is None
         args, kwargs = agent.astream_calls[0]
         assert args[0].resume == {"type": "approve"}
-        assert kwargs["config"] == {"configurable": {"thread_id": "thread-1"}}
+        assert kwargs["config"] == {
+            "configurable": {"thread_id": "thread-1"},
+            "metadata": {
+                "active_thread_id": "thread-1",
+                "chat_id": "123",
+                "channel": "telegram",
+            },
+        }
         assert channel.edits[-1][2] == "Approved and ran."
 
 
@@ -820,7 +878,8 @@ class TestTelegramMediaHandleMessage:
 
         gateway.handle_message.assert_awaited_once()
         _channel, incoming, thread_id = gateway.handle_message.await_args.args
-        assert thread_id == "1"
+        assert thread_id == ctx.bot_data[THREAD_IDS_KEY]["1"]
+        assert thread_id != "1"
         assert incoming.chat_id == "1"
         assert incoming.source == "telegram"
         assert "Please inspect this" in incoming.text

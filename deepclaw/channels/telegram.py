@@ -169,9 +169,21 @@ def authorize_chat(update: Update) -> bool:
 
 
 def get_thread_id(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
-    """Return the current thread_id for a chat, defaulting to the chat_id itself."""
+    """Return the current thread_id for a chat, auto-healing missing mappings."""
     thread_ids: dict[str, str] = context.bot_data.setdefault(THREAD_IDS_KEY, {})
-    return thread_ids.get(chat_id, chat_id)
+    thread_id = thread_ids.get(chat_id)
+    if thread_id:
+        return thread_id
+
+    thread_id = str(uuid.uuid4())
+    thread_ids[chat_id] = thread_id
+    save_thread_ids(thread_ids)
+    logger.warning(
+        "Missing thread ID mapping for chat %s; generated replacement thread %s",
+        chat_id,
+        thread_id,
+    )
+    return thread_id
 
 
 def _pending_approvals(context: ContextTypes.DEFAULT_TYPE) -> dict[str, dict]:
