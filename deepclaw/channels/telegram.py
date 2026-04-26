@@ -323,6 +323,7 @@ def _format_skills_audit(results: dict) -> str:
         f"- skills checked: {results.get('count', 0)}",
         f"- duplicate descriptions: {results.get('duplicate_descriptions_count', 0)}",
         f"- missing required sections: {results.get('skills_missing_required_sections_count', 0)}",
+        f"- missing env declarations: {results.get('skills_missing_required_env_declarations_count', 0)}",
     ]
     duplicate_descriptions = results.get("duplicate_descriptions", [])
     if duplicate_descriptions:
@@ -333,6 +334,15 @@ def _format_skills_audit(results: dict) -> str:
         first_missing = missing[0]
         lines.append(
             f"- first missing-sections skill: {first_missing['name']} ({', '.join(first_missing['missing_sections'])})"
+        )
+    missing_env = [
+        entry for entry in results.get("skills", []) if entry.get("undeclared_required_env_vars")
+    ]
+    if missing_env:
+        first_env = missing_env[0]
+        lines.append(
+            "- first missing-env skill: "
+            f"{first_env['name']} ({', '.join(first_env['undeclared_required_env_vars'])})"
         )
     return "\n".join(lines)
 
@@ -493,6 +503,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/soul — Show SOUL.md\n"
         "/uptime — Show bot uptime\n"
         "/status — Show current thread ID and model info\n"
+        "/queue — Show active task state and recent tool activity\n"
         "/context — Show full context breakdown and token estimates\n"
         "/safety_test <cmd> — Check a command for dangerous patterns\n"
         "/cron — List scheduled jobs\n"
@@ -525,6 +536,77 @@ def _status_header(
     return header, thread_id, config
 
 
+def _format_elapsed(seconds: float | None) -> str:
+    """Format a small elapsed-time string for /queue."""
+    if seconds is None:
+        return "unknown"
+    total = max(int(seconds), 0)
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _build_queue_report(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gateway: Gateway) -> str:
+    """Build a user-facing /queue report for the current chat."""
+    active_run = _get_active_run(context, chat_id)
+    pending = _pending_approvals(context).get(chat_id)
+    snapshot = (
+        gateway.get_queue_snapshot(chat_id) if hasattr(gateway, "get_queue_snapshot") else None
+    )
+    lines = ["📋 Queue"]
+
+    if snapshot is None and active_run is None and pending is None:
+        lines.append("- State: idle")
+        lines.append("- No active task or recent tool activity for this chat.")
+        return "\n".join(lines)
+
+    status = "running" if active_run is not None else "idle"
+    if snapshot and snapshot.get("status"):
+        status = str(snapshot["status"])
+    lines.append(f"- State: {status}")
+    lines.append(f"- Active run: {'yes' if active_run is not None else 'no'}")
+
+    if snapshot:
+        request_preview = snapshot.get("user_text_preview")
+        if request_preview:
+            lines.append(f"- Request: {request_preview}")
+        started_at = snapshot.get("started_at")
+        updated_at = snapshot.get("updated_at")
+        if isinstance(started_at, (int, float)):
+            lines.append(f"- Started: {_format_elapsed(time.time() - started_at)} ago")
+        if isinstance(updated_at, (int, float)):
+            lines.append(f"- Updated: {_format_elapsed(time.time() - updated_at)} ago")
+
+        progress_lines = snapshot.get("progress_lines") or []
+        if progress_lines:
+            lines.append("")
+            lines.append("Recent tool activity:")
+            lines.extend(progress_lines)
+
+        final_preview = snapshot.get("final_text_preview")
+        if final_preview and active_run is None:
+            lines.append("")
+            lines.append(f"Last response: {final_preview}")
+
+    approval = pending or (snapshot.get("pending_approval") if snapshot else None)
+    if approval:
+        lines.append("")
+        lines.append("Pending approval:")
+        if approval.get("tool"):
+            lines.append(f"- Tool: {approval['tool']}")
+        if approval.get("warning"):
+            lines.append(f"- Warning: {approval['warning']}")
+        if approval.get("command"):
+            lines.append(f"- Command: {approval['command']}")
+        lines.append("- Action: /approve to continue or /deny <reason> to reject")
+
+    return "\n".join(lines)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status -- show the current thread and active model."""
     if not authorize_chat(update):
@@ -547,6 +629,23 @@ async def cmd_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     header, thread_id, config = _status_header(update, context)
     report = build_context_report(config, thread_id)
+    text = f"{header}\n\n{report}"
+    for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+        await update.message.reply_text(chunk)
+
+
+async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /queue -- show active-task and recent tool progress for the current chat."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+
+    header, _thread_id, _config = _status_header(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
+    chat_id = str(update.effective_chat.id)
+    report = _build_queue_report(context, chat_id, gateway)
     text = f"{header}\n\n{report}"
     for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
         await update.message.reply_text(chunk)
@@ -1139,7 +1238,15 @@ class TelegramBotChannel(Channel):
             try:
                 await msg.edit_text(text)
             except BadRequest as exc:
-                if "Message is not modified" not in str(exc):
+                error_text = str(exc)
+                logger.warning(
+                    "Telegram bot-channel edit_message failed for chat %s msg %s: %s | text=%r",
+                    chat_id,
+                    message_id,
+                    error_text,
+                    text[:300],
+                )
+                if "Message is not modified" not in error_text:
                     raise
         else:
             try:
@@ -1207,7 +1314,15 @@ class TelegramChannel(Channel):
         try:
             await msg.edit_text(text)
         except BadRequest as exc:
-            if "Message is not modified" not in str(exc):
+            error_text = str(exc)
+            logger.warning(
+                "Telegram edit_message failed for chat %s msg %s: %s | text=%r",
+                chat_id,
+                message_id,
+                error_text,
+                text[:300],
+            )
+            if "Message is not modified" not in error_text:
                 raise
 
     async def send_typing(self, chat_id: str) -> None:
@@ -1354,6 +1469,7 @@ async def post_init(application: Application) -> None:
             BotCommand("soul", "Show SOUL.md"),
             BotCommand("uptime", "Show bot uptime"),
             BotCommand("status", "Show thread ID and model info"),
+            BotCommand("queue", "Show active task and recent tool activity"),
             BotCommand("context", "Show full context breakdown"),
             BotCommand("cron", "List scheduled jobs"),
             BotCommand("cron_add", "Add a scheduled job"),
@@ -1415,6 +1531,7 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("uptime", cmd_uptime))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("queue", cmd_queue))
     application.add_handler(CommandHandler("context", cmd_context))
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("cron", cmd_cron))
