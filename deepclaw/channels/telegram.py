@@ -36,6 +36,8 @@ from deepclaw.auth import (
     save_thread_ids,
 )
 from deepclaw.channels.base import Channel, IncomingMessage
+from deepclaw.config import DeepClawConfig
+from deepclaw.context_report import build_context_report
 from deepclaw.gateway import Gateway, chunk_message
 from deepclaw.heartbeat import HeartbeatRunner
 from deepclaw.safety import check_command, format_warning
@@ -488,11 +490,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/skills [subcommand] — Browse/view/create/install/delete/audit local skills\n"
         "/memory — Show MEMORY.md\n"
         "/soul — Show SOUL.md\n"
-        "/uptime \u2014 Show bot uptime\n"
-        "/status \u2014 Show current thread ID and model info\n"
-        "/safety_test <cmd> \u2014 Check a command for dangerous patterns\n"
-        "/cron \u2014 List scheduled jobs\n"
-        "/cron_add <expr> | <prompt> \u2014 Add a scheduled job\n"
+        "/uptime — Show bot uptime\n"
+        "/status — Show current thread ID and model info\n"
+        "/context — Show full context breakdown and token estimates\n"
+        "/safety_test <cmd> — Check a command for dangerous patterns\n"
+        "/cron — List scheduled jobs\n"
+        "/cron_add <expr> | <prompt> — Add a scheduled job\n"
         "/cron_rm <id_prefix> \u2014 Remove a scheduled job\n"
         "/doctor \u2014 Run system diagnostics\n"
         "/help \u2014 Show this help message"
@@ -501,24 +504,51 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text)
 
 
+def _status_header(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[str, str, DeepClawConfig]:
+    """Build the common status header and return (header, thread_id, config)."""
+    chat_id = str(update.effective_chat.id)
+    thread_id = get_thread_id(context, chat_id)
+    config = context.bot_data[CONFIG_KEY]
+    allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
+    allowlist_status = (
+        f"active ({len(allowed_users)} users)" if allowed_users else "inactive (open mode)"
+    )
+    header = (
+        f"Chat ID: {chat_id}\n"
+        f"Thread ID: {thread_id}\n"
+        f"Model: {config.model or 'not set'}\n"
+        f"Allowlist: {allowlist_status}"
+    )
+    return header, thread_id, config
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status -- show current thread ID and model info."""
+    """Handle /status -- show the current thread and active model."""
     if not authorize_chat(update):
         return
     if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
         await update.message.reply_text(REJECTION_MESSAGE)
         return
-    chat_id = str(update.effective_chat.id)
-    thread_id = get_thread_id(context, chat_id)
-    model = context.bot_data[CONFIG_KEY].model or "not set"
-    allowed_users = context.bot_data.get(ALLOWED_USERS_KEY, set())
-    allowlist_status = (
-        f"active ({len(allowed_users)} users)" if allowed_users else "inactive (open mode)"
-    )
-    text = (
-        f"Chat ID: {chat_id}\nThread ID: {thread_id}\nModel: {model}\nAllowlist: {allowlist_status}"
-    )
-    await update.message.reply_text(text)
+
+    header, _thread_id, _config = _status_header(update, context)
+    await update.message.reply_text(header)
+
+
+async def cmd_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /context -- show a full context breakdown for the current thread."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+
+    header, thread_id, config = _status_header(update, context)
+    report = build_context_report(config, thread_id)
+    text = f"{header}\n\n{report}"
+    for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+        await update.message.reply_text(chunk)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1311,6 +1341,7 @@ async def post_init(application: Application) -> None:
             BotCommand("soul", "Show SOUL.md"),
             BotCommand("uptime", "Show bot uptime"),
             BotCommand("status", "Show thread ID and model info"),
+            BotCommand("context", "Show full context breakdown"),
             BotCommand("cron", "List scheduled jobs"),
             BotCommand("cron_add", "Add a scheduled job"),
             BotCommand("cron_rm", "Remove a scheduled job"),
@@ -1371,6 +1402,7 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("uptime", cmd_uptime))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("context", cmd_context))
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("cron", cmd_cron))
     application.add_handler(CommandHandler("cron_add", cmd_cron_add))
