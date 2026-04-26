@@ -187,6 +187,12 @@ DANGEROUS_PATTERNS: list[DangerousPattern] = [
         severity="warning",
     ),
     DangerousPattern(
+        pattern=re.compile(r"\bpython(?:3)?\s+-?\s*<<"),
+        category=CATEGORY_CODE_INJECTION,
+        description="Inline Python heredoc execution (python <<EOF)",
+        severity="warning",
+    ),
+    DangerousPattern(
         pattern=re.compile(r"\bbash\s+-c\b"),
         category=CATEGORY_CODE_INJECTION,
         description="Inline bash execution (bash -c)",

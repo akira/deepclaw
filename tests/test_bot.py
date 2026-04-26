@@ -1325,6 +1325,40 @@ class TestSafetyApprovalCommands:
         update.message.reply_text.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_approve_run_can_be_stopped_while_resume_interrupt_is_in_flight(self):
+        approve_update = _make_slash_update(text="/approve")
+        stop_update = _make_slash_update(text="/stop")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        blocker = asyncio.Event()
+
+        async def _resume_interrupt(*_args, **_kwargs):
+            await blocker.wait()
+
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(side_effect=_resume_interrupt)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        approve_task = asyncio.create_task(cmd_approve(approve_update, ctx))
+        await asyncio.sleep(0)
+
+        assert ctx.bot_data[ACTIVE_RUNS_KEY]["1"] is approve_task
+
+        await cmd_stop(stop_update, ctx)
+        await approve_task
+
+        assert approve_task.done()
+        assert not approve_task.cancelled()
+        assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
+        stop_update.message.reply_text.assert_called_once_with("Stopped the current task.")
+
+    @pytest.mark.asyncio
     async def test_deny_resumes_pending_interrupt_with_reason(self):
         update = _make_slash_update(text="/deny too risky")
         pending = {
@@ -1414,6 +1448,42 @@ class TestSafetyApprovalCommands:
         update.callback_query.message.reply_text.assert_awaited_once_with(
             "That approval button is stale. Please use the latest safety review prompt."
         )
+
+    @pytest.mark.asyncio
+    async def test_callback_keeps_buttons_when_another_active_run_blocks_resume(self):
+        update = _make_callback_update(data="safety:approve:interrupt-1")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        blocker = asyncio.create_task(asyncio.sleep(60))
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(
+            extra={
+                PENDING_APPROVALS_KEY: pending,
+                GATEWAY_KEY: gateway,
+                ACTIVE_RUNS_KEY: {"1": blocker},
+            }
+        )
+
+        try:
+            await cmd_approval_callback(update, ctx)
+        finally:
+            blocker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await blocker
+
+        gateway.resume_interrupt.assert_not_awaited()
+        update.callback_query.message.reply_text.assert_awaited_once_with(
+            "A task is already running. Use /stop to interrupt it before sending something new."
+        )
+        update.callback_query.message.edit_reply_markup.assert_not_awaited()
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == pending
 
     @pytest.mark.asyncio
     async def test_handle_message_stores_pending_safety_review(self):
