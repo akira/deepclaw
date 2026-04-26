@@ -4,6 +4,7 @@ This directory contains reusable LangSmith evaluation helpers for DeepClaw.
 
 ## Files
 - `langsmith_regression.py` — run baseline vs current-code experiments against an existing LangSmith dataset
+- `langsmith_pairwise.py` — run two source experiments and compare them head-to-head with a pairwise evaluator
 - `worker_run_case.py` — execute a single eval case against a specific repo checkout and print JSON for the harness
 
 ## Typical workflow
@@ -20,6 +21,19 @@ Use the `deepclaw` dataset as the source of truth. Add or edit examples there di
   --baseline-worktree /tmp/deepclaw-eval-baseline \
   --results-path /tmp/deepclaw-evals/results.json
 ```
+
+### 3. Run pairwise comparison between two models
+```bash
+/home/ubuntu/deepclaw/.venv/bin/python evals/langsmith_pairwise.py \
+  --dataset deepclaw \
+  --repo /home/ubuntu/deepclaw \
+  --model-a anthropic:claude-haiku-4-5 \
+  --model-b openai:gpt-4o-mini \
+  --example-limit 5 \
+  --results-path /tmp/deepclaw-evals/pairwise-results.json
+```
+
+For quick smoke tests, prefer `--example-limit 2` or a couple of `--example-id` flags before scaling up to the full dataset.
 
 ## Dataset contract
 The dataset examples are the evaluation contract. At minimum, examples should include:
@@ -42,3 +56,7 @@ The current regression harness uses four metrics:
 - The dataset examples are the evaluation contract; this harness intentionally assumes the dataset already exists in LangSmith.
 - The script intentionally supports older baseline checkouts that may not have newer gateway helper functions.
 - Results are written to a local JSON file so the repo stays clean.
+- Pairwise evaluation compares **two existing source experiments**. The pairwise result is easiest to inspect via the LangSmith compare URL that includes both `selectedSessions` and `comparativeExperiment`.
+- If local LangSmith uploads fail because an inherited CA bundle path is invalid, prefer running with:
+  - `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
+  - `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`
