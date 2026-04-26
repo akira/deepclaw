@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
@@ -818,6 +819,45 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Stopped the current task.")
 
 
+async def _resume_pending_interrupt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: str,
+    pending: dict[str, Any],
+    decision: dict[str, Any],
+) -> bool:
+    """Resume a pending interrupt while tracking it as the chat's active run."""
+    if not _begin_active_run(context, chat_id):
+        if update.message is not None:
+            await update.message.reply_text(_active_run_text())
+        elif update.callback_query and update.callback_query.message is not None:
+            await update.callback_query.message.reply_text(_active_run_text())
+        return False
+
+    channel = TelegramChannel(update, context)
+    gateway: Gateway = context.bot_data[GATEWAY_KEY]
+    try:
+        next_pending = await gateway.resume_interrupt(
+            channel,
+            chat_id=chat_id,
+            thread_id=pending["thread_id"],
+            decision=decision,
+        )
+        approvals = _pending_approvals(context)
+        if next_pending:
+            approvals[chat_id] = next_pending
+        else:
+            approvals.pop(chat_id, None)
+    except asyncio.CancelledError:
+        logger.info("Cancelled resumed interrupt for chat %s", chat_id)
+        return False
+    finally:
+        _finish_active_run(context, chat_id)
+        _STREAM_MESSAGES.pop(chat_id, None)
+    return True
+
+
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /approve -- resume a pending safety-reviewed command."""
     if not authorize_chat(update):
@@ -830,22 +870,13 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not pending:
         await update.message.reply_text("No pending safety approval for this chat.")
         return
-    channel = TelegramChannel(update, context)
-    gateway: Gateway = context.bot_data[GATEWAY_KEY]
-    try:
-        next_pending = await gateway.resume_interrupt(
-            channel,
-            chat_id=chat_id,
-            thread_id=pending["thread_id"],
-            decision={"type": "approve"},
-        )
-        approvals = _pending_approvals(context)
-        if next_pending:
-            approvals[chat_id] = next_pending
-        else:
-            approvals.pop(chat_id, None)
-    finally:
-        _STREAM_MESSAGES.pop(chat_id, None)
+    await _resume_pending_interrupt(
+        update,
+        context,
+        chat_id=chat_id,
+        pending=pending,
+        decision={"type": "approve"},
+    )
 
 
 async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -864,22 +895,13 @@ async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     decision = {"type": "reject"}
     if reason:
         decision["message"] = reason
-    channel = TelegramChannel(update, context)
-    gateway: Gateway = context.bot_data[GATEWAY_KEY]
-    try:
-        next_pending = await gateway.resume_interrupt(
-            channel,
-            chat_id=chat_id,
-            thread_id=pending["thread_id"],
-            decision=decision,
-        )
-        approvals = _pending_approvals(context)
-        if next_pending:
-            approvals[chat_id] = next_pending
-        else:
-            approvals.pop(chat_id, None)
-    finally:
-        _STREAM_MESSAGES.pop(chat_id, None)
+    await _resume_pending_interrupt(
+        update,
+        context,
+        chat_id=chat_id,
+        pending=pending,
+        decision=decision,
+    )
 
 
 async def cmd_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -916,31 +938,22 @@ async def cmd_approval_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if action == "approve":
-        decision = {"type": "approve"}
+        decision: dict[str, Any] = {"type": "approve"}
     elif action == "deny":
         decision = {"type": "reject", "message": "Command rejected via inline deny button"}
     else:
         return
 
-    channel = TelegramChannel(update, context)
-    gateway: Gateway = context.bot_data[GATEWAY_KEY]
-    try:
-        next_pending = await gateway.resume_interrupt(
-            channel,
-            chat_id=chat_id,
-            thread_id=pending["thread_id"],
-            decision=decision,
-        )
-        approvals = _pending_approvals(context)
-        if next_pending:
-            approvals[chat_id] = next_pending
-        else:
-            approvals.pop(chat_id, None)
-        if query.message is not None:
-            with contextlib.suppress(Exception):
-                await query.message.edit_reply_markup(reply_markup=None)
-    finally:
-        _STREAM_MESSAGES.pop(chat_id, None)
+    resumed = await _resume_pending_interrupt(
+        update,
+        context,
+        chat_id=chat_id,
+        pending=pending,
+        decision=decision,
+    )
+    if resumed and query.message is not None:
+        with contextlib.suppress(Exception):
+            await query.message.edit_reply_markup(reply_markup=None)
 
 
 async def cmd_uptime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1392,9 +1405,9 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("clear", cmd_clear))
     application.add_handler(CommandHandler("retry", cmd_retry, block=False))
-    application.add_handler(CommandHandler("stop", cmd_stop))
-    application.add_handler(CommandHandler("approve", cmd_approve))
-    application.add_handler(CommandHandler("deny", cmd_deny))
+    application.add_handler(CommandHandler("stop", cmd_stop, block=False))
+    application.add_handler(CommandHandler("approve", cmd_approve, block=False))
+    application.add_handler(CommandHandler("deny", cmd_deny, block=False))
     application.add_handler(CommandHandler("model", cmd_model))
     application.add_handler(CommandHandler("skills", cmd_skills))
     application.add_handler(CommandHandler("memory", cmd_memory))
@@ -1409,7 +1422,9 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("cron_rm", cmd_cron_rm))
     application.add_handler(CommandHandler("safety_test", cmd_safety_test))
     application.add_handler(CommandHandler("doctor", cmd_doctor))
-    application.add_handler(CallbackQueryHandler(cmd_approval_callback, pattern=r"^safety:"))
+    application.add_handler(
+        CallbackQueryHandler(cmd_approval_callback, pattern=r"^safety:", block=False)
+    )
     application.add_handler(
         MessageHandler(
             (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message, block=False

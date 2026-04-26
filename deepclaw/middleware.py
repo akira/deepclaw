@@ -8,7 +8,8 @@ Intercepts tool calls to enforce safety policies:
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from langchain_core.messages import ToolMessage
@@ -23,6 +24,11 @@ from deepclaw.safety import (
 )
 
 logger = logging.getLogger(__name__)
+
+_USER_INTENT_BASH_RE = re.compile(
+    r"\b(run|execute)\b.*\bbash\b|\bbash\b.*\b(run|execute)\b", re.IGNORECASE
+)
+_USER_INTENT_INLINE_PYTHON_RE = re.compile(r"\bpython(?:3)?\s+-c\b", re.IGNORECASE)
 
 # Tool names from DeepAgents that we intercept
 _EXECUTE_TOOL = "execute"
@@ -54,7 +60,51 @@ def _blocked_tool_message(tool_call: dict, reason: str) -> ToolMessage:
     )
 
 
-def _check_execute(tool_call: dict) -> ToolMessage | None:
+def _extract_last_user_text(state: Mapping[str, Any] | None) -> str:
+    """Best-effort extraction of the most recent user message text from request state."""
+    if not state:
+        return ""
+
+    messages = state.get("messages")
+    if not isinstance(messages, list | tuple):
+        return ""
+
+    for message in reversed(messages):
+        if isinstance(message, Mapping):
+            role = str(message.get("role", "")).lower()
+            if role != "user":
+                continue
+            content = message.get("content", "")
+            return content if isinstance(content, str) else str(content)
+
+        msg_type = str(getattr(message, "type", "")).lower()
+        if msg_type not in {"human", "user"}:
+            continue
+
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            return content
+        return str(content)
+
+    return ""
+
+
+def _user_intent_requires_review(state: Mapping[str, Any] | None) -> str | None:
+    """Return a warning reason when the user's request explicitly asks for risky inline execution."""
+    user_text = _extract_last_user_text(state)
+    if not user_text:
+        return None
+
+    if _USER_INTENT_INLINE_PYTHON_RE.search(user_text):
+        return "User explicitly requested inline Python execution (`python -c`)"
+
+    if _USER_INTENT_BASH_RE.search(user_text):
+        return "User explicitly requested bash execution"
+
+    return None
+
+
+def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> ToolMessage | None:
     """Check a shell command for dangerous patterns.
 
     Returns a ToolMessage if the command should be blocked, None otherwise.
@@ -66,10 +116,11 @@ def _check_execute(tool_call: dict) -> ToolMessage | None:
         return None
 
     matches = check_command(command)
-    if not matches:
+    intent_warning = _user_intent_requires_review(state)
+    if not matches and not intent_warning:
         return None
 
-    warning_text = format_warning(command, matches)
+    warning_text = format_warning(command, matches) if matches else intent_warning
     has_critical = any(m.severity == "critical" for m in matches)
 
     if has_critical:
@@ -163,7 +214,7 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             # --- Pre-execution safety gates ---
 
             if tool_name == _EXECUTE_TOOL:
-                blocked = _check_execute(tool_call)
+                blocked = _check_execute(tool_call, getattr(request, "state", None))
                 if blocked is not None:
                     return blocked
 

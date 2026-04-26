@@ -10,6 +10,8 @@ from deepclaw.middleware import (
     _check_execute,
     _check_url,
     _check_write_path,
+    _extract_last_user_text,
+    _user_intent_requires_review,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,6 +50,21 @@ class TestCheckExecute:
         tc = _make_tool_call("execute", {"command": "ls -la"})
         assert _check_execute(tc) is None
 
+    def test_extract_last_user_text_from_state(self):
+        state = {
+            "messages": [
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "run bash sleep 60"},
+            ]
+        }
+        assert _extract_last_user_text(state) == "run bash sleep 60"
+
+    def test_user_intent_review_reason_detected_for_inline_python(self):
+        state = {"messages": [{"role": "user", "content": 'can you run python -c "print(1)"'}]}
+        assert _user_intent_requires_review(state) == (
+            "User explicitly requested inline Python execution (`python -c`)"
+        )
+
     def test_critical_command_blocked(self):
         tc = _make_tool_call("execute", {"command": "rm -rf /"})
         result = _check_execute(tc)
@@ -80,6 +97,28 @@ class TestCheckExecute:
     def test_empty_command_returns_none(self):
         tc = _make_tool_call("execute", {"command": ""})
         assert _check_execute(tc) is None
+
+    @patch("deepclaw.middleware.interrupt")
+    def test_python_heredoc_triggers_interrupt(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "reject", "message": "No inline python"}
+        tc = _make_tool_call("execute", {"command": "python3 - <<'PY'\nprint('hello')\nPY"})
+        result = _check_execute(tc)
+        assert result is not None
+        assert result.status == "error"
+        mock_interrupt.assert_called_once()
+
+    @patch("deepclaw.middleware.interrupt")
+    def test_user_requested_bash_intent_triggers_interrupt_even_when_command_is_rewritten(
+        self, mock_interrupt
+    ):
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval for bash"}
+        tc = _make_tool_call("execute", {"command": "sleep 60 && echo SLEPT_60"})
+        state = {"messages": [{"role": "user", "content": "run bash sleep 60"}]}
+        result = _check_execute(tc, state)
+        assert result is not None
+        assert result.status == "error"
+        assert "Need approval for bash" in result.content
+        mock_interrupt.assert_called_once()
 
     def test_missing_command_arg_returns_none(self):
         tc = _make_tool_call("execute", {})
@@ -203,10 +242,13 @@ class TestSafetyMiddlewareIntegration:
             pytest.skip("langchain middleware types not available")
         return SafetyMiddleware()
 
-    def _make_request(self, name: str, args: dict, call_id: str = "call_1"):
+    def _make_request(
+        self, name: str, args: dict, call_id: str = "call_1", state: dict | None = None
+    ):
         """Create a mock ToolCallRequest."""
         request = MagicMock()
         request.tool_call = _make_tool_call(name, args, call_id)
+        request.state = state or {}
         return request
 
     @pytest.mark.asyncio
@@ -218,6 +260,26 @@ class TestSafetyMiddlewareIntegration:
         result = await middleware.awrap_tool_call(request, handler)
         handler.assert_awaited_once_with(request)
         assert result == expected
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.middleware.interrupt")
+    async def test_execute_interrupts_on_user_bash_intent_even_if_command_is_safe(
+        self, mock_interrupt, middleware
+    ):
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval"}
+        request = self._make_request(
+            "execute",
+            {"command": "sleep 60 && echo SLEPT_60"},
+            state={"messages": [{"role": "user", "content": "run bash sleep 60"}]},
+        )
+        handler = AsyncMock()
+
+        result = await middleware.awrap_tool_call(request, handler)
+
+        handler.assert_not_awaited()
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "Need approval" in result.content
 
     @pytest.mark.asyncio
     async def test_critical_execute_blocked_without_calling_handler(self, middleware):
