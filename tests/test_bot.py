@@ -34,12 +34,14 @@ from deepclaw.channels.telegram import (
     cmd_approval_callback,
     cmd_approve,
     cmd_clear,
+    cmd_context,
     cmd_deny,
     cmd_memory,
     cmd_model,
     cmd_retry,
     cmd_skills,
     cmd_soul,
+    cmd_status,
     cmd_stop,
     cmd_uptime,
     get_thread_id,
@@ -1112,6 +1114,49 @@ class TestCmdSoul:
             await cmd_soul(update, ctx)
         update.message.reply_text.assert_called_once()
         assert "genuinely helpful" in update.message.reply_text.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# /status
+# ---------------------------------------------------------------------------
+
+
+class TestCmdStatus:
+    @pytest.mark.asyncio
+    async def test_status_shows_thread_and_model(self):
+        update = _make_slash_update(text="/status")
+        ctx = _make_slash_context(model="openai:gpt-5")
+
+        await cmd_status(update, ctx)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "Chat ID: 1" in text
+        assert "Thread ID:" in text
+        assert "Model: openai:gpt-5" in text
+        assert "Allowlist:" in text
+        assert "🧠 Context breakdown" not in text
+
+
+class TestCmdContext:
+    @pytest.mark.asyncio
+    async def test_context_includes_context_breakdown(self):
+        update = _make_slash_update(text="/context")
+        ctx = _make_slash_context(model="openai:gpt-5")
+
+        with patch(
+            "deepclaw.channels.telegram.build_context_report",
+            return_value="🧠 Context breakdown\nEstimated active context subtotal: 123 chars (~45 tok)",
+        ):
+            await cmd_context(update, ctx)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "Chat ID: 1" in text
+        assert "Thread ID:" in text
+        assert "Model: openai:gpt-5" in text
+        assert "🧠 Context breakdown" in text
+        assert "Estimated active context subtotal" in text
 
 
 # ---------------------------------------------------------------------------
