@@ -11,6 +11,7 @@ import mimetypes
 import time
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,12 @@ from deepclaw.scheduler import (
     load_jobs,
     parse_cron_add,
     remove_job,
+)
+from deepclaw.sessions import (
+    find_similar_sessions_for_chat,
+    get_most_recent_session_for_chat,
+    list_sessions_for_chat,
+    session_belongs_to_chat,
 )
 from deepclaw.tools.skills import (
     skill_create,
@@ -504,6 +511,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/uptime — Show bot uptime\n"
         "/status — Show current thread ID and model info\n"
         "/queue — Show active task state and recent tool activity\n"
+        "/sessions — List recent saved sessions for this chat\n"
+        "/resume [thread_id] — Resume the most recent or specified session\n"
         "/context — Show full context breakdown and token estimates\n"
         "/safety_test <cmd> — Check a command for dangerous patterns\n"
         "/cron — List scheduled jobs\n"
@@ -609,6 +618,62 @@ def _build_queue_report(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gatewa
     return redact_secrets("\n".join(lines))
 
 
+def _format_relative_time(iso_timestamp: str | None) -> str:
+    """Format an ISO timestamp as relative time for Telegram output."""
+    if not iso_timestamp:
+        return "unknown"
+    try:
+        dt = datetime.fromisoformat(iso_timestamp)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        now = datetime.now(tz=dt.tzinfo)
+        seconds = max(0, int((now - dt).total_seconds()))
+    except (TypeError, ValueError):
+        return iso_timestamp
+
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 30:
+        return f"{days}d ago"
+    months = days // 30
+    if months < 12:
+        return f"{months}mo ago"
+    years = days // 365
+    return f"{years}y ago"
+
+
+def _truncate_session_prompt(prompt: str | None, limit: int = 72) -> str:
+    """Return a compact one-line prompt preview for a session list."""
+    if not prompt:
+        return "(no prompt preview)"
+    compact = " ".join(prompt.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _format_sessions_text(sessions: list[dict[str, Any]], *, current_thread_id: str | None) -> str:
+    """Render a Telegram-friendly sessions list."""
+    lines = ["Recent sessions for this chat:"]
+    for index, session in enumerate(sessions, start=1):
+        thread_id = str(session["thread_id"])
+        current_marker = " (current)" if thread_id == current_thread_id else ""
+        prompt = _truncate_session_prompt(session.get("initial_prompt"))
+        updated = _format_relative_time(session.get("updated_at"))
+        created = _format_relative_time(session.get("created_at"))
+        message_count = int(session.get("message_count", 0))
+        lines.append(f"{index}. `{thread_id}`{current_marker} — {prompt}")
+        lines.append(f"   Updated: {updated} | Created: {created} | Msgs: {message_count}")
+    return "\n".join(lines)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /status -- show the current thread and active model."""
     if not authorize_chat(update):
@@ -619,6 +684,70 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     header, _thread_id, _config = _status_header(update, context)
     await update.message.reply_text(header)
+
+
+async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /sessions -- list recent saved sessions for the current chat."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+
+    chat_id = str(update.effective_chat.id)
+    current_thread_id = context.bot_data.get(THREAD_IDS_KEY, {}).get(chat_id)
+    sessions = await asyncio.to_thread(list_sessions_for_chat, chat_id)
+    if not sessions:
+        await update.message.reply_text("No saved sessions found for this chat yet.")
+        return
+
+    text = _format_sessions_text(sessions, current_thread_id=current_thread_id)
+    for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+        await update.message.reply_text(chunk)
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /resume [thread_id] -- switch the current chat back to a saved session."""
+    if not authorize_chat(update):
+        return
+    if not is_user_allowed(update, context.bot_data.get(ALLOWED_USERS_KEY, set())):
+        await update.message.reply_text(REJECTION_MESSAGE)
+        return
+
+    chat_id = str(update.effective_chat.id)
+    raw = update.message.text or ""
+    parts = raw.split(maxsplit=1)
+    requested_thread = parts[1].strip() if len(parts) > 1 else ""
+
+    if requested_thread:
+        belongs = await asyncio.to_thread(session_belongs_to_chat, requested_thread, chat_id)
+        if not belongs:
+            similar = await asyncio.to_thread(
+                find_similar_sessions_for_chat, requested_thread, chat_id
+            )
+            message = f"Session '{requested_thread}' was not found for this chat."
+            if similar:
+                message += f" Did you mean: {', '.join(similar)}?"
+            await update.message.reply_text(message)
+            return
+        target_thread = requested_thread
+    else:
+        most_recent = await asyncio.to_thread(get_most_recent_session_for_chat, chat_id)
+        if most_recent is None:
+            await update.message.reply_text("No saved sessions found for this chat yet.")
+            return
+        target_thread = str(most_recent["thread_id"])
+
+    await _cancel_active_run(context, chat_id)
+    thread_ids = context.bot_data.setdefault(THREAD_IDS_KEY, {})
+    thread_ids[chat_id] = target_thread
+    save_thread_ids(thread_ids)
+    context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
+    _pending_approvals(context).pop(chat_id, None)
+    logger.info("Resumed thread for chat %s: %s", chat_id, target_thread)
+    await update.message.reply_text(
+        f"Resumed session {target_thread}. Send a message to continue it."
+    )
 
 
 async def cmd_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1472,6 +1601,8 @@ async def post_init(application: Application) -> None:
             BotCommand("uptime", "Show bot uptime"),
             BotCommand("status", "Show thread ID and model info"),
             BotCommand("queue", "Show active task and recent tool activity"),
+            BotCommand("sessions", "List recent saved sessions"),
+            BotCommand("resume", "Resume the latest or specified session"),
             BotCommand("context", "Show full context breakdown"),
             BotCommand("cron", "List scheduled jobs"),
             BotCommand("cron_add", "Add a scheduled job"),
@@ -1534,6 +1665,8 @@ def run_telegram(config) -> None:
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("queue", cmd_queue))
+    application.add_handler(CommandHandler("sessions", cmd_sessions))
+    application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("context", cmd_context))
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("cron", cmd_cron))
