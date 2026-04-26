@@ -9,6 +9,9 @@ required_environment_variables:
   - OPENAI_API_KEY
   - TAVILY_API_KEY
 ---
+
+# DeepClaw Development
+
 DeepClaw is an AI agent gateway built on DeepAgents, running as a systemd user service. Source at `/home/ubuntu/deepclaw/`, config at `~/.deepclaw/`.
 
 ## When to Use
