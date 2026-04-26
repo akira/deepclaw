@@ -9,8 +9,11 @@ import contextlib
 import logging
 import re
 import time
+from collections.abc import Mapping
+from typing import Any
 
 from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from deepclaw.channels.base import Channel, IncomingMessage
 from deepclaw.safety import redact_secrets
@@ -117,6 +120,34 @@ _MEMORY_ACK_PATTERNS = (
 )
 
 
+def _extract_pending_interrupt(state: Any, thread_id: str) -> dict[str, Any] | None:
+    """Return the first safety-review interrupt payload, if any."""
+    interrupts = getattr(state, "interrupts", ()) or ()
+    for interrupt in interrupts:
+        value = getattr(interrupt, "value", None)
+        if not isinstance(value, Mapping):
+            continue
+        if value.get("type") != "safety_review":
+            continue
+        return {
+            "id": getattr(interrupt, "id", None),
+            "thread_id": thread_id,
+            "type": value.get("type"),
+            "tool": value.get("tool"),
+            "command": value.get("command"),
+            "warning": value.get("warning"),
+            "message": value.get("message") or "Safety review required.",
+        }
+    return None
+
+
+def _format_pending_interrupt_message(pending: Mapping[str, Any]) -> str:
+    """Format the Telegram-visible prompt for a pending safety review."""
+    base = str(pending.get("message") or "Safety review required.").strip()
+    suffix = "Use /approve to continue or /deny <reason> to reject."
+    return f"{base}\n\n{suffix}" if base else suffix
+
+
 def _normalize_text(text: str) -> str:
     return text.lower().replace("’", "'").replace("‘", "'")
 
@@ -192,21 +223,29 @@ class Gateway:
         """Redact secrets before sending a message."""
         return await channel.send(chat_id, redact_secrets(text))
 
-    async def handle_message(
-        self, channel: Channel, message: IncomingMessage, thread_id: str
-    ) -> None:
-        """Process an inbound message: invoke agent, stream response, deliver via channel."""
-        logger.info("Received message from chat %s: %s", message.chat_id, message.text[:80])
-
-        # Set chat context so tools (e.g., cron) know where to deliver results
+    async def _get_pending_interrupt(self, thread_id: str) -> dict[str, Any] | None:
+        """Inspect the graph state for a pending safety-review interrupt."""
+        get_state = getattr(self.agent, "aget_state", None)
+        if get_state is None:
+            return None
         try:
-            from deepclaw.tools.cron import set_chat_context
+            state = await get_state({"configurable": {"thread_id": thread_id}})
+        except Exception:
+            logger.exception("Failed to inspect graph state for thread %s", thread_id)
+            return None
+        return _extract_pending_interrupt(state, thread_id)
 
-            set_chat_context(channel.name, message.chat_id)
-        except ImportError:
-            pass
-
-        msg_id = await self._send_redacted_message(channel, message.chat_id, THINKING_MESSAGE)
+    async def _stream_graph_input(
+        self,
+        channel: Channel,
+        chat_id: str,
+        thread_id: str,
+        graph_input: dict[str, Any] | Command,
+        *,
+        original_user_text: str | None,
+    ) -> dict[str, Any] | None:
+        """Stream one graph invocation and return pending safety review info, if any."""
+        msg_id = await self._send_redacted_message(channel, chat_id, THINKING_MESSAGE)
 
         stop_typing = asyncio.Event()
 
@@ -214,7 +253,7 @@ class Gateway:
             """Keep Telegram typing indicator alive while agent is processing."""
             while not stop_typing.is_set():
                 with contextlib.suppress(Exception):
-                    await channel.send_typing(message.chat_id)
+                    await channel.send_typing(chat_id)
                 try:
                     await asyncio.wait_for(stop_typing.wait(), timeout=4.5)
                 except TimeoutError:
@@ -227,22 +266,20 @@ class Gateway:
         chars_since_edit = 0
         limit = channel.message_limit
 
-        async def _stream_once(input_messages: list[dict]) -> bool:
-            """Stream one agent turn. Returns True if any tool calls were seen."""
+        async def _stream_once(payload: dict[str, Any] | Command) -> bool:
+            """Stream one graph pass. Returns True if any tool calls were seen."""
             nonlocal accumulated, last_edit_time, chars_since_edit
             tool_calls_seen = False
 
             async for chunk in self.agent.astream(
-                {"messages": input_messages},
+                payload,
                 config={"configurable": {"thread_id": thread_id}},
                 stream_mode="messages",
             ):
-                # astream with stream_mode="messages" yields (message, metadata) tuples
                 if not isinstance(chunk, tuple) or len(chunk) != 2:
                     continue
                 message_obj, _metadata = chunk
 
-                # Log tool results from ToolMessages
                 if isinstance(message_obj, ToolMessage):
                     tool_name = getattr(message_obj, "name", "unknown")
                     content = message_obj.content
@@ -250,7 +287,6 @@ class Gateway:
                     logger.info("Tool result [%s]: %s", tool_name, preview)
                     continue
 
-                # Only process AI messages with content_blocks
                 if not hasattr(message_obj, "content_blocks"):
                     continue
 
@@ -280,29 +316,32 @@ class Gateway:
 
                     now = time.monotonic()
                     elapsed = now - last_edit_time
-
                     if (
                         elapsed >= self.streaming_config.edit_interval
                         or chars_since_edit >= self.streaming_config.buffer_threshold
                     ):
                         display = accumulated + CURSOR_INDICATOR
                         if len(display) <= limit:
-                            await self._edit_redacted_message(
-                                channel, message.chat_id, msg_id, display
-                            )
+                            await self._edit_redacted_message(channel, chat_id, msg_id, display)
                         last_edit_time = time.monotonic()
                         chars_since_edit = 0
 
             return tool_calls_seen
 
+        pending: dict[str, Any] | None = None
         try:
-            tool_calls_seen = await _stream_once([{"role": "user", "content": message.text}])
+            tool_calls_seen = await _stream_once(graph_input)
+            pending = await self._get_pending_interrupt(thread_id)
 
-            # If the model described an action, claimed completion, or only acknowledged a memory/preference request without calling any tools, nudge it once.
-            if not tool_calls_seen and (
-                _looks_like_narration(accumulated)
-                or _looks_like_false_completion(message.text, accumulated)
-                or _looks_like_memory_request(message.text, accumulated)
+            if (
+                original_user_text
+                and pending is None
+                and not tool_calls_seen
+                and (
+                    _looks_like_narration(accumulated)
+                    or _looks_like_false_completion(original_user_text, accumulated)
+                    or _looks_like_memory_request(original_user_text, accumulated)
+                )
             ):
                 logger.info(
                     "Narration/false-completion/memory-ack without tool-call detected — sending nudge"
@@ -310,21 +349,67 @@ class Gateway:
                 accumulated = ""
                 last_edit_time = time.monotonic()
                 chars_since_edit = 0
-                await _stream_once([{"role": "user", "content": _NUDGE_MESSAGE}])
+                await _stream_once({"messages": [{"role": "user", "content": _NUDGE_MESSAGE}]})
+                pending = await self._get_pending_interrupt(thread_id)
         except Exception:
             logger.exception("Agent streaming failed")
             accumulated = accumulated or "Sorry, something went wrong processing your message."
+        finally:
+            stop_typing.set()
+            typing_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await typing_task
 
-        stop_typing.set()
-        typing_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await typing_task
-
-        response_text = accumulated if accumulated else "(no response)"
+        if pending is not None:
+            response_text = _format_pending_interrupt_message(pending)
+        else:
+            response_text = accumulated if accumulated else "(no response)"
         response_text = redact_secrets(response_text)
 
-        # Final delivery: send complete text (possibly chunked)
         chunks = chunk_message(response_text, limit)
-        await self._edit_redacted_message(channel, message.chat_id, msg_id, chunks[0])
+        await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])
         for extra_chunk in chunks[1:]:
-            await self._send_redacted_message(channel, message.chat_id, extra_chunk)
+            await self._send_redacted_message(channel, chat_id, extra_chunk)
+
+        return pending
+
+    async def handle_message(
+        self, channel: Channel, message: IncomingMessage, thread_id: str
+    ) -> dict[str, Any] | None:
+        """Process an inbound message: invoke agent, stream response, deliver via channel."""
+        logger.info("Received message from chat %s: %s", message.chat_id, message.text[:80])
+
+        try:
+            from deepclaw.tools.cron import set_chat_context
+
+            set_chat_context(channel.name, message.chat_id)
+        except ImportError:
+            pass
+
+        return await self._stream_graph_input(
+            channel,
+            message.chat_id,
+            thread_id,
+            {"messages": [{"role": "user", "content": message.text}]},
+            original_user_text=message.text,
+        )
+
+    async def resume_interrupt(
+        self,
+        channel: Channel,
+        *,
+        chat_id: str,
+        thread_id: str,
+        decision: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Resume a pending graph interrupt with a human decision."""
+        logger.info(
+            "Resuming interrupt for chat %s thread %s with %s", chat_id, thread_id, decision
+        )
+        return await self._stream_graph_input(
+            channel,
+            chat_id,
+            thread_id,
+            Command(resume=decision),
+            original_user_text=None,
+        )
