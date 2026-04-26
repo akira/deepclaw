@@ -37,6 +37,8 @@ CATEGORY_PERMISSION_CHANGE = "permission_change"
 CATEGORY_SQL_DESTRUCTION = "sql_destruction"
 CATEGORY_SYSTEM_CONFIG_WRITE = "system_config_write"
 CATEGORY_SERVICE_MANAGEMENT = "service_management"
+CATEGORY_PRIVILEGE_ESCALATION = "privilege_escalation"
+CATEGORY_PACKAGE_MANAGEMENT = "package_management"
 CATEGORY_MASS_PROCESS_KILL = "mass_process_kill"
 CATEGORY_FORK_BOMB = "fork_bomb"
 CATEGORY_PIPED_EXECUTION = "piped_execution"
@@ -134,6 +136,20 @@ DANGEROUS_PATTERNS: list[DangerousPattern] = [
         severity="critical",
     ),
     # Service management
+    DangerousPattern(
+        pattern=re.compile(r"\bsudo\b"),
+        category=CATEGORY_PRIVILEGE_ESCALATION,
+        description="Privilege escalation via sudo",
+        severity="warning",
+    ),
+    DangerousPattern(
+        pattern=re.compile(
+            r"\b(apt|apt-get)\s+(update|upgrade|install|remove|purge|dist-upgrade)\b"
+        ),
+        category=CATEGORY_PACKAGE_MANAGEMENT,
+        description="System package management command",
+        severity="warning",
+    ),
     DangerousPattern(
         pattern=re.compile(r"\bsystemctl\s+(stop|disable)\b"),
         category=CATEGORY_SERVICE_MANAGEMENT,

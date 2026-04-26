@@ -14,8 +14,10 @@ from deepclaw.safety import (
     CATEGORY_FILESYSTEM_FORMAT,
     CATEGORY_FORK_BOMB,
     CATEGORY_MASS_PROCESS_KILL,
+    CATEGORY_PACKAGE_MANAGEMENT,
     CATEGORY_PERMISSION_CHANGE,
     CATEGORY_PIPED_EXECUTION,
+    CATEGORY_PRIVILEGE_ESCALATION,
     CATEGORY_RECURSIVE_DELETE,
     CATEGORY_SERVICE_MANAGEMENT,
     CATEGORY_SQL_DESTRUCTION,
@@ -77,7 +79,10 @@ def _fake_addrinfo(ip: str) -> list[tuple]:
         ("echo 'bad' > /etc/passwd", CATEGORY_SYSTEM_CONFIG_WRITE),
         ("cat foo > /boot/grub.cfg", CATEGORY_SYSTEM_CONFIG_WRITE),
         ("echo x > /usr/bin/something", CATEGORY_SYSTEM_CONFIG_WRITE),
-        # Service management
+        # Service management / privileged system mutation
+        ("sudo apt-get update -y", CATEGORY_PRIVILEGE_ESCALATION),
+        ("sudo apt-get update -y", CATEGORY_PACKAGE_MANAGEMENT),
+        ("apt-get install -y python3-pip", CATEGORY_PACKAGE_MANAGEMENT),
         ("systemctl stop nginx", CATEGORY_SERVICE_MANAGEMENT),
         ("systemctl disable sshd", CATEGORY_SERVICE_MANAGEMENT),
         ("service apache2 stop", CATEGORY_SERVICE_MANAGEMENT),
