@@ -1,11 +1,14 @@
 ---
 name: deepclaw-development
 description: Develop, configure, and extend DeepClaw — adding tool plugins, tuning SOUL.md, managing the venv, and restarting the service.
-version: 1.0.0
+version: 1.0.1
+author: Hermes Agent
+platforms: [linux]
+tags: [deepclaw, tool-plugins, configuration]
+required_environment_variables:
+  - OPENAI_API_KEY
+  - TAVILY_API_KEY
 ---
-
-# DeepClaw Development
-
 DeepClaw is an AI agent gateway built on DeepAgents, running as a systemd user service. Source at `/home/ubuntu/deepclaw/`, config at `~/.deepclaw/`.
 
 ## When to Use

@@ -41,7 +41,7 @@ from deepclaw.config import DeepClawConfig
 from deepclaw.context_report import build_context_report
 from deepclaw.gateway import Gateway, chunk_message
 from deepclaw.heartbeat import HeartbeatRunner
-from deepclaw.safety import check_command, format_warning
+from deepclaw.safety import check_command, format_warning, redact_secrets
 from deepclaw.scheduler import (
     Scheduler,
     add_job,
@@ -565,6 +565,8 @@ def _build_queue_report(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gatewa
         return "\n".join(lines)
 
     status = "running" if active_run is not None else "idle"
+    if pending:
+        status = "awaiting_approval"
     if snapshot and snapshot.get("status"):
         status = str(snapshot["status"])
     lines.append(f"- State: {status}")
@@ -604,7 +606,7 @@ def _build_queue_report(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gatewa
             lines.append(f"- Command: {approval['command']}")
         lines.append("- Action: /approve to continue or /deny <reason> to reject")
 
-    return "\n".join(lines)
+    return redact_secrets("\n".join(lines))
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
