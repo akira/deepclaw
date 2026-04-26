@@ -133,6 +133,16 @@ class TestCheckExecute:
         mock_interrupt.assert_called_once()
 
     @patch("deepclaw.middleware.interrupt")
+    def test_sudo_apt_get_triggers_interrupt(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval for sudo"}
+        tc = _make_tool_call("execute", {"command": "sudo apt-get update -y"})
+        result = _check_execute(tc)
+        assert result is not None
+        assert result.status == "error"
+        assert "Need approval for sudo" in result.content
+        mock_interrupt.assert_called_once()
+
+    @patch("deepclaw.middleware.interrupt")
     def test_warning_command_triggers_interrupt_reject(self, mock_interrupt):
         mock_interrupt.return_value = {"type": "reject", "message": "No force push!"}
         tc = _make_tool_call("execute", {"command": "git push --force origin main"})
@@ -272,6 +282,20 @@ class TestSafetyMiddlewareIntegration:
             {"command": "sleep 60 && echo SLEPT_60"},
             state={"messages": [{"role": "user", "content": "run bash sleep 60"}]},
         )
+        handler = AsyncMock()
+
+        result = await middleware.awrap_tool_call(request, handler)
+
+        handler.assert_not_awaited()
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "Need approval" in result.content
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.middleware.interrupt")
+    async def test_execute_interrupts_on_sudo_package_command(self, mock_interrupt, middleware):
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval"}
+        request = self._make_request("execute", {"command": "sudo apt-get update -y"})
         handler = AsyncMock()
 
         result = await middleware.awrap_tool_call(request, handler)
