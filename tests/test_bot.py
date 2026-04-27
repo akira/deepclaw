@@ -1497,6 +1497,33 @@ class TestCmdSessions:
         assert "Older thread prompt" in text
 
     @pytest.mark.asyncio
+    async def test_sessions_accepts_explicit_limit_argument(self):
+        update = _make_slash_update(text="/sessions 25")
+        ctx = _make_slash_context(extra={THREAD_IDS_KEY: {"1": "thread-current"}})
+
+        with patch(
+            "deepclaw.channels.telegram.list_sessions_for_chat",
+            return_value=[],
+        ) as list_sessions:
+            await cmd_sessions(update, ctx)
+
+        list_sessions.assert_called_once_with("1", limit=25)
+        update.message.reply_text.assert_awaited_once_with(
+            "No saved sessions found for this chat yet."
+        )
+
+    @pytest.mark.asyncio
+    async def test_sessions_rejects_invalid_limit_argument(self):
+        update = _make_slash_update(text="/sessions lots")
+        ctx = _make_slash_context()
+
+        await cmd_sessions(update, ctx)
+
+        update.message.reply_text.assert_awaited_once_with(
+            "Usage: /sessions [limit]\nExample: /sessions 25"
+        )
+
+    @pytest.mark.asyncio
     async def test_sessions_reports_when_none_found(self):
         update = _make_slash_update(text="/sessions")
         ctx = _make_slash_context()

@@ -694,9 +694,19 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(REJECTION_MESSAGE)
         return
 
+    raw = update.message.text or ""
+    parts = raw.split(maxsplit=1)
+    limit = 10
+    if len(parts) > 1:
+        limit_arg = parts[1].strip()
+        if not limit_arg.isdigit() or int(limit_arg) < 1:
+            await update.message.reply_text("Usage: /sessions [limit]\nExample: /sessions 25")
+            return
+        limit = int(limit_arg)
+
     chat_id = str(update.effective_chat.id)
     current_thread_id = context.bot_data.get(THREAD_IDS_KEY, {}).get(chat_id)
-    sessions = await asyncio.to_thread(list_sessions_for_chat, chat_id)
+    sessions = await asyncio.to_thread(list_sessions_for_chat, chat_id, limit=limit)
     if not sessions:
         await update.message.reply_text("No saved sessions found for this chat yet.")
         return
