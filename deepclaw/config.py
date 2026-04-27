@@ -83,11 +83,17 @@ class GenerationConfig:
 
 
 @dataclass
+class HeadroomConfig:
+    enabled: bool = False
+
+
+@dataclass
 class DeepClawConfig:
     model: str = "anthropic:claude-sonnet-4-6-20250514"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    headroom: HeadroomConfig = field(default_factory=HeadroomConfig)
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     workspace_root: str = "~/.deepclaw/workspace"
     command_timeout: int = 300  # seconds, default 5 minutes
@@ -224,6 +230,10 @@ DEFAULT_CONFIG_YAML = """\
 #   max_tokens: 4096
 #   top_p: 0.9
 #   repetition_penalty: 1.05
+#
+# Headroom prompt compression (disabled by default)
+# headroom:
+#   enabled: true
 
 # Shell command timeout in seconds (default: 300 = 5 minutes)
 # command_timeout: 300
@@ -284,6 +294,7 @@ def load_config() -> DeepClawConfig:
     yaml_workspace = yaml_data.get("workspace", {}) or {}
     yaml_heartbeat = yaml_data.get("heartbeat", {}) or {}
     yaml_generation = yaml_data.get("generation", {}) or {}
+    yaml_headroom = yaml_data.get("headroom", {}) or {}
     yaml_terminal = yaml_data.get("terminal", {}) or {}
 
     streaming = TelegramStreamingConfig(
@@ -349,6 +360,10 @@ def load_config() -> DeepClawConfig:
         notify_chat_id=str(yaml_heartbeat.get("notify_chat_id", "")),
     )
 
+    headroom = HeadroomConfig(
+        enabled=_to_bool(yaml_headroom.get("enabled"), HeadroomConfig.enabled),
+    )
+
     terminal = TerminalConfig(
         compression=_normalize_terminal_compression(
             yaml_terminal.get("compression", TerminalConfig.compression)
@@ -366,6 +381,7 @@ def load_config() -> DeepClawConfig:
         telegram=telegram,
         heartbeat=heartbeat,
         generation=generation,
+        headroom=headroom,
         terminal=terminal,
         workspace_root=workspace_root,
         command_timeout=command_timeout,

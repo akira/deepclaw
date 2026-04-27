@@ -18,6 +18,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
 from deepclaw.deepinfra import resolve_deepinfra_model
+from deepclaw.headroom import wrap_model_with_headroom
 from deepclaw.local_context import (
     AsyncExecutableBackend,
     ExecutableBackend,
@@ -496,6 +497,7 @@ def create_agent(config, checkpointer):
     backend = _shell_backend(config)
     composite_backend = _composite_backend(backend)
     agent_model = resolve_deepinfra_model(config)
+    agent_model = wrap_model_with_headroom(agent_model, config.headroom)
 
     # Middleware stack
     middleware = []

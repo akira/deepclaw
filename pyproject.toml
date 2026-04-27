@@ -14,6 +14,7 @@ dependencies = [
     "playwright>=1.58.0",
     "ruff>=0.15.12",
     "langchain-community>=0.4.1",
+    "headroom-ai[langchain]>=0.9.1",
 ]
 
 [project.optional-dependencies]

@@ -207,6 +207,23 @@ terminal:
         assert cfg.terminal.env_passthrough == ["LANGSMITH_API_KEY", "CUSTOM_TOKEN"]
         assert cfg.workspace_root == "/tmp/ws"
 
+    def test_reads_headroom_config(self, config_dir, monkeypatch):
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("DEEPCLAW_MODEL", raising=False)
+        monkeypatch.delenv("DEEPCLAW_ALLOWED_USERS", raising=False)
+
+        _write_yaml(
+            config_dir,
+            """\
+headroom:
+  enabled: true
+""",
+        )
+
+        cfg = load_config()
+
+        assert cfg.headroom.enabled is True
+
     def test_invalid_terminal_compression_raises(self, config_dir, monkeypatch):
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
         monkeypatch.delenv("DEEPCLAW_MODEL", raising=False)

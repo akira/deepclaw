@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from deepclaw import agent as agent_mod
-from deepclaw.config import DeepClawConfig
+from deepclaw.config import DeepClawConfig, HeadroomConfig
 
 
 class TestSetupSkills:
@@ -463,3 +463,61 @@ class TestCreateAgent:
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE not in captured["system_prompt"]
+
+    def test_wraps_model_with_headroom_when_enabled(self, tmp_path, monkeypatch):
+        captured = {}
+        fake_model = object()
+        wrapped_model = object()
+
+        class FakeShellBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def execute(self, command, *, timeout=None):
+                return None
+
+        class FakeFilesystemBackend:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeCompositeBackend:
+            def __init__(self, *, default, routes):
+                self.default = default
+                self.routes = routes
+
+        def fake_create_deep_agent(**kwargs):
+            captured.update(kwargs)
+            return "agent"
+
+        wrap_calls = []
+
+        def fake_wrap(model, headroom_config):
+            wrap_calls.append((model, headroom_config))
+            return wrapped_model
+
+        monkeypatch.setattr(agent_mod, "_setup_auth", lambda: None)
+        monkeypatch.setattr(agent_mod, "_load_soul", lambda: "soul")
+        monkeypatch.setattr(agent_mod, "_setup_memory", lambda: ["/memory/AGENTS.md"])
+        monkeypatch.setattr(agent_mod, "_setup_skills", lambda: ["/skills"])
+        monkeypatch.setattr(agent_mod, "discover_tools", list)
+        monkeypatch.setattr(agent_mod, "DeepClawLocalShellBackend", FakeShellBackend)
+        monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
+        monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
+        monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
+        monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(agent_mod, "resolve_deepinfra_model", lambda config: fake_model)
+        monkeypatch.setattr(agent_mod, "wrap_model_with_headroom", fake_wrap)
+        monkeypatch.setattr(
+            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+        )
+
+        config = DeepClawConfig(
+            model="openai:gpt-5",
+            workspace_root=str(tmp_path),
+            headroom=HeadroomConfig(enabled=True),
+        )
+        result = agent_mod.create_agent(config, checkpointer="checkpointer")
+
+        assert result == "agent"
+        assert wrap_calls == [(fake_model, config.headroom)]
+        assert captured["model"] is wrapped_model
