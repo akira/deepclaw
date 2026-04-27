@@ -78,7 +78,7 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             return None, f"Error: failed to invoke RTK rewrite ({type(exc).__name__}): {exc}"
 
         rewritten = rewrite.stdout.strip()
-        if rewrite.returncode == 0 and rewritten:
+        if rewritten:
             if rewritten == "rtk" or rewritten.startswith("rtk "):
                 suffix = rewritten[3:].lstrip()
                 return f"{shlex.quote(rtk_path)} {suffix}".rstrip(), None
@@ -97,7 +97,8 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         if self._compression_mode != "rtk":
             return None, f"Error: unknown terminal compression mode: {self._compression_mode}"
 
-        rtk_path = shutil.which("rtk", path=env.get("PATH"))
+        rtk_lookup_path = env.get("PATH") or os.environ.get("PATH")
+        rtk_path = shutil.which("rtk", path=rtk_lookup_path)
         if rtk_path is None:
             return None, "Error: RTK compression is enabled but `rtk` was not found in PATH."
 

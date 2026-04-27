@@ -120,6 +120,30 @@ class TestDeepClawLocalShellBackend:
         assert wrapped is None
         assert "RTK compression is enabled" in error
 
+    def test_prepare_command_uses_process_path_when_child_env_omits_path(self, monkeypatch):
+        backend = agent_mod.DeepClawLocalShellBackend.__new__(agent_mod.DeepClawLocalShellBackend)
+        backend._compression_mode = "rtk"
+        monkeypatch.setattr(agent_mod.os, "environ", {"PATH": "/process/bin"})
+        monkeypatch.setattr(
+            agent_mod.shutil,
+            "which",
+            lambda name, path=None: "/process/bin/rtk" if name == "rtk" and path == "/process/bin" else None,
+        )
+        monkeypatch.setattr(
+            backend,
+            "_rewrite_command_with_rtk",
+            lambda command, *, rtk_path, env, timeout: (f"{rtk_path} git status", None),
+        )
+
+        wrapped, error = backend._prepare_command(
+            "git status",
+            env={},
+            timeout=30,
+        )
+
+        assert error is None
+        assert wrapped == "/process/bin/rtk git status"
+
     def test_prepare_command_errors_when_compression_mode_is_unknown(self):
         backend = agent_mod.DeepClawLocalShellBackend.__new__(
             agent_mod.DeepClawLocalShellBackend,
@@ -226,6 +250,33 @@ class TestDeepClawLocalShellBackend:
         assert result.output == "plain-output\n"
         assert captured["rewrite"] == ["/usr/bin/rtk", "rewrite", "printf plain-output"]
         assert captured["executed"] == "printf plain-output"
+
+    def test_prepare_command_uses_rewrite_stdout_even_when_rtk_returns_nonzero(self, monkeypatch):
+        backend = agent_mod.DeepClawLocalShellBackend(
+            root_dir=".",
+            virtual_mode=False,
+            timeout=30,
+            compression_mode="rtk",
+        )
+        monkeypatch.setattr(
+            agent_mod.shutil,
+            "which",
+            lambda name, path=None: "/usr/bin/rtk" if name == "rtk" else None,
+        )
+
+        def fake_run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 3, stdout="rtk git status\n", stderr="")
+
+        monkeypatch.setattr(agent_mod.subprocess, "run", fake_run)
+
+        wrapped, error = backend._prepare_command(
+            "git status",
+            env={"PATH": "/usr/bin"},
+            timeout=30,
+        )
+
+        assert error is None
+        assert wrapped == "/usr/bin/rtk git status"
 
     @pytest.mark.skipif(shutil.which("rtk") is None, reason="rtk not installed")
     def test_execute_with_real_rtk_matches_plain_output_for_simple_command(self, monkeypatch):
