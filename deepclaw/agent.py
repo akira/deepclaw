@@ -5,7 +5,6 @@ import os
 import shlex
 import shutil
 import subprocess
-from importlib import import_module
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -15,10 +14,10 @@ from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
+from deepclaw.deepinfra import resolve_deepinfra_model
 from deepclaw.local_context import (
     AsyncExecutableBackend,
     ExecutableBackend,
@@ -311,128 +310,6 @@ Before finalizing:
 
 
 OPENAI_MODEL_GUIDANCE_MODELS = ("gpt", "codex")
-DEEPINFRA_PROVIDER = "deepinfra"
-
-
-def _load_chat_deepinfra_class():
-    """Load LangChain's ChatDeepInfra adapter lazily."""
-    try:
-        module = import_module("langchain_community.chat_models")
-    except ImportError as exc:
-        msg = (
-            "DeepInfra models require langchain-community. "
-            "Install it with `uv add langchain-community`."
-        )
-        raise RuntimeError(msg) from exc
-    return module.ChatDeepInfra
-
-
-def _stringify_message_content(content) -> str:
-    """Flatten LangChain content blocks into a DeepInfra-safe string payload."""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-            continue
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text":
-            text = block.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "\n".join(part for part in parts if part)
-
-
-def _normalize_deepinfra_message(message: BaseMessage) -> BaseMessage:
-    """Strip reasoning/function-call blocks that DeepInfra rejects in history."""
-    content = _stringify_message_content(getattr(message, "content", ""))
-
-    if isinstance(message, AIMessage):
-        return AIMessage(
-            content=content,
-            additional_kwargs=message.additional_kwargs,
-            response_metadata=message.response_metadata,
-            name=message.name,
-            id=message.id,
-            tool_calls=message.tool_calls,
-            invalid_tool_calls=message.invalid_tool_calls,
-            usage_metadata=message.usage_metadata,
-        )
-    if isinstance(message, HumanMessage):
-        return HumanMessage(
-            content=content,
-            additional_kwargs=message.additional_kwargs,
-            name=message.name,
-            id=message.id,
-        )
-    if isinstance(message, SystemMessage):
-        return SystemMessage(
-            content=content,
-            additional_kwargs=message.additional_kwargs,
-            name=message.name,
-            id=message.id,
-        )
-    if isinstance(message, ToolMessage):
-        return ToolMessage(
-            content=content,
-            tool_call_id=message.tool_call_id,
-            additional_kwargs=message.additional_kwargs,
-            name=message.name,
-            id=message.id,
-        )
-    return message
-
-
-def _wrap_deepinfra_class(chat_cls):
-    """Add message-history sanitization around LangChain's ChatDeepInfra adapter."""
-
-    class DeepClawChatDeepInfra(chat_cls):
-        def _create_message_dicts(self, messages, stop):
-            normalized = [_normalize_deepinfra_message(message) for message in messages]
-            return super()._create_message_dicts(normalized, stop)
-
-    return DeepClawChatDeepInfra
-
-
-def _resolve_agent_model(config: DeepClawConfig):
-    """Resolve the configured model into a provider string or chat model instance."""
-    model_spec = (config.model or "").strip()
-    if not model_spec:
-        return None
-
-    provider, separator, model_name = model_spec.partition(":")
-    if separator == "" or provider != DEEPINFRA_PROVIDER:
-        return model_spec
-    if not model_name:
-        msg = "DeepInfra model name cannot be empty"
-        raise ValueError(msg)
-
-    chat_cls = _wrap_deepinfra_class(_load_chat_deepinfra_class())
-    generation = config.generation
-    kwargs = {
-        "model": model_name,
-        "streaming": False,
-        "disable_streaming": True,
-    }
-    model_kwargs = {}
-
-    if generation.temperature is not None:
-        kwargs["temperature"] = generation.temperature
-    if generation.max_tokens is not None:
-        kwargs["max_tokens"] = generation.max_tokens
-    if generation.top_p is not None:
-        kwargs["top_p"] = generation.top_p
-    if generation.repetition_penalty is not None:
-        model_kwargs["repetition_penalty"] = generation.repetition_penalty
-    if model_kwargs:
-        kwargs["model_kwargs"] = model_kwargs
-
-    return chat_cls(**kwargs)
 
 
 def _load_soul() -> str | None:
@@ -618,7 +495,7 @@ def create_agent(config, checkpointer):
     _setup_auth()
     backend = _shell_backend(config)
     composite_backend = _composite_backend(backend)
-    agent_model = _resolve_agent_model(config)
+    agent_model = resolve_deepinfra_model(config)
 
     # Middleware stack
     middleware = []

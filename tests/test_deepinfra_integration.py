@@ -1,62 +1,22 @@
-"""Tests for DeepInfra model integration via LangChain community adapters."""
+"""Tests for DeepInfra integration and agent wiring."""
 
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
 from deepclaw import agent as agent_mod
 from deepclaw.config import DeepClawConfig
+from deepclaw.deepinfra import DEEPINFRA_PROVIDER, resolve_deepinfra_model
 
 
 class TestResolveAgentModel:
     def test_returns_plain_model_string_for_non_deepinfra(self):
         config = DeepClawConfig(model="anthropic:claude-sonnet-4-6")
 
-        resolved = agent_mod._resolve_agent_model(config)
+        resolved = resolve_deepinfra_model(config)
 
         assert resolved == "anthropic:claude-sonnet-4-6"
-
-    def test_stringify_message_content_keeps_text_and_drops_reasoning_blocks(self):
-        content = [
-            {"type": "reasoning", "summary": []},
-            {"type": "text", "text": "hello"},
-            {"type": "function_call", "name": "web_search"},
-            "world",
-        ]
-
-        assert agent_mod._stringify_message_content(content) == "hello\nworld"
-
-    def test_normalize_deepinfra_message_sanitizes_messages(self):
-        ai = AIMessage(
-            content=[
-                {"type": "reasoning", "summary": []},
-                {"type": "text", "text": "assistant text"},
-            ],
-            tool_calls=[
-                {
-                    "name": "web_search",
-                    "args": {"query": "sf weather"},
-                    "id": "call_1",
-                    "type": "tool_call",
-                }
-            ],
-        )
-        human = HumanMessage(content=[{"type": "text", "text": "hi"}])
-        system = SystemMessage(content=[{"type": "text", "text": "rules"}])
-        tool = ToolMessage(content=[{"type": "text", "text": "tool output"}], tool_call_id="call_1")
-
-        normalized_ai = agent_mod._normalize_deepinfra_message(ai)
-        normalized_human = agent_mod._normalize_deepinfra_message(human)
-        normalized_system = agent_mod._normalize_deepinfra_message(system)
-        normalized_tool = agent_mod._normalize_deepinfra_message(tool)
-
-        assert normalized_ai.content == "assistant text"
-        assert normalized_ai.tool_calls == ai.tool_calls
-        assert normalized_human.content == "hi"
-        assert normalized_system.content == "rules"
-        assert normalized_tool.content == "tool output"
-        assert normalized_tool.tool_call_id == "call_1"
 
     def test_builds_chat_deepinfra_model_with_generation_config(self, monkeypatch):
         captured = {}
@@ -65,16 +25,21 @@ class TestResolveAgentModel:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setattr(agent_mod, "_load_chat_deepinfra_class", lambda: FakeChatDeepInfra)
+            def _create_message_dicts(self, messages, stop):
+                return [{"content": msg.content} for msg in messages], {"stop": stop}
+
+        monkeypatch.setattr(
+            "deepclaw.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
+        )
         config = DeepClawConfig(model="deepinfra:deepseek-ai/DeepSeek-V3")
         config.generation.temperature = 0.25
         config.generation.max_tokens = 2048
         config.generation.top_p = 0.8
         config.generation.repetition_penalty = 1.1
 
-        resolved = agent_mod._resolve_agent_model(config)
+        resolved = resolve_deepinfra_model(config)
 
-        assert type(resolved).__name__ == "DeepClawChatDeepInfra"
+        assert type(resolved).__name__ == "FakeChatDeepInfra"
         assert captured == {
             "model": "deepseek-ai/DeepSeek-V3",
             "streaming": False,
@@ -85,11 +50,33 @@ class TestResolveAgentModel:
             "model_kwargs": {"repetition_penalty": 1.1},
         }
 
+    def test_resolved_model_leaves_message_content_unchanged(self, monkeypatch):
+        class FakeChatDeepInfra:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def _create_message_dicts(self, messages, stop):
+                return [{"content": msg.content} for msg in messages], {"stop": stop}
+
+        monkeypatch.setattr(
+            "deepclaw.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
+        )
+        model = resolve_deepinfra_model(DeepClawConfig(model="deepinfra:foo/bar"))
+
+        content = [
+            {"type": "reasoning", "summary": []},
+            {"type": "text", "text": "assistant text"},
+        ]
+        ai = AIMessage(content=content)
+        payload, _params = model._create_message_dicts([ai], stop=None)
+
+        assert payload == [{"content": content}]
+
     def test_deepinfra_requires_model_name(self):
-        config = DeepClawConfig(model="deepinfra:")
+        config = DeepClawConfig(model=f"{DEEPINFRA_PROVIDER}:")
 
         with pytest.raises(ValueError, match="DeepInfra model name cannot be empty"):
-            agent_mod._resolve_agent_model(config)
+            resolve_deepinfra_model(config)
 
 
 class TestCreateAgentDeepInfra:
@@ -127,7 +114,7 @@ class TestCreateAgentDeepInfra:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
-        monkeypatch.setattr(agent_mod, "_resolve_agent_model", lambda config: fake_model)
+        monkeypatch.setattr(agent_mod, "resolve_deepinfra_model", lambda config: fake_model)
         monkeypatch.setattr(
             agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
         )
