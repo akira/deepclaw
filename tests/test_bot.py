@@ -39,7 +39,9 @@ from deepclaw.channels.telegram import (
     cmd_memory,
     cmd_model,
     cmd_queue,
+    cmd_resume,
     cmd_retry,
+    cmd_sessions,
     cmd_skills,
     cmd_soul,
     cmd_status,
@@ -763,22 +765,18 @@ class TestGatewayRedaction:
             "warning": "Inline Python execution",
             "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
         }
-        assert agent.astream_calls[0][1]["config"] == {
-            "configurable": {"thread_id": "thread-1"},
-            "metadata": {
-                "active_thread_id": "thread-1",
-                "chat_id": "123",
-                "channel": "telegram",
-            },
-        }
-        assert agent.aget_state_calls[0] == {
-            "configurable": {"thread_id": "thread-1"},
-            "metadata": {
-                "active_thread_id": "thread-1",
-                "chat_id": "123",
-                "channel": "telegram",
-            },
-        }
+        config = agent.astream_calls[0][1]["config"]
+        assert config["configurable"] == {"thread_id": "thread-1"}
+        assert config["metadata"]["active_thread_id"] == "thread-1"
+        assert config["metadata"]["chat_id"] == "123"
+        assert config["metadata"]["channel"] == "telegram"
+        assert "updated_at" in config["metadata"]
+        state_config = agent.aget_state_calls[0]
+        assert state_config["configurable"] == {"thread_id": "thread-1"}
+        assert state_config["metadata"]["active_thread_id"] == "thread-1"
+        assert state_config["metadata"]["chat_id"] == "123"
+        assert state_config["metadata"]["channel"] == "telegram"
+        assert "updated_at" in state_config["metadata"]
         assert channel.edits[-1][2].endswith(
             "Use /approve to continue or /deny <reason> to reject."
         )
@@ -802,14 +800,12 @@ class TestGatewayRedaction:
         assert pending is None
         args, kwargs = agent.astream_calls[0]
         assert args[0].resume == {"type": "approve"}
-        assert kwargs["config"] == {
-            "configurable": {"thread_id": "thread-1"},
-            "metadata": {
-                "active_thread_id": "thread-1",
-                "chat_id": "123",
-                "channel": "telegram",
-            },
-        }
+        config = kwargs["config"]
+        assert config["configurable"] == {"thread_id": "thread-1"}
+        assert config["metadata"]["active_thread_id"] == "thread-1"
+        assert config["metadata"]["chat_id"] == "123"
+        assert config["metadata"]["channel"] == "telegram"
+        assert "updated_at" in config["metadata"]
         assert channel.edits[-1][2] == "Approved and ran."
 
 
@@ -1452,13 +1448,170 @@ class TestCmdStatus:
 
         await cmd_status(update, ctx)
 
-        update.message.reply_text.assert_called_once()
+        update.message.reply_text.assert_awaited_once()
         text = update.message.reply_text.call_args[0][0]
         assert "Chat ID: 1" in text
         assert "Thread ID:" in text
         assert "Model: openai:gpt-5" in text
         assert "Allowlist:" in text
         assert "🧠 Context breakdown" not in text
+
+
+class TestCmdSessions:
+    @pytest.mark.asyncio
+    async def test_sessions_shows_current_thread_and_prompt_preview(self):
+        update = _make_slash_update(text="/sessions")
+        ctx = _make_slash_context(extra={THREAD_IDS_KEY: {"1": "thread-current"}})
+        sessions = [
+            {
+                "thread_id": "thread-current",
+                "updated_at": "2026-04-27T05:00:00+00:00",
+                "created_at": "2026-04-27T04:00:00+00:00",
+                "message_count": 4,
+                "initial_prompt": "Build session resume support for Telegram",
+                "checkpoint_count": 2,
+            },
+            {
+                "thread_id": "thread-older",
+                "updated_at": "2026-04-27T03:00:00+00:00",
+                "created_at": "2026-04-27T02:00:00+00:00",
+                "message_count": 2,
+                "initial_prompt": "Older thread prompt",
+                "checkpoint_count": 1,
+            },
+        ]
+
+        with patch(
+            "deepclaw.channels.telegram.list_sessions_for_chat",
+            return_value=sessions,
+        ):
+            await cmd_sessions(update, ctx)
+
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "Recent sessions for this chat" in text
+        assert "thread-current"[:8] in text
+        assert "(current)" in text
+        assert "Build session resume support for Telegram" in text
+        assert "Msgs: 4" in text
+        assert "Older thread prompt" in text
+
+    @pytest.mark.asyncio
+    async def test_sessions_accepts_explicit_limit_argument(self):
+        update = _make_slash_update(text="/sessions 25")
+        ctx = _make_slash_context(extra={THREAD_IDS_KEY: {"1": "thread-current"}})
+
+        with patch(
+            "deepclaw.channels.telegram.list_sessions_for_chat",
+            return_value=[],
+        ) as list_sessions:
+            await cmd_sessions(update, ctx)
+
+        list_sessions.assert_called_once_with("1", limit=25)
+        update.message.reply_text.assert_awaited_once_with(
+            "No saved sessions found for this chat yet."
+        )
+
+    @pytest.mark.asyncio
+    async def test_sessions_rejects_invalid_limit_argument(self):
+        update = _make_slash_update(text="/sessions lots")
+        ctx = _make_slash_context()
+
+        await cmd_sessions(update, ctx)
+
+        update.message.reply_text.assert_awaited_once_with(
+            "Usage: /sessions [limit]\nExample: /sessions 25"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sessions_reports_when_none_found(self):
+        update = _make_slash_update(text="/sessions")
+        ctx = _make_slash_context()
+
+        with patch("deepclaw.channels.telegram.list_sessions_for_chat", return_value=[]):
+            await cmd_sessions(update, ctx)
+
+        update.message.reply_text.assert_awaited_once_with(
+            "No saved sessions found for this chat yet."
+        )
+
+    @pytest.mark.asyncio
+    async def test_sessions_does_not_create_thread_mapping_when_missing(self):
+        update = _make_slash_update(text="/sessions")
+        ctx = _make_slash_context(extra={THREAD_IDS_KEY: {}})
+
+        with (
+            patch("deepclaw.channels.telegram.list_sessions_for_chat", return_value=[]),
+            patch("deepclaw.channels.telegram.save_thread_ids") as save_thread_ids,
+        ):
+            await cmd_sessions(update, ctx)
+
+        assert ctx.bot_data[THREAD_IDS_KEY] == {}
+        save_thread_ids.assert_not_called()
+
+
+class TestCmdResume:
+    @pytest.mark.asyncio
+    async def test_resume_specific_thread_updates_mapping_and_clears_chat_state(self):
+        update = _make_slash_update(text="/resume thread-older")
+        ctx = _make_slash_context(
+            extra={
+                THREAD_IDS_KEY: {"1": "thread-current"},
+                LAST_MESSAGE_KEY: {"1": "hello"},
+                PENDING_APPROVALS_KEY: {"1": {"id": "pending-1"}},
+            }
+        )
+
+        with (
+            patch("deepclaw.channels.telegram.session_belongs_to_chat", return_value=True),
+            patch("deepclaw.channels.telegram.save_thread_ids") as save_thread_ids,
+        ):
+            await cmd_resume(update, ctx)
+
+        assert ctx.bot_data[THREAD_IDS_KEY]["1"] == "thread-older"
+        assert ctx.bot_data[LAST_MESSAGE_KEY] == {}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+        save_thread_ids.assert_called_once_with({"1": "thread-older"})
+        update.message.reply_text.assert_called_once()
+        assert "Resumed session thread-older" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_resume_without_arg_uses_most_recent_session(self):
+        update = _make_slash_update(text="/resume")
+        ctx = _make_slash_context(extra={THREAD_IDS_KEY: {"1": "thread-current"}})
+
+        with (
+            patch(
+                "deepclaw.channels.telegram.get_most_recent_session_for_chat",
+                return_value={"thread_id": "thread-recent"},
+            ),
+            patch("deepclaw.channels.telegram.save_thread_ids"),
+        ):
+            await cmd_resume(update, ctx)
+
+        assert ctx.bot_data[THREAD_IDS_KEY]["1"] == "thread-recent"
+        update.message.reply_text.assert_called_once()
+        assert "thread-recent" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_resume_unknown_thread_suggests_similar_matches(self):
+        update = _make_slash_update(text="/resume thread-miss")
+        ctx = _make_slash_context()
+
+        with (
+            patch("deepclaw.channels.telegram.session_belongs_to_chat", return_value=False),
+            patch(
+                "deepclaw.channels.telegram.find_similar_sessions_for_chat",
+                return_value=["thread-missing-1", "thread-missing-2"],
+            ),
+        ):
+            await cmd_resume(update, ctx)
+
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "thread-miss" in text
+        assert "thread-missing-1" in text
+        assert "thread-missing-2" in text
 
 
 class TestCmdContext:
@@ -1473,7 +1626,7 @@ class TestCmdContext:
         ):
             await cmd_context(update, ctx)
 
-        update.message.reply_text.assert_called_once()
+        update.message.reply_text.assert_awaited_once()
         text = update.message.reply_text.call_args[0][0]
         assert "Chat ID: 1" in text
         assert "Thread ID:" in text

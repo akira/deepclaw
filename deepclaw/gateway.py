@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import ToolMessage
@@ -444,6 +445,7 @@ class Gateway:
                 "active_thread_id": thread_id,
                 "chat_id": chat_id,
                 "channel": channel_name,
+                "updated_at": datetime.now(tz=UTC).isoformat(),
             },
         }
 
