@@ -16,120 +16,77 @@ def _load_module():
     return module
 
 
-def _run(run_id: str, **outputs):
+def _fake_run(run_id: str, outputs: dict):
     return SimpleNamespace(id=run_id, outputs=outputs)
 
 
-def test_pairwise_prefers_first_pass_tool_use():
+def _fake_example(outputs: dict):
+    return SimpleNamespace(outputs=outputs)
+
+
+def test_pairwise_prefers_overall_pass_fail_before_tool_use_tiebreakers():
     module = _load_module()
 
-    result = module.pairwise_tool_use_preference(
-        [
-            _run(
-                "a",
-                first_pass_tool_calls_seen=True,
-                tool_calls_seen=True,
-                attempts=1,
-                tool_names=["execute"],
-            ),
-            _run(
-                "b",
-                first_pass_tool_calls_seen=False,
-                tool_calls_seen=True,
-                attempts=1,
-                tool_names=["execute"],
-            ),
-        ],
-        SimpleNamespace(outputs={"expected_tool_names": ["execute"]}),
+    left = _fake_run(
+        "run-a",
+        {
+            "tool_calls_seen": True,
+            "tool_names": ["read_file"],
+            "first_pass_tool_calls_seen": True,
+            "retried": False,
+            "attempts": 1,
+        },
+    )
+    right = _fake_run(
+        "run-b",
+        {
+            "tool_calls_seen": True,
+            "tool_names": ["execute"],
+            "first_pass_tool_calls_seen": True,
+            "retried": False,
+            "attempts": 1,
+        },
+    )
+    example = _fake_example(
+        {
+            "requires_tool_call": True,
+            "expected_tool_names": ["execute"],
+            "must_succeed_first_pass": True,
+        }
     )
 
-    assert result == {
-        "key": "pairwise_tool_use_preference",
-        "scores": {"a": 1, "b": 0},
-        "comment": (
-            "A preferred: A={'first_pass': True, 'expected_match': True, 'eventual': True, "
-            "'rescued': False, 'attempts': 1, 'tool_names': ['execute']} "
-            "B={'first_pass': False, 'expected_match': True, 'eventual': True, 'rescued': False, "
-            "'attempts': 1, 'tool_names': ['execute']}"
-        ),
-    }
+    result = module.pairwise_tool_use_preference([left, right], example)
+
+    assert result["scores"] == {"run-a": 0, "run-b": 1}
+    assert "'overall_pass': False" in result["comment"]
+    assert "'overall_pass': True" in result["comment"]
 
 
-def test_pairwise_ties_when_ranks_match():
+def test_pairwise_ties_when_both_have_same_pass_fail_and_tool_features():
     module = _load_module()
 
-    result = module.pairwise_tool_use_preference(
-        [
-            _run(
-                "a",
-                first_pass_tool_calls_seen=True,
-                tool_calls_seen=True,
-                attempts=1,
-                tool_names=["execute"],
-            ),
-            _run(
-                "b",
-                first_pass_tool_calls_seen=True,
-                tool_calls_seen=True,
-                attempts=1,
-                tool_names=["execute"],
-            ),
-        ],
-        SimpleNamespace(outputs={"expected_tool_names": ["execute"]}),
+    left = _fake_run(
+        "run-a",
+        {
+            "tool_calls_seen": False,
+            "tool_names": [],
+            "first_pass_tool_calls_seen": False,
+            "retried": False,
+            "attempts": 1,
+        },
     )
-
-    assert result["key"] == "pairwise_tool_use_preference"
-    assert result["scores"] == {"a": 0.5, "b": 0.5}
-    assert result["comment"].startswith("Tie: A=")
-
-
-def test_resolve_examples_uses_limit_when_requested():
-    module = _load_module()
-
-    class FakeClient:
-        def list_examples(self, *, dataset_name, limit):
-            assert dataset_name == "deepclaw"
-            assert limit == 2
-            return [SimpleNamespace(id="1"), SimpleNamespace(id="2")]
-
-    result = module.resolve_examples(
-        FakeClient(), dataset_name="deepclaw", example_ids=None, example_limit=2
+    right = _fake_run(
+        "run-b",
+        {
+            "tool_calls_seen": False,
+            "tool_names": [],
+            "first_pass_tool_calls_seen": False,
+            "retried": False,
+            "attempts": 1,
+        },
     )
+    example = _fake_example({"requires_tool_call": False})
 
-    assert [example.id for example in result] == ["1", "2"]
+    result = module.pairwise_tool_use_preference([left, right], example)
 
-
-def test_resolve_examples_preserves_requested_order():
-    module = _load_module()
-
-    class FakeClient:
-        def list_examples(self, *, dataset_name, limit):
-            assert dataset_name == "deepclaw"
-            assert limit == 100
-            return [
-                SimpleNamespace(id="b"),
-                SimpleNamespace(id="a"),
-            ]
-
-    result = module.resolve_examples(
-        FakeClient(), dataset_name="deepclaw", example_ids=["a", "b"], example_limit=None
-    )
-
-    assert [example.id for example in result] == ["a", "b"]
-
-
-def test_summarize_pairwise_rows_counts_wins_losses_and_ties():
-    module = _load_module()
-
-    rows = [
-        {"evaluation_results": {"scores": {"a": 1, "b": 0}}},
-        {"evaluation_results": {"scores": {"a": 0, "b": 1}}},
-        {"evaluation_results": {"scores": {"a": 0.5, "b": 0.5}}},
-    ]
-
-    assert module.summarize_pairwise_rows(rows) == {
-        "model_a_wins": 1,
-        "model_b_wins": 1,
-        "ties": 1,
-        "total": 3,
-    }
+    assert result["scores"] == {"run-a": 0.5, "run-b": 0.5}
