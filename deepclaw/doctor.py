@@ -1,6 +1,7 @@
 """Diagnostics for DeepClaw — checks system health and reports issues."""
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -84,6 +85,22 @@ def check_workspace(config: DeepClawConfig) -> Check:
     return Check("Workspace", STATUS_WARN, f"{workspace} not found")
 
 
+def check_terminal_compression(config: DeepClawConfig) -> Check:
+    """Check whether configured terminal compression backend is available."""
+    mode = str(config.terminal.compression or "none").strip().lower()
+    if mode == "none":
+        return Check("Terminal compression", STATUS_OK, "disabled")
+    if mode == "rtk":
+        if shutil.which("rtk"):
+            return Check("Terminal compression", STATUS_OK, "rtk is available")
+        return Check(
+            "Terminal compression",
+            STATUS_FAIL,
+            "rtk compression enabled but `rtk` is not installed",
+        )
+    return Check("Terminal compression", STATUS_FAIL, f"unknown compression mode: {mode}")
+
+
 def check_checkpointer_path() -> Check:
     """Check whether the checkpoints.db parent directory exists."""
     parent = CHECKPOINTER_DB_PATH.parent
@@ -146,6 +163,7 @@ async def run_checks(config: DeepClawConfig) -> list[Check]:
         check_telegram_token(config),
         check_llm_api_key(),
         check_workspace(config),
+        check_terminal_compression(config),
         check_checkpointer_path(),
         check_service_installed(),
         check_cron_dir(),
