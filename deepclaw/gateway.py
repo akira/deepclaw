@@ -177,6 +177,11 @@ def _truncate_preview(text: str, limit: int = 48) -> str:
     return cleaned[: limit - 3] + "..."
 
 
+def _safe_preview(text: Any, limit: int = 48) -> str:
+    """Redact secrets first, then produce a short single-line preview."""
+    return _truncate_preview(redact_secrets(str(text)), limit=limit)
+
+
 def _format_tool_summary(tool_name: str, tool_args: Any) -> str | None:
     """Return a short user-visible summary for a tool call."""
     if not isinstance(tool_args, Mapping):
@@ -194,11 +199,11 @@ def _format_tool_summary(tool_name: str, tool_args: Any) -> str | None:
 
     if tool_name in {"terminal", "execute"}:
         command = tool_args.get("command")
-        return f'"{_truncate_preview(command)}"' if command else None
+        return f'"{_safe_preview(command)}"' if command else None
 
     if tool_name == "search_files":
         pattern = tool_args.get("pattern")
-        return f'"{_truncate_preview(pattern)}"' if pattern else None
+        return f'"{_safe_preview(pattern)}"' if pattern else None
 
     if tool_name in {"read_file", "write_file"}:
         path = tool_args.get("path")
@@ -217,12 +222,12 @@ def _format_tool_summary(tool_name: str, tool_args: Any) -> str | None:
 
     if tool_name == "browser_navigate":
         url = tool_args.get("url")
-        return f'"{_truncate_preview(url)}"' if url else None
+        return f'"{_safe_preview(url)}"' if url else None
 
     for key in ("file_path", "name", "question", "expression", "url", "text"):
         value = tool_args.get(key)
         if value:
-            return f'"{_truncate_preview(value)}"'
+            return f'"{_safe_preview(value)}"'
     return None
 
 
@@ -252,6 +257,7 @@ def _emit_progress_line(
     now: float,
 ) -> tuple[str, int]:
     """Append a user-visible progress line to both live text and queue snapshot."""
+    line = redact_secrets(line)
     accumulated, delta = _append_progress_line(accumulated, line)
     queue_snapshot["progress_lines"] = _append_progress_history(
         queue_snapshot.get("progress_lines", []), line
@@ -344,6 +350,16 @@ def _append_progress_history(
     if len(history) > limit:
         history = history[-limit:]
     return history
+
+
+def _redacted_pending_approval(pending: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a redacted copy of pending approval data for queue/status display."""
+    if not isinstance(pending, Mapping):
+        return None
+    redacted: dict[str, Any] = {}
+    for key, value in pending.items():
+        redacted[key] = redact_secrets(value) if isinstance(value, str) else value
+    return redacted
 
 
 def _looks_like_narration(text: str) -> bool:
@@ -501,9 +517,7 @@ class Gateway:
             "status": "running",
             "started_at": now_ts,
             "updated_at": now_ts,
-            "user_text_preview": _truncate_preview(
-                original_user_text or "approval resume", limit=120
-            ),
+            "user_text_preview": _safe_preview(original_user_text or "approval resume", limit=120),
             "progress_lines": [],
             "pending_approval": None,
             "final_text_preview": None,
@@ -707,14 +721,15 @@ class Gateway:
         if pending is not None:
             response_text = _format_pending_interrupt_message(pending)
             queue_snapshot["status"] = "awaiting_approval"
-            queue_snapshot["pending_approval"] = dict(pending)
+            queue_snapshot["pending_approval"] = _redacted_pending_approval(pending)
         else:
             response_text = accumulated if accumulated else "(no response)"
-            queue_snapshot["status"] = "completed"
+            if queue_snapshot.get("status") != "error":
+                queue_snapshot["status"] = "completed"
             queue_snapshot["pending_approval"] = None
         response_text = redact_secrets(response_text)
         queue_snapshot["updated_at"] = time.time()
-        queue_snapshot["final_text_preview"] = _truncate_preview(response_text, limit=160)
+        queue_snapshot["final_text_preview"] = _safe_preview(response_text, limit=160)
 
         chunks = chunk_message(response_text, limit)
         await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])

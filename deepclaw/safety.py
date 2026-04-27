@@ -378,6 +378,27 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
 
 _REDACTED = "[REDACTED]"
 
+# Explicit DeepClaw-managed/tool-managed vars blocked from child shell commands
+# unless a trusted skill or config entry explicitly allowlists them.
+CHILD_PROCESS_ENV_BLOCKLIST: frozenset[str] = frozenset(
+    {
+        "TELEGRAM_BOT_TOKEN",
+        "DEEPCLAW_ALLOWED_USERS",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TAVILY_API_KEY",
+        "LANGSMITH_API_KEY",
+        "LANGCHAIN_API_KEY",
+        "BROWSERBASE_API_KEY",
+        "BROWSERBASE_PROJECT_ID",
+    }
+)
+
 
 def redact_secrets(text: str) -> str:
     """Replace detected credential patterns in text with [REDACTED]."""
@@ -486,25 +507,50 @@ _SENSITIVE_SUBSTRINGS: tuple[str, ...] = (
 )
 
 
-def scrub_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    """Return a filtered copy of environment variables safe for child processes.
+def is_sensitive_env_var_name(name: str) -> bool:
+    """Return True when an env-var name would be scrubbed as sensitive by default."""
+    upper = str(name).upper()
+    return upper not in SAFE_ENV_VARS and any(s in upper for s in _SENSITIVE_SUBSTRINGS)
 
-    Starts from ``env`` (defaults to ``os.environ``) and keeps only variables
-    that are in the ``SAFE_ENV_VARS`` allowlist OR whose names do not contain
-    any sensitive substring. Variables containing KEY, TOKEN, SECRET, PASSWORD,
-    etc. in their name are always stripped unless explicitly allowlisted.
+
+def scrub_env(
+    env: dict[str, str] | None = None, *, keep_sensitive: set[str] | frozenset[str] | None = None
+) -> dict[str, str]:
+    """Return a filtered copy of environment variables safe for generic child processes.
+
+    This is the conservative scrubber used when DeepClaw wants a mostly non-secret
+    subprocess environment. It strips any variable whose name looks sensitive
+    unless explicitly allowlisted via ``keep_sensitive``.
     """
     source = env if env is not None else os.environ
+    allowed_sensitive = set(keep_sensitive or ())
     filtered: dict[str, str] = {}
     for name, value in source.items():
-        if name in SAFE_ENV_VARS:
+        if name in SAFE_ENV_VARS or name in allowed_sensitive:
             filtered[name] = value
             continue
-        upper = name.upper()
-        if any(s in upper for s in _SENSITIVE_SUBSTRINGS):
+        if is_sensitive_env_var_name(name):
             continue
         filtered[name] = value
     return filtered
+
+
+def sanitize_child_command_env(
+    env: dict[str, str] | None = None,
+    extra_env: dict[str, str] | None = None,
+    *,
+    keep_sensitive: set[str] | frozenset[str] | None = None,
+) -> dict[str, str]:
+    """Build the env for DeepClaw child shell commands.
+
+    Start from the conservative ``scrub_env()`` baseline, then allowlist any
+    explicitly approved sensitive variables. This preserves the pre-existing
+    default of not forwarding arbitrary secret-looking env vars into child
+    shell commands while still allowing narrow opt-ins.
+    """
+    merged = dict(env if env is not None else os.environ)
+    merged.update(extra_env or {})
+    return scrub_env(merged, keep_sensitive=keep_sensitive)
 
 
 # ---------------------------------------------------------------------------

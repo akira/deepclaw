@@ -50,6 +50,46 @@ class TestCheckExecute:
         tc = _make_tool_call("execute", {"command": "ls -la"})
         assert _check_execute(tc) is None
 
+    @patch("deepclaw.middleware.load_config")
+    @patch("deepclaw.middleware.interrupt")
+    def test_sensitive_env_passthrough_triggers_interrupt(self, mock_interrupt, mock_load_config):
+        class _Terminal:
+            env_passthrough = ["LANGSMITH_API_KEY"]
+
+        class _Config:
+            terminal = _Terminal()
+
+        mock_load_config.return_value = _Config()
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval"}
+        tc = _make_tool_call("execute", {"command": "ls -la"})
+
+        result = _check_execute(tc)
+
+        assert result is not None
+        assert result.status == "error"
+        mock_interrupt.assert_called_once()
+
+    @patch("deepclaw.middleware.load_config")
+    @patch("deepclaw.middleware.interrupt")
+    def test_sensitive_env_passthrough_warning_includes_var_names(
+        self, mock_interrupt, mock_load_config
+    ):
+        class _Terminal:
+            env_passthrough = ["LANGCHAIN_API_KEY", "LANGSMITH_API_KEY"]
+
+        class _Config:
+            terminal = _Terminal()
+
+        mock_load_config.return_value = _Config()
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval"}
+        tc = _make_tool_call("execute", {"command": "echo hi"})
+
+        _check_execute(tc)
+
+        warning = mock_interrupt.call_args[0][0]["warning"]
+        assert "LANGCHAIN_API_KEY" in warning
+        assert "LANGSMITH_API_KEY" in warning
+
     def test_extract_last_user_text_from_state(self):
         state = {
             "messages": [
@@ -64,6 +104,10 @@ class TestCheckExecute:
         assert _user_intent_requires_review(state) == (
             "User explicitly requested inline Python execution (`python -c`)"
         )
+
+    def test_user_intent_review_reason_detected_for_bash_command_wording(self):
+        state = {"messages": [{"role": "user", "content": "can you bash command sleep 10"}]}
+        assert _user_intent_requires_review(state) == "User explicitly requested bash execution"
 
     def test_critical_command_blocked(self):
         tc = _make_tool_call("execute", {"command": "rm -rf /"})
@@ -114,6 +158,17 @@ class TestCheckExecute:
         mock_interrupt.return_value = {"type": "reject", "message": "Need approval for bash"}
         tc = _make_tool_call("execute", {"command": "sleep 60 && echo SLEPT_60"})
         state = {"messages": [{"role": "user", "content": "run bash sleep 60"}]}
+        result = _check_execute(tc, state)
+        assert result is not None
+        assert result.status == "error"
+        assert "Need approval for bash" in result.content
+        mock_interrupt.assert_called_once()
+
+    @patch("deepclaw.middleware.interrupt")
+    def test_user_requested_bash_command_wording_triggers_interrupt(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "reject", "message": "Need approval for bash"}
+        tc = _make_tool_call("execute", {"command": "sleep 10 && echo SLEEP_DONE"})
+        state = {"messages": [{"role": "user", "content": "can you bash command sleep 10"}]}
         result = _check_execute(tc, state)
         assert result is not None
         assert result.status == "error"

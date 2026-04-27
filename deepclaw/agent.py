@@ -3,12 +3,14 @@
 import logging
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.backends.protocol import ExecuteResponse
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -21,11 +23,99 @@ from deepclaw.local_context import (
 )
 from deepclaw.middleware import SafetyMiddleware
 from deepclaw.oauth import resolve_token
-from deepclaw.safety import scrub_env
+from deepclaw.safety import sanitize_child_command_env
 from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
 
 logger = logging.getLogger(__name__)
+
+
+class DeepClawLocalShellBackend(LocalShellBackend):
+    """Local shell backend with conservative child-env filtering."""
+
+    def __init__(
+        self,
+        *args,
+        env: dict[str, str] | None = None,
+        allowed_sensitive: set[str] | frozenset[str] | None = None,
+        **kwargs,
+    ) -> None:
+        self._deepclaw_env_overrides = dict(env or {})
+        self._allowed_sensitive = frozenset(allowed_sensitive or ())
+        super().__init__(*args, env={}, **kwargs)
+
+    def _build_child_env(self) -> dict[str, str]:
+        return sanitize_child_command_env(
+            extra_env=self._deepclaw_env_overrides,
+            keep_sensitive=self._allowed_sensitive,
+        )
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        if not command or not isinstance(command, str):
+            return ExecuteResponse(
+                output="Error: Command must be a non-empty string.",
+                exit_code=1,
+                truncated=False,
+            )
+
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if effective_timeout <= 0:
+            msg = f"timeout must be positive, got {effective_timeout}"
+            raise ValueError(msg)
+
+        try:
+            result = subprocess.run(  # noqa: S602
+                command,
+                check=False,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=effective_timeout,
+                env=self._build_child_env(),
+                cwd=str(self.cwd),
+            )
+
+            output_parts = []
+            if result.stdout:
+                output_parts.append(result.stdout)
+            if result.stderr:
+                stderr_lines = result.stderr.strip().split("\n")
+                output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
+
+            output = "\n".join(output_parts) if output_parts else "<no output>"
+            truncated = False
+            if len(output) > self._max_output_bytes:
+                output = output[: self._max_output_bytes]
+                output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+                truncated = True
+
+            if result.returncode != 0:
+                output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
+
+            return ExecuteResponse(
+                output=output,
+                exit_code=result.returncode,
+                truncated=truncated,
+            )
+        except subprocess.TimeoutExpired:
+            if timeout is not None:
+                msg = (
+                    f"Error: Command timed out after {effective_timeout} seconds (custom timeout). "
+                    "The command may be stuck or require more time."
+                )
+            else:
+                msg = (
+                    f"Error: Command timed out after {effective_timeout} seconds. "
+                    "For long-running commands, re-run using the timeout parameter."
+                )
+            return ExecuteResponse(output=msg, exit_code=124, truncated=False)
+        except Exception as e:  # noqa: BLE001
+            return ExecuteResponse(
+                output=f"Error executing command ({type(e).__name__}): {e}",
+                exit_code=1,
+                truncated=False,
+            )
+
 
 SOUL_FILE = CONFIG_DIR / "SOUL.md"
 MEMORY_FILE = CONFIG_DIR / "AGENTS.md"
@@ -260,19 +350,20 @@ def _shell_backend(config):
 
     kwargs = {
         "virtual_mode": False,
-        "env": scrub_env(),
+        "env": {},
+        "allowed_sensitive": set(config.terminal.env_passthrough),
         "timeout": config.command_timeout,
         "root_dir": workspace_root,
     }
     try:
-        return LocalShellBackend(**kwargs)
+        return DeepClawLocalShellBackend(**kwargs)
     except TypeError:
         logger.warning(
             "Installed deepagents LocalShellBackend does not accept root_dir; "
             "falling back to process working directory"
         )
         kwargs.pop("root_dir", None)
-        return LocalShellBackend(**kwargs)
+        return DeepClawLocalShellBackend(**kwargs)
 
 
 def _composite_backend(default_backend):
@@ -356,12 +447,7 @@ def create_agent(config, checkpointer):
 
     # Skills
     skills_sources = _setup_skills()
-    middleware.append(
-        SkillsMiddleware(
-            backend=fs_backend,
-            sources=skills_sources,
-        )
-    )
+    middleware.append(SkillsMiddleware(backend=fs_backend, sources=skills_sources))
 
     # Deepagents CLI-style local context: detected once, cached in thread state,
     # and refreshed after conversation compaction.

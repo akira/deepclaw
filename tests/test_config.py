@@ -143,6 +143,7 @@ class TestLoadConfigDefaults:
         assert cfg.telegram.streaming.enabled is True
         assert cfg.telegram.streaming.edit_interval == 1.0
         assert cfg.telegram.streaming.buffer_threshold == 100
+        assert cfg.terminal.env_passthrough == []
         assert cfg.workspace_root == "~/.deepclaw/workspace"
 
 
@@ -172,6 +173,10 @@ telegram:
     buffer_threshold: 200
 workspace:
   root: /tmp/ws
+terminal:
+  env_passthrough:
+    - LANGSMITH_API_KEY
+    - CUSTOM_TOKEN
 """,
         )
 
@@ -183,6 +188,7 @@ workspace:
         assert cfg.telegram.streaming.enabled is False
         assert cfg.telegram.streaming.edit_interval == 2.5
         assert cfg.telegram.streaming.buffer_threshold == 200
+        assert cfg.terminal.env_passthrough == ["LANGSMITH_API_KEY", "CUSTOM_TOKEN"]
         assert cfg.workspace_root == "/tmp/ws"
 
     def test_malformed_yaml_returns_defaults(self, config_dir, monkeypatch):

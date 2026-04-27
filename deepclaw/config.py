@@ -55,10 +55,16 @@ class HeartbeatConfig:
 
 
 @dataclass
+class TerminalConfig:
+    env_passthrough: list[str] = field(default_factory=list)
+
+
+@dataclass
 class DeepClawConfig:
     model: str = "anthropic:claude-sonnet-4-6-20250514"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    terminal: TerminalConfig = field(default_factory=TerminalConfig)
     workspace_root: str = "~/.deepclaw/workspace"
     command_timeout: int = 300  # seconds, default 5 minutes
 
@@ -196,6 +202,14 @@ DEFAULT_CONFIG_YAML = """\
 #   quiet_hours_start: 23
 #   quiet_hours_end: 8
 #   timezone: "America/Los_Angeles"
+#
+# Terminal child-process env passthrough for blocked DeepClaw-managed secrets.
+# Use this when a trusted skill or workflow needs one of DeepClaw's own API keys
+# available inside shell commands.
+# terminal:
+#   env_passthrough:
+#     - LANGSMITH_API_KEY
+#     - LANGCHAIN_API_KEY
 """
 
 
@@ -221,6 +235,7 @@ def load_config() -> DeepClawConfig:
     yaml_streaming = yaml_telegram.get("streaming", {}) or {}
     yaml_workspace = yaml_data.get("workspace", {}) or {}
     yaml_heartbeat = yaml_data.get("heartbeat", {}) or {}
+    yaml_terminal = yaml_data.get("terminal", {}) or {}
 
     streaming = TelegramStreamingConfig(
         enabled=_to_bool(yaml_streaming.get("enabled"), TelegramStreamingConfig.enabled),
@@ -262,6 +277,10 @@ def load_config() -> DeepClawConfig:
         notify_chat_id=str(yaml_heartbeat.get("notify_chat_id", "")),
     )
 
+    terminal = TerminalConfig(
+        env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", []))
+    )
+
     command_timeout = _to_int(
         _resolve(ENV_COMMAND_TIMEOUT, dot_env, yaml_data.get("command_timeout")),
         DeepClawConfig.command_timeout,
@@ -271,6 +290,7 @@ def load_config() -> DeepClawConfig:
         model=model,
         telegram=telegram,
         heartbeat=heartbeat,
+        terminal=terminal,
         workspace_root=workspace_root,
         command_timeout=command_timeout,
     )

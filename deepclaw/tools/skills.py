@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from deepclaw.config import CONFIG_DIR
+from deepclaw.safety import CHILD_PROCESS_ENV_BLOCKLIST, is_sensitive_env_var_name
 
 SKILLS_DIR = CONFIG_DIR / "skills"
 
@@ -101,7 +102,7 @@ def _frontmatter_fields(content: str) -> dict[str, str]:
             return {
                 str(key).strip(): str(value).strip()
                 for key, value in data.items()
-                if value is not None
+                if value is not None and not isinstance(value, (list, dict))
             }
     except Exception:
         pass
@@ -109,6 +110,41 @@ def _frontmatter_fields(content: str) -> dict[str, str]:
     for match in _FRONTMATTER_FIELD_RE.finditer(frontmatter):
         fields[match.group("key").strip()] = match.group("value").strip().strip('"').strip("'")
     return fields
+
+
+def _required_environment_variables(content: str) -> list[str]:
+    """Extract required_environment_variables from skill frontmatter."""
+    frontmatter, _ = _split_frontmatter(content)
+    if not frontmatter:
+        return []
+    try:
+        import yaml
+
+        data = yaml.safe_load(frontmatter)
+    except Exception:
+        data = None
+
+    if not isinstance(data, dict):
+        return []
+
+    raw = data.get("required_environment_variables")
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, str):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    return []
+
+
+_ENV_VAR_NAME_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+
+
+def _mentioned_sensitive_env_vars(content: str) -> list[str]:
+    """Return referenced env vars that child command env filtering would scrub by default."""
+    mentioned: set[str] = set()
+    for env_var in _ENV_VAR_NAME_RE.findall(content):
+        if env_var in CHILD_PROCESS_ENV_BLOCKLIST or is_sensitive_env_var_name(env_var):
+            mentioned.add(env_var)
+    return sorted(mentioned)
 
 
 def _has_heading(body: str, heading: str) -> bool:
@@ -133,6 +169,13 @@ def _skill_inventory_entry(skill_dir: Path) -> dict[str, Any]:
     ]
     frontmatter_name = fields.get("name", "")
     frontmatter_description = fields.get("description", "")
+    required_environment_variables = _required_environment_variables(content) if content else []
+    referenced_blocked_env_vars = _mentioned_sensitive_env_vars(content) if content else []
+    undeclared_required_env_vars = [
+        env_var
+        for env_var in referenced_blocked_env_vars
+        if env_var not in required_environment_variables
+    ]
     loadable = bool(frontmatter_name and frontmatter_description)
     issues: list[str] = []
     if not skill_file.is_file():
@@ -143,6 +186,11 @@ def _skill_inventory_entry(skill_dir: Path) -> dict[str, Any]:
         issues.append(
             f"frontmatter name '{frontmatter_name}' does not match directory '{skill_dir.name}'"
         )
+    if undeclared_required_env_vars:
+        issues.append(
+            "references sensitive env vars without declaring required_environment_variables: "
+            + ", ".join(undeclared_required_env_vars)
+        )
     return {
         "name": skill_dir.name,
         "path": str(skill_file),
@@ -152,6 +200,9 @@ def _skill_inventory_entry(skill_dir: Path) -> dict[str, Any]:
         "frontmatter_description": frontmatter_description,
         "loadable": loadable,
         "missing_sections": missing_sections,
+        "required_environment_variables": required_environment_variables,
+        "referenced_blocked_env_vars": referenced_blocked_env_vars,
+        "undeclared_required_env_vars": undeclared_required_env_vars,
         "issues": issues,
     }
 
@@ -426,6 +477,7 @@ def skill_view(name: str) -> dict[str, Any]:
         "path": str(skill_file),
         "description": _extract_description(content),
         "content": content,
+        "required_environment_variables": _required_environment_variables(content),
     }
 
 
@@ -641,7 +693,7 @@ def skill_delete(name: str) -> dict[str, Any]:
 
 
 def skills_audit() -> dict[str, Any]:
-    """Audit local skills for duplicate descriptions and missing required sections."""
+    """Audit local skills for duplicate descriptions, missing sections, and env metadata gaps."""
     inventory = _skill_inventory()
     duplicates: dict[str, list[str]] = {}
     by_description: dict[str, list[str]] = {}
@@ -672,11 +724,16 @@ def skills_audit() -> dict[str, Any]:
             "name": entry["name"],
             "path": entry["path"],
             "missing_sections": entry["missing_sections"],
+            "required_environment_variables": entry["required_environment_variables"],
+            "undeclared_required_env_vars": entry["undeclared_required_env_vars"],
             "issues": entry["issues"],
         }
         for entry in inventory
     ]
     missing_required_sections_count = sum(1 for entry in inventory if entry["missing_sections"])
+    undeclared_required_env_vars_count = sum(
+        1 for entry in inventory if entry["undeclared_required_env_vars"]
+    )
 
     return {
         "count": len(inventory),
@@ -684,6 +741,7 @@ def skills_audit() -> dict[str, Any]:
         "duplicate_descriptions": duplicate_descriptions,
         "duplicate_descriptions_count": len(duplicate_descriptions),
         "skills_missing_required_sections_count": missing_required_sections_count,
+        "skills_missing_required_env_declarations_count": undeclared_required_env_vars_count,
         "required_sections": list(_REQUIRED_SKILL_SECTIONS),
         "root": str(_ensure_skills_dir()),
     }

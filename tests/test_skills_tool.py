@@ -32,6 +32,19 @@ class TestSkillView:
 
         assert result["name"] == "test-skill"
         assert "Hello" in result["content"]
+        assert result["required_environment_variables"] == []
+
+    def test_extracts_required_environment_variables(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+        skill_dir = tmp_path / "trace-debug"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: trace-debug\ndescription: Debug traces\nrequired_environment_variables:\n  - LANGSMITH_API_KEY\n  - CUSTOM_TOKEN\n---\n\n# Trace Debug\n"
+        )
+
+        result = skills_mod.skill_view("trace-debug")
+
+        assert result["required_environment_variables"] == ["LANGSMITH_API_KEY", "CUSTOM_TOKEN"]
 
     def test_extracts_folded_yaml_description(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
@@ -189,7 +202,7 @@ class TestSkillsAudit:
         a_dir = tmp_path / "alpha-skill"
         a_dir.mkdir()
         (a_dir / "SKILL.md").write_text(
-            "---\nname: alpha-skill\ndescription: Shared description\n---\n\n"
+            "---\nname: alpha-skill\ndescription: Shared description\nrequired_environment_variables:\n  - LANGSMITH_API_KEY\n---\n\n"
             "# Alpha\n\n"
             "## When to Use\n- Use alpha\n"
         )
@@ -199,6 +212,7 @@ class TestSkillsAudit:
         (b_dir / "SKILL.md").write_text(
             "---\nname: beta-skill\ndescription: Shared description\n---\n\n"
             "# Beta\n\n"
+            "Uses LANGSMITH_API_KEY in shell commands.\n\n"
             "## Verification\n- Check beta\n"
         )
 
@@ -210,9 +224,29 @@ class TestSkillsAudit:
         assert duplicate["description"] == "Shared description"
         assert duplicate["skills"] == ["alpha-skill", "beta-skill"]
         assert result["skills_missing_required_sections_count"] == 2
+        assert result["skills_missing_required_env_declarations_count"] == 1
         alpha_issue = next(issue for issue in result["skills"] if issue["name"] == "alpha-skill")
         assert "Deterministic First" in alpha_issue["missing_sections"]
         assert "Verification" in alpha_issue["missing_sections"]
+        beta_issue = next(issue for issue in result["skills"] if issue["name"] == "beta-skill")
+        assert beta_issue["undeclared_required_env_vars"] == ["LANGSMITH_API_KEY"]
+
+    def test_reports_custom_sensitive_env_vars_that_runtime_scrubs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_mod, "SKILLS_DIR", tmp_path)
+
+        skill_dir = tmp_path / "custom-token-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: custom-token-skill\ndescription: Uses custom token\n---\n\n"
+            "# Custom Token Skill\n\n"
+            "## When to Use\n- Use when CUSTOM_TOKEN is required\n\n"
+            "## Verification\n- Confirm CUSTOM_TOKEN is available\n"
+        )
+
+        result = skills_mod.skills_audit()
+
+        issue = next(entry for entry in result["skills"] if entry["name"] == "custom-token-skill")
+        assert issue["undeclared_required_env_vars"] == ["CUSTOM_TOKEN"]
 
 
 class TestSkillsCheckResolvable:

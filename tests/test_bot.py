@@ -521,6 +521,58 @@ class TestGatewayRedaction:
         assert '🔧 patch: "/tmp/file.py" (×2)' in snapshot["progress_lines"]
 
     @pytest.mark.asyncio
+    async def test_streaming_queue_snapshot_redacts_sensitive_previews(self):
+        secret = "sk-ant-secretvalue1234567890abcd"
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "tool_call",
+                                "name": "execute",
+                                "args": {"command": f"export OPENAI_API_KEY={secret}"},
+                            },
+                        ]
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": f"done {secret}"}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text=f"use key {secret}")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert secret not in snapshot["user_text_preview"]
+        assert all(secret not in line for line in snapshot["progress_lines"])
+        assert secret not in (snapshot["final_text_preview"] or "")
+
+    @pytest.mark.asyncio
+    async def test_streaming_preserves_error_queue_status(self, monkeypatch):
+        class _RaisingAgent:
+            async def astream(self, *_args, **_kwargs):
+                raise RuntimeError("boom")
+                yield  # pragma: no cover
+
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=_RaisingAgent(), streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="trigger failure")
+        monkeypatch.setattr(gateway, "_get_pending_interrupt", AsyncMock(return_value=None))
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert snapshot["status"] == "error"
+
+    @pytest.mark.asyncio
     async def test_streaming_shows_resolved_chunk_progress_without_duplicate_final_call(self):
         agent = _FakeStreamingAgent(
             [
@@ -1431,6 +1483,57 @@ class TestCmdContext:
 
 
 class TestCmdQueue:
+    @pytest.mark.asyncio
+    async def test_queue_pending_approval_without_snapshot_sets_state(self):
+        update = _make_slash_update(text="/queue")
+        gateway = MagicMock()
+        gateway.get_queue_snapshot.return_value = None
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                PENDING_APPROVALS_KEY: {
+                    "1": {
+                        "tool": "execute",
+                        "warning": "sudo requires approval",
+                        "command": "sudo apt-get install ripgrep",
+                    }
+                },
+            }
+        )
+
+        await cmd_queue(update, ctx)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "State: awaiting_approval" in text
+        assert "Pending approval:" in text
+
+    @pytest.mark.asyncio
+    async def test_queue_redacts_sensitive_pending_approval_fields(self):
+        secret = "sk-ant-secretvalue1234567890abcd"
+        update = _make_slash_update(text="/queue")
+        gateway = MagicMock()
+        gateway.get_queue_snapshot.return_value = {
+            "status": "awaiting_approval",
+            "started_at": 900.0,
+            "updated_at": 995.0,
+            "user_text_preview": f"install {secret}",
+            "progress_lines": [f'💻 terminal: "export OPENAI_API_KEY={secret}"'],
+            "pending_approval": {
+                "tool": "execute",
+                "warning": f"contains {secret}",
+                "command": f"export OPENAI_API_KEY={secret}",
+            },
+            "final_text_preview": f"Waiting for {secret}",
+        }
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        with patch("deepclaw.channels.telegram.time.time", return_value=1000.0):
+            await cmd_queue(update, ctx)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert secret not in text
+        assert "[REDACTED]" in text
+
     @pytest.mark.asyncio
     async def test_queue_shows_recent_tool_activity_and_pending_approval(self):
         update = _make_slash_update(text="/queue")

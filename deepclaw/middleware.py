@@ -15,6 +15,7 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command, interrupt
 
+from deepclaw.config import load_config
 from deepclaw.safety import (
     check_command,
     check_url_safety_sync,
@@ -26,7 +27,8 @@ from deepclaw.safety import (
 logger = logging.getLogger(__name__)
 
 _USER_INTENT_BASH_RE = re.compile(
-    r"\b(run|execute)\b.*\bbash\b|\bbash\b.*\b(run|execute)\b", re.IGNORECASE
+    r"\b(run|execute|command|cmd)\b.*\bbash\b|\bbash\b.*\b(run|execute|command|cmd)\b",
+    re.IGNORECASE,
 )
 _USER_INTENT_INLINE_PYTHON_RE = re.compile(r"\bpython(?:3)?\s+-c\b", re.IGNORECASE)
 
@@ -104,6 +106,21 @@ def _user_intent_requires_review(state: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def _passthrough_env_warning() -> str | None:
+    """Return an approval warning when shell commands inherit allowlisted sensitive env vars."""
+    try:
+        passthrough = list(load_config().terminal.env_passthrough)
+    except Exception:
+        passthrough = []
+    if not passthrough:
+        return None
+    vars_text = ", ".join(sorted(passthrough))
+    return (
+        "Shell commands in this session inherit allowlisted sensitive environment variables: "
+        f"{vars_text}"
+    )
+
+
 def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> ToolMessage | None:
     """Check a shell command for dangerous patterns.
 
@@ -117,10 +134,20 @@ def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> T
 
     matches = check_command(command)
     intent_warning = _user_intent_requires_review(state)
-    if not matches and not intent_warning:
+    passthrough_warning = _passthrough_env_warning()
+    warnings = [
+        reason
+        for reason in (
+            format_warning(command, matches) if matches else None,
+            intent_warning,
+            passthrough_warning,
+        )
+        if reason
+    ]
+    if not warnings:
         return None
 
-    warning_text = format_warning(command, matches) if matches else intent_warning
+    warning_text = "\n\n".join(warnings)
     has_critical = any(m.severity == "critical" for m in matches)
 
     if has_critical:
@@ -210,11 +237,12 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             """Intercept tool calls for safety checks, then redact output."""
             tool_call = request.tool_call
             tool_name = tool_call["name"]
+            request_state = getattr(request, "state", None)
 
             # --- Pre-execution safety gates ---
 
             if tool_name == _EXECUTE_TOOL:
-                blocked = _check_execute(tool_call, getattr(request, "state", None))
+                blocked = _check_execute(tool_call, request_state)
                 if blocked is not None:
                     return blocked
 

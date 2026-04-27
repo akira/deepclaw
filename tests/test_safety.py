@@ -33,6 +33,7 @@ from deepclaw.safety import (
     has_secrets,
     is_dangerous,
     redact_secrets,
+    sanitize_child_command_env,
     scrub_env,
 )
 
@@ -610,13 +611,52 @@ class TestScrubEnv:
     def test_strips_api_keys(self):
         env = {
             "PATH": "/usr/bin",
-            "ANTHROPIC_API_KEY": "sk-ant-secret",
-            "OPENAI_API_KEY": "sk-openai-secret",
+            "ANTHROPIC_API_KEY": "***",
+            "OPENAI_API_KEY": "***",
         }
         result = scrub_env(env)
         assert "PATH" in result
         assert "ANTHROPIC_API_KEY" not in result
         assert "OPENAI_API_KEY" not in result
+
+    def test_keeps_sensitive_vars_when_explicitly_allowlisted(self):
+        env = {
+            "PATH": "/usr/bin",
+            "LANGSMITH_API_KEY": "***",
+        }
+        result = scrub_env(env, keep_sensitive={"LANGSMITH_API_KEY"})
+        assert result["LANGSMITH_API_KEY"] == "***"
+
+    def test_passes_allowlisted_sensitive_vars_to_child_commands(self):
+        env = {
+            "PATH": "/usr/bin",
+            "LANGSMITH_API_KEY": "***",
+            "LANGCHAIN_API_KEY": "***",
+        }
+        result = sanitize_child_command_env(
+            env,
+            keep_sensitive={"LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"},
+        )
+        assert result["LANGSMITH_API_KEY"] == "***"
+        assert result["LANGCHAIN_API_KEY"] == "***"
+
+    def test_blocks_sensitive_vars_from_child_commands_by_default(self):
+        env = {
+            "PATH": "/usr/bin",
+            "LANGSMITH_API_KEY": "***",
+            "OPENAI_API_KEY": "***",
+        }
+        result = sanitize_child_command_env(env)
+        assert "LANGSMITH_API_KEY" not in result
+        assert "OPENAI_API_KEY" not in result
+
+    def test_blocks_arbitrary_custom_secret_like_env_vars_for_child_commands(self):
+        env = {
+            "PATH": "/usr/bin",
+            "MY_CUSTOM_API_KEY": "custom-secret",
+        }
+        result = sanitize_child_command_env(env)
+        assert "MY_CUSTOM_API_KEY" not in result
 
     def test_strips_tokens(self):
         env = {
