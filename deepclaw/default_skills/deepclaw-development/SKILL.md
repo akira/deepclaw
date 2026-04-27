@@ -396,17 +396,56 @@ context.bot_data[GATEWAY_KEY] = Gateway(agent=new_agent, streaming_config=new_co
 
 ## Contributing via PR
 
-DeepClaw source is at `akira/deepclaw` (origin) and the fork is at `BlueMeadow19/deepclaw` (remote name: `fork`).
+Assume a standard git setup:
+- `origin` points at the main DeepClaw repository you want to contribute to
+- a writable fork remote (often named `fork`) points at your fork
+
+Before opening a PR, verify your remotes with:
+```bash
+git remote -v
+```
+
+### Use git worktrees by default
+
+When multiple agents or parallel tasks may touch DeepClaw at the same time, **do not reuse the main checkout for feature work**. Use a dedicated git worktree per branch so each agent gets an isolated filesystem view while sharing the same object store.
+
+Recommended layout:
+- primary repo: your main DeepClaw clone
+- worktrees: a sibling or dedicated directory such as `../worktrees/deepclaw/<branch-name>`
+
+Standard flow:
+```bash
+cd /path/to/deepclaw
+git fetch origin
+mkdir -p ../worktrees/deepclaw
+git worktree add -b feat/my-feature ../worktrees/deepclaw/feat-my-feature origin/main
+cd ../worktrees/deepclaw/feat-my-feature
+```
+
+Why this is the default now:
+- avoids agents clobbering each other's uncommitted changes
+- keeps branch-specific test artifacts and local edits isolated
+- makes it safer to run multiple coding agents against DeepClaw concurrently
+
+Cleanup after merge or abandonment:
+```bash
+cd /path/to/deepclaw
+git worktree remove ../worktrees/deepclaw/feat-my-feature
+git branch -d feat/my-feature
+```
 
 ```bash
-# Branch from latest main
-git checkout main && git pull origin main
-git checkout -b feat/my-feature
+# Preferred: branch in a dedicated worktree from latest main
+cd /path/to/deepclaw
+git fetch origin
+mkdir -p ../worktrees/deepclaw
+git worktree add -b feat/my-feature ../worktrees/deepclaw/feat-my-feature origin/main
+cd ../worktrees/deepclaw/feat-my-feature
 
 # ... make changes ...
 
 # Run tests through the project venv (not global uv run)
-/home/ubuntu/deepclaw/.venv/bin/python -m pytest tests/ -v --tb=short
+./.venv/bin/python -m pytest tests/ -v --tb=short
 
 # Commit — stage only the files you want, exclude .beads/
 git add deepclaw/... tests/...
@@ -414,8 +453,10 @@ git commit -m "feat: description"
 
 # Push to fork and open PR
 git push fork feat/my-feature
-gh pr create --repo akira/deepclaw --head BlueMeadow19:feat/my-feature --title "..." --body "..."
+gh pr create --repo <upstream-owner>/deepclaw --head <your-fork-owner>:feat/my-feature --title "..." --body "..."
 ```
+
+If you are doing a tiny solo fix and no other agents are active, a normal single-checkout branch can still work — but the default DeepClaw guidance is now **worktrees first**.
 
 **If .beads/ gets accidentally committed:** `git rm --cached .beads/issues.jsonl`, add `.beads/` to `.gitignore`, then `git commit --amend --no-edit` + `git push fork <branch> --force`.
 
