@@ -69,12 +69,20 @@ def check_telegram_token(config: DeepClawConfig) -> Check:
 
 
 def check_llm_api_key() -> Check:
-    """Check whether ANTHROPIC_API_KEY or OPENAI_API_KEY is set in environment."""
+    """Check whether one of the supported LLM API credentials is set."""
     if os.environ.get("ANTHROPIC_API_KEY"):
         return Check("LLM API key", STATUS_OK, "ANTHROPIC_API_KEY is set")
     if os.environ.get("OPENAI_API_KEY"):
         return Check("LLM API key", STATUS_OK, "OPENAI_API_KEY is set")
-    return Check("LLM API key", STATUS_FAIL, "Neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set")
+    if os.environ.get("DEEPINFRA_API_TOKEN"):
+        return Check("LLM API key", STATUS_OK, "DEEPINFRA_API_TOKEN is set")
+    if os.environ.get("DEEPINFRA_API_KEY"):
+        return Check("LLM API key", STATUS_OK, "DEEPINFRA_API_KEY is set")
+    return Check(
+        "LLM API key",
+        STATUS_FAIL,
+        "None of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPINFRA_API_TOKEN, or DEEPINFRA_API_KEY is set",
+    )
 
 
 def check_workspace(config: DeepClawConfig) -> Check:

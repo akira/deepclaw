@@ -113,6 +113,7 @@ class TestCheckLlmApiKey:
     def test_anthropic_key_set(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
         result = check_llm_api_key()
         assert result.status == STATUS_OK
         assert "ANTHROPIC_API_KEY" in result.message
@@ -120,13 +121,33 @@ class TestCheckLlmApiKey:
     def test_openai_key_set(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
         result = check_llm_api_key()
         assert result.status == STATUS_OK
         assert "OPENAI_API_KEY" in result.message
 
+    def test_deepinfra_key_set(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("DEEPINFRA_API_TOKEN", "di-test")
+        monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+        result = check_llm_api_key()
+        assert result.status == STATUS_OK
+        assert "DEEPINFRA_API_TOKEN" in result.message
+
+    def test_deepinfra_api_key_alias_set(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
+        monkeypatch.setenv("DEEPINFRA_API_KEY", "di-key")
+        result = check_llm_api_key()
+        assert result.status == STATUS_OK
+        assert "DEEPINFRA_API_KEY" in result.message
+
     def test_no_key_set(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
         result = check_llm_api_key()
         assert result.status == STATUS_FAIL
 

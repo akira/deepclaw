@@ -89,11 +89,21 @@ class TestGenerateServiceFile:
         assert "ExecStart=" in content
         assert "deepclaw" in content.lower()
 
-    @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-test"})
+    @patch.dict(
+        os.environ,
+        {
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "ANTHROPIC_API_KEY": "sk-test",
+            "DEEPINFRA_API_TOKEN": "di-test",
+            "DEEPINFRA_API_KEY": "di-key",
+        },
+    )
     def test_linux_systemd_inlines_env_vars(self):
         content = generate_service_file("linux")
         assert 'Environment=TELEGRAM_BOT_TOKEN="test-token"' in content
         assert 'Environment=ANTHROPIC_API_KEY="sk-test"' in content
+        assert 'Environment=DEEPINFRA_API_TOKEN="di-test"' in content
+        assert 'Environment=DEEPINFRA_API_KEY="di-key"' in content
 
     def test_linux_systemd_no_unknown_vars(self):
         with patch.dict(os.environ, {"RANDOM_SECRET": "should-not-appear"}):

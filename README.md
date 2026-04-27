@@ -88,12 +88,28 @@ model: "openai:gpt-4o"
 export DEEPCLAW_MODEL=openai:gpt-4o
 ```
 
+**DeepInfra example (optional):**
+```yaml
+model: "deepinfra:deepseek-ai/DeepSeek-V3"
+generation:
+  temperature: 0.2
+  max_tokens: 4096
+  top_p: 0.9
+  repetition_penalty: 1.05
+```
+
+```bash
+export DEEPCLAW_MODEL=deepinfra:deepseek-ai/DeepSeek-V3
+export DEEPINFRA_API_TOKEN=***
+```
+
 Supported providers (requires the provider's API key and langchain package):
 
 | Provider | Model example | API key env var | Package |
 |---|---|---|---|
 | Anthropic | `anthropic:claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | (included) |
 | OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` | `langchain-openai` |
+| DeepInfra | `deepinfra:deepseek-ai/DeepSeek-V3` | `DEEPINFRA_API_TOKEN` | `langchain-community` |
 | Google | `google-genai:gemini-2.5-pro` | `GOOGLE_API_KEY` | `langchain-google-genai` |
 | Groq | `groq:llama-3.3-70b` | `GROQ_API_KEY` | `langchain-groq` |
 | OpenRouter | `openrouter:anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` | `langchain-openrouter` |
@@ -101,6 +117,7 @@ Supported providers (requires the provider's API key and langchain package):
 Install additional providers as needed:
 ```bash
 uv pip install langchain-openai  # for OpenAI models
+# DeepInfra support uses langchain-community and is bundled with this repo.
 ```
 
 Shell commands default to a 5-minute timeout. You can change this with `command_timeout` in `~/.deepclaw/config.yaml`.
@@ -295,7 +312,8 @@ DeepClaw loads configuration from three layers (highest precedence first):
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram Bot API token from [@BotFather](https://t.me/BotFather) |
 | `ANTHROPIC_API_KEY` | Yes* | Anthropic API key (default provider) |
 | `OPENAI_API_KEY` | No | OpenAI API key (if using OpenAI models) |
-| `DEEPCLAW_MODEL` | No | Model override, e.g. `openai:gpt-4o` (defaults to `anthropic:claude-sonnet-4-6-20250514`) |
+| `DEEPINFRA_API_TOKEN` | No | DeepInfra API token (if using DeepInfra OSS/chat models) |
+| `DEEPCLAW_MODEL` | No | Model override, e.g. `openai:gpt-4o` or `deepinfra:deepseek-ai/DeepSeek-V3` (defaults to `anthropic:claude-sonnet-4-6-20250514`) |
 | `DEEPCLAW_ALLOWED_USERS` | No | Comma-separated Telegram user IDs or usernames for access control |
 | `TAVILY_API_KEY` | No | Tavily API key for web search and extract tools |
 

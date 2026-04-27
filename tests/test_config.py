@@ -144,6 +144,10 @@ class TestLoadConfigDefaults:
         assert cfg.telegram.streaming.edit_interval == 1.0
         assert cfg.telegram.streaming.buffer_threshold == 100
         assert cfg.terminal.compression == "none"
+        assert cfg.generation.temperature is None
+        assert cfg.generation.max_tokens is None
+        assert cfg.generation.top_p is None
+        assert cfg.generation.repetition_penalty is None
         assert cfg.terminal.env_passthrough == []
         assert cfg.workspace_root == "~/.deepclaw/workspace"
 
@@ -172,6 +176,11 @@ telegram:
     enabled: false
     edit_interval: 2.5
     buffer_threshold: 200
+generation:
+  temperature: 0.3
+  max_tokens: 4096
+  top_p: 0.9
+  repetition_penalty: 1.05
 workspace:
   root: /tmp/ws
 terminal:
@@ -191,6 +200,10 @@ terminal:
         assert cfg.telegram.streaming.edit_interval == 2.5
         assert cfg.telegram.streaming.buffer_threshold == 200
         assert cfg.terminal.compression == "rtk"
+        assert cfg.generation.temperature == pytest.approx(0.3)
+        assert cfg.generation.max_tokens == 4096
+        assert cfg.generation.top_p == pytest.approx(0.9)
+        assert cfg.generation.repetition_penalty == pytest.approx(1.05)
         assert cfg.terminal.env_passthrough == ["LANGSMITH_API_KEY", "CUSTOM_TOKEN"]
         assert cfg.workspace_root == "/tmp/ws"
 
@@ -368,3 +381,25 @@ class TestCommandTimeout:
         monkeypatch.delenv(ENV_COMMAND_TIMEOUT, raising=False)
         cfg = load_config()
         assert cfg.command_timeout == 300
+
+
+class TestGenerationParsing:
+    def test_invalid_generation_values_are_ignored(self, config_dir, monkeypatch):
+        monkeypatch.delenv(ENV_COMMAND_TIMEOUT, raising=False)
+        _write_yaml(
+            config_dir,
+            """\
+generation:
+  temperature: nope
+  max_tokens: bad
+  top_p: no-thanks
+  repetition_penalty: still-no
+""",
+        )
+
+        cfg = load_config()
+
+        assert cfg.generation.temperature is None
+        assert cfg.generation.max_tokens is None
+        assert cfg.generation.top_p is None
+        assert cfg.generation.repetition_penalty is None
