@@ -127,7 +127,9 @@ class TestDeepClawLocalShellBackend:
         monkeypatch.setattr(
             agent_mod.shutil,
             "which",
-            lambda name, path=None: "/process/bin/rtk" if name == "rtk" and path == "/process/bin" else None,
+            lambda name, path=None: (
+                "/process/bin/rtk" if name == "rtk" and path == "/process/bin" else None
+            ),
         )
         monkeypatch.setattr(
             backend,

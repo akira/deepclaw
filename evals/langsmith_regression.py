@@ -248,7 +248,9 @@ def evaluator_overall_pass_fail(run, example):
         "key": "overall_pass_fail",
         "score": 1 if rollup["pass_fail"] == "PASS" else 0,
         "comment": (
-            "PASS" if not rollup["failure_reasons"] else f"FAIL: {'; '.join(rollup['failure_reasons'])}"
+            "PASS"
+            if not rollup["failure_reasons"]
+            else f"FAIL: {'; '.join(rollup['failure_reasons'])}"
         ),
     }
 
