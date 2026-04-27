@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from types import ModuleType
 
@@ -20,22 +21,61 @@ class TestWrapModelWithHeadroom:
     def test_wraps_resolved_model_when_enabled(self, monkeypatch):
         original_model = "openai:gpt-5"
         resolved_model = object()
-        wrapped_model = object()
 
         deepagents_models = ModuleType("deepagents._models")
         deepagents_models.resolve_model = lambda model: resolved_model
 
         headroom_integrations = ModuleType("headroom.integrations")
 
-        def fake_headroom_chat_model(model):
-            assert model is resolved_model
-            return wrapped_model
+        class FakeHeadroomChatModel:
+            def __init__(self, model):
+                self.wrapped_model = model
 
-        headroom_integrations.HeadroomChatModel = fake_headroom_chat_model
+        headroom_integrations.HeadroomChatModel = FakeHeadroomChatModel
 
         monkeypatch.setitem(sys.modules, "deepagents._models", deepagents_models)
         monkeypatch.setitem(sys.modules, "headroom.integrations", headroom_integrations)
 
         wrapped = wrap_model_with_headroom(original_model, HeadroomConfig(enabled=True))
 
-        assert wrapped is wrapped_model
+        assert wrapped.wrapped_model is resolved_model
+
+    def test_logs_savings_for_each_optimization(self, monkeypatch, caplog):
+        resolved_model = object()
+
+        deepagents_models = ModuleType("deepagents._models")
+        deepagents_models.resolve_model = lambda model: resolved_model
+
+        headroom_integrations = ModuleType("headroom.integrations")
+
+        class FakeHeadroomChatModel:
+            def __init__(self, model):
+                self.wrapped_model = model
+
+            def _optimize_messages(self, messages):
+                metrics = type(
+                    "Metrics",
+                    (),
+                    {
+                        "tokens_before": 100,
+                        "tokens_after": 40,
+                        "tokens_saved": 60,
+                        "savings_percent": 60.0,
+                        "transforms_applied": ["router:smart_crusher"],
+                    },
+                )()
+                return messages, metrics
+
+        headroom_integrations.HeadroomChatModel = FakeHeadroomChatModel
+
+        monkeypatch.setitem(sys.modules, "deepagents._models", deepagents_models)
+        monkeypatch.setitem(sys.modules, "headroom.integrations", headroom_integrations)
+
+        wrapped = wrap_model_with_headroom("openai:gpt-5", HeadroomConfig(enabled=True))
+
+        with caplog.at_level(logging.INFO):
+            optimized_messages, metrics = wrapped._optimize_messages(["hello"])
+
+        assert optimized_messages == ["hello"]
+        assert metrics.tokens_saved == 60
+        assert "Headroom savings: 100 -> 40 tokens (60 saved, 60.0%)" in caplog.text

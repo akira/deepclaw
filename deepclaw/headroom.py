@@ -29,7 +29,22 @@ def wrap_model_with_headroom(
         )
         raise RuntimeError(msg) from exc
 
+    class DeepClawHeadroomChatModel(HeadroomChatModel):
+        """Headroom model wrapper that emits DeepClaw-specific savings logs."""
+
+        def _optimize_messages(self, messages):  # type: ignore[override]
+            optimized_messages, metrics = super()._optimize_messages(messages)
+            logger.info(
+                "Headroom savings: %s -> %s tokens (%s saved, %.1f%%) transforms=%s",
+                metrics.tokens_before,
+                metrics.tokens_after,
+                metrics.tokens_saved,
+                metrics.savings_percent,
+                metrics.transforms_applied,
+            )
+            return optimized_messages, metrics
+
     resolved_model = resolve_model(model)
-    wrapped_model = HeadroomChatModel(resolved_model)
+    wrapped_model = DeepClawHeadroomChatModel(resolved_model)
     logger.info("Headroom prompt compression enabled for %s", resolved_model.__class__.__name__)
     return wrapped_model
