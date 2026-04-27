@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -38,10 +39,12 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         *args,
         env: dict[str, str] | None = None,
         allowed_sensitive: set[str] | frozenset[str] | None = None,
+        compression_mode: str = "none",
         **kwargs,
     ) -> None:
         self._deepclaw_env_overrides = dict(env or {})
         self._allowed_sensitive = frozenset(allowed_sensitive or ())
+        self._compression_mode = str(compression_mode or "none").strip().lower()
         super().__init__(*args, env={}, **kwargs)
 
     def _build_child_env(self) -> dict[str, str]:
@@ -49,6 +52,56 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             extra_env=self._deepclaw_env_overrides,
             keep_sensitive=self._allowed_sensitive,
         )
+
+    def _rewrite_command_with_rtk(
+        self,
+        command: str,
+        *,
+        rtk_path: str,
+        env: dict[str, str],
+        timeout: int,
+    ) -> tuple[str | None, str | None]:
+        try:
+            rewrite = subprocess.run(
+                [rtk_path, "rewrite", command],
+                check=False,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                cwd=str(self.cwd),
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"Error: RTK command rewrite timed out after {timeout} seconds."
+        except Exception as exc:  # noqa: BLE001
+            return None, f"Error: failed to invoke RTK rewrite ({type(exc).__name__}): {exc}"
+
+        rewritten = rewrite.stdout.strip()
+        if rewrite.returncode == 0 and rewritten:
+            if rewritten == "rtk" or rewritten.startswith("rtk "):
+                suffix = rewritten[3:].lstrip()
+                return f"{shlex.quote(rtk_path)} {suffix}".rstrip(), None
+            return rewritten, None
+        return command, None
+
+    def _prepare_command(
+        self,
+        command: str,
+        *,
+        env: dict[str, str],
+        timeout: int,
+    ) -> tuple[str | None, str | None]:
+        if self._compression_mode == "none":
+            return command, None
+        if self._compression_mode != "rtk":
+            return None, f"Error: unknown terminal compression mode: {self._compression_mode}"
+
+        rtk_path = shutil.which("rtk", path=env.get("PATH"))
+        if rtk_path is None:
+            return None, "Error: RTK compression is enabled but `rtk` was not found in PATH."
+
+        return self._rewrite_command_with_rtk(command, rtk_path=rtk_path, env=env, timeout=timeout)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         if not command or not isinstance(command, str):
@@ -63,15 +116,28 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             msg = f"timeout must be positive, got {effective_timeout}"
             raise ValueError(msg)
 
+        child_env = self._build_child_env()
+        prepared_command, prepare_error = self._prepare_command(
+            command,
+            env=child_env,
+            timeout=effective_timeout,
+        )
+        if prepare_error is not None or prepared_command is None:
+            return ExecuteResponse(
+                output=prepare_error or "Error: failed to prepare command.",
+                exit_code=1,
+                truncated=False,
+            )
+
         try:
             result = subprocess.run(  # noqa: S602
-                command,
+                prepared_command,
                 check=False,
                 shell=True,
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
-                env=self._build_child_env(),
+                env=child_env,
                 cwd=str(self.cwd),
             )
 
@@ -352,6 +418,7 @@ def _shell_backend(config):
         "virtual_mode": False,
         "env": {},
         "allowed_sensitive": set(config.terminal.env_passthrough),
+        "compression_mode": config.terminal.compression,
         "timeout": config.command_timeout,
         "root_dir": workspace_root,
     }

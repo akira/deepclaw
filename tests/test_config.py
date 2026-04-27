@@ -143,6 +143,7 @@ class TestLoadConfigDefaults:
         assert cfg.telegram.streaming.enabled is True
         assert cfg.telegram.streaming.edit_interval == 1.0
         assert cfg.telegram.streaming.buffer_threshold == 100
+        assert cfg.terminal.compression == "none"
         assert cfg.terminal.env_passthrough == []
         assert cfg.workspace_root == "~/.deepclaw/workspace"
 
@@ -174,6 +175,7 @@ telegram:
 workspace:
   root: /tmp/ws
 terminal:
+  compression: rtk
   env_passthrough:
     - LANGSMITH_API_KEY
     - CUSTOM_TOKEN
@@ -188,8 +190,19 @@ terminal:
         assert cfg.telegram.streaming.enabled is False
         assert cfg.telegram.streaming.edit_interval == 2.5
         assert cfg.telegram.streaming.buffer_threshold == 200
+        assert cfg.terminal.compression == "rtk"
         assert cfg.terminal.env_passthrough == ["LANGSMITH_API_KEY", "CUSTOM_TOKEN"]
         assert cfg.workspace_root == "/tmp/ws"
+
+    def test_invalid_terminal_compression_raises(self, config_dir, monkeypatch):
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("DEEPCLAW_MODEL", raising=False)
+        monkeypatch.delenv("DEEPCLAW_ALLOWED_USERS", raising=False)
+
+        _write_yaml(config_dir, "terminal:\n  compression: gzip\n")
+
+        with pytest.raises(ValueError, match="terminal\\.compression"):
+            load_config()
 
     def test_malformed_yaml_returns_defaults(self, config_dir, monkeypatch):
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)

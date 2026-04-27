@@ -56,7 +56,22 @@ class HeartbeatConfig:
 
 @dataclass
 class TerminalConfig:
+    compression: str = "none"
     env_passthrough: list[str] = field(default_factory=list)
+
+
+_ALLOWED_TERMINAL_COMPRESSION = frozenset({"none", "rtk"})
+
+
+def _normalize_terminal_compression(value: Any) -> str:
+    normalized = str(value or TerminalConfig.compression).strip().lower()
+    if normalized not in _ALLOWED_TERMINAL_COMPRESSION:
+        msg = (
+            "terminal.compression must be one of "
+            f"{sorted(_ALLOWED_TERMINAL_COMPRESSION)!r}; got {value!r}"
+        )
+        raise ValueError(msg)
+    return normalized
 
 
 @dataclass
@@ -207,6 +222,7 @@ DEFAULT_CONFIG_YAML = """\
 # Use this when a trusted skill or workflow needs one of DeepClaw's own API keys
 # available inside shell commands.
 # terminal:
+#   compression: rtk
 #   env_passthrough:
 #     - LANGSMITH_API_KEY
 #     - LANGCHAIN_API_KEY
@@ -278,7 +294,10 @@ def load_config() -> DeepClawConfig:
     )
 
     terminal = TerminalConfig(
-        env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", []))
+        compression=_normalize_terminal_compression(
+            yaml_terminal.get("compression", TerminalConfig.compression)
+        ),
+        env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", [])),
     )
 
     command_timeout = _to_int(

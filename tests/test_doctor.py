@@ -19,6 +19,7 @@ from deepclaw.doctor import (
     check_service_installed,
     check_skills_health,
     check_telegram_token,
+    check_terminal_compression,
     check_workspace,
     format_report,
     run_checks,
@@ -141,6 +142,27 @@ class TestCheckWorkspace:
         config = _make_config(workspace_root=str(missing))
         result = check_workspace(config)
         assert result.status == STATUS_WARN
+
+
+class TestCheckTerminalCompression:
+    def test_disabled_is_ok(self):
+        config = _make_config()
+        result = check_terminal_compression(config)
+        assert result.status == STATUS_OK
+
+    def test_rtk_enabled_and_present_is_ok(self):
+        config = _make_config()
+        config.terminal.compression = "rtk"
+        with patch("deepclaw.doctor.shutil.which", return_value="/usr/bin/rtk"):
+            result = check_terminal_compression(config)
+        assert result.status == STATUS_OK
+
+    def test_rtk_enabled_and_missing_fails(self):
+        config = _make_config()
+        config.terminal.compression = "rtk"
+        with patch("deepclaw.doctor.shutil.which", return_value=None):
+            result = check_terminal_compression(config)
+        assert result.status == STATUS_FAIL
 
 
 class TestCheckCheckpointerPath:
@@ -310,7 +332,7 @@ class TestRunChecks:
             checks = await run_checks(config)
 
         assert isinstance(checks, list)
-        assert len(checks) == 10
+        assert len(checks) == 11
         assert all(isinstance(c, Check) for c in checks)
 
     @pytest.mark.asyncio

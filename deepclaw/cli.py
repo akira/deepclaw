@@ -17,7 +17,11 @@ def _handle_doctor_command() -> None:
 
     from deepclaw.doctor import format_report, run_checks
 
-    config = load_config()
+    try:
+        config = load_config()
+    except Exception as exc:
+        print(f"Configuration error: {exc}")  # noqa: T201
+        raise SystemExit(1) from exc
     checks = asyncio.run(run_checks(config))
     print(format_report(checks))  # noqa: T201
 
