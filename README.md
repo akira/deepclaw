@@ -105,6 +105,34 @@ uv pip install langchain-openai  # for OpenAI models
 
 Shell commands default to a 5-minute timeout. You can change this with `command_timeout` in `~/.deepclaw/config.yaml`.
 
+### Optional: RTK terminal compression
+
+DeepClaw can route shell commands through [RTK](https://github.com/rtk-ai/rtk) to shrink noisy command output before it reaches the model.
+
+1. Install RTK:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+rtk --version
+```
+
+2. Enable it in `~/.deepclaw/config.yaml`:
+
+```yaml
+terminal:
+  compression: rtk
+```
+
+3. Verify it with diagnostics:
+
+```bash
+uv run deepclaw doctor
+```
+
+You should see `Terminal compression: rtk is available`.
+
+If you run DeepClaw as a systemd user service, make sure the service `PATH` includes the RTK install location (commonly `~/.local/bin`), or `/doctor` will report that RTK is not installed even if it works in your interactive shell.
+
 ## Running as a Daemon
 
 For long-running deployment on macOS (launchd) or Linux (systemd):
@@ -295,6 +323,8 @@ heartbeat:
   quiet_hours_end: 8
   timezone: "America/Los_Angeles"
   max_failures: 3
+terminal:
+  compression: rtk   # optional; requires rtk on PATH
 workspace:
   root: "~/.deepclaw/workspace"
 command_timeout: 300
@@ -341,7 +371,9 @@ To add a new tool plugin, create a module in `deepclaw/tools/` that exports:
 
 ## Diagnostics
 
-Run `uv run deepclaw doctor` to check your setup — config files, API keys, workspace, checkpointer, service installation, and more.
+Run `uv run deepclaw doctor` to check your setup — config files, API keys, workspace, terminal compression, checkpointer, service installation, and more.
+
+If `terminal.compression: rtk` is enabled, `/doctor` should report `Terminal compression: rtk is available`. If it instead says RTK is not installed, verify that `rtk` is on the same `PATH` DeepClaw uses (especially for systemd services).
 
 ## Project Structure
 
