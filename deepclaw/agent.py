@@ -17,6 +17,7 @@ from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
+from deepclaw.deepinfra import resolve_deepinfra_model
 from deepclaw.local_context import (
     AsyncExecutableBackend,
     ExecutableBackend,
@@ -494,6 +495,7 @@ def create_agent(config, checkpointer):
     _setup_auth()
     backend = _shell_backend(config)
     composite_backend = _composite_backend(backend)
+    agent_model = resolve_deepinfra_model(config)
 
     # Middleware stack
     middleware = []
@@ -529,7 +531,7 @@ def create_agent(config, checkpointer):
     # composite backend's /conversation_history/ route.
     _append_summarization_middleware(
         middleware,
-        config.model or DeepClawConfig.model,
+        agent_model or config.model or DeepClawConfig.model,
         composite_backend,
     )
 
@@ -552,7 +554,7 @@ def create_agent(config, checkpointer):
     tools = discover_tools()
 
     return create_deep_agent(
-        model=config.model or None,
+        model=agent_model,
         backend=composite_backend,
         checkpointer=checkpointer,
         middleware=middleware,

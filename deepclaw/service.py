@@ -47,6 +47,8 @@ _SERVICE_ENV_KEYS = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_TOKEN",
         "OPENAI_API_KEY",
+        "DEEPINFRA_API_TOKEN",
+        "DEEPINFRA_API_KEY",
         "TAVILY_API_KEY",
         "DEEPCLAW_MODEL",
         "DEEPCLAW_ALLOWED_USERS",

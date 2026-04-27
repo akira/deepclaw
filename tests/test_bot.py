@@ -1341,6 +1341,9 @@ class TestValidateModel:
     def test_valid_openai(self):
         assert _validate_model("openai:gpt-5.3-codex") is None
 
+    def test_valid_deepinfra(self):
+        assert _validate_model("deepinfra:deepseek-ai/DeepSeek-V3") is None
+
     def test_missing_colon(self):
         assert _validate_model("claude-sonnet") is not None
 
