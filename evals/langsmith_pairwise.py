@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -14,14 +15,23 @@ from dotenv import load_dotenv
 from langsmith import Client
 from langsmith.evaluation import evaluate, evaluate_comparative
 
-from evals.langsmith_regression import (
-    WORKSPACE_ENV,
-    evaluator_expected_tool_names,
-    evaluator_first_pass_tool_use,
-    evaluator_secondary_tool_recovery,
-    evaluator_tool_call,
-    run_case,
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_REGRESSION_PATH = REPO_ROOT / "evals" / "langsmith_regression.py"
+_REGRESSION_SPEC = importlib.util.spec_from_file_location(
+    "deepclaw_langsmith_regression", _REGRESSION_PATH
 )
+if _REGRESSION_SPEC is None or _REGRESSION_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load regression module from {_REGRESSION_PATH}")
+_REGRESSION_MODULE = importlib.util.module_from_spec(_REGRESSION_SPEC)
+_REGRESSION_SPEC.loader.exec_module(_REGRESSION_MODULE)
+
+WORKSPACE_ENV = _REGRESSION_MODULE.WORKSPACE_ENV
+run_case = _REGRESSION_MODULE.run_case
+EvaluatorToolCall = _REGRESSION_MODULE.evaluator_tool_call
+EvaluatorExpectedToolNames = _REGRESSION_MODULE.evaluator_expected_tool_names
+EvaluatorFirstPassToolUse = _REGRESSION_MODULE.evaluator_first_pass_tool_use
+EvaluatorSecondaryToolRecovery = _REGRESSION_MODULE.evaluator_secondary_tool_recovery
+EvaluatorOverallPassFail = _REGRESSION_MODULE.evaluator_overall_pass_fail
 
 DEFAULT_DATASET = "deepclaw"
 DEFAULT_MODEL_A = "anthropic:claude-haiku-4-5"
@@ -97,7 +107,10 @@ def pairwise_tool_use_preference(runs, example):
         expected_match = bool(expected_tools) and all(
             tool_name in observed_tools for tool_name in expected_tools
         )
+        overall = EvaluatorOverallPassFail(run, example)
         return {
+            "overall_pass": bool(overall.get("score")),
+            "overall_comment": overall.get("comment"),
             "first_pass": bool(outputs.get("first_pass_tool_calls_seen")),
             "expected_match": expected_match,
             "eventual": bool(outputs.get("tool_calls_seen")),
@@ -109,6 +122,7 @@ def pairwise_tool_use_preference(runs, example):
     left = features(runs[0])
     right = features(runs[1])
     left_rank = (
+        1 if left["overall_pass"] else 0,
         1 if left["first_pass"] else 0,
         1 if left["expected_match"] else 0,
         1 if left["eventual"] else 0,
@@ -116,6 +130,7 @@ def pairwise_tool_use_preference(runs, example):
         -left["attempts"],
     )
     right_rank = (
+        1 if right["overall_pass"] else 0,
         1 if right["first_pass"] else 0,
         1 if right["expected_match"] else 0,
         1 if right["eventual"] else 0,
@@ -189,10 +204,11 @@ def main() -> None:
         example_limit=args.example_limit,
     )
     scalar_evaluators = [
-        evaluator_tool_call,
-        evaluator_expected_tool_names,
-        evaluator_first_pass_tool_use,
-        evaluator_secondary_tool_recovery,
+        EvaluatorToolCall,
+        EvaluatorExpectedToolNames,
+        EvaluatorFirstPassToolUse,
+        EvaluatorSecondaryToolRecovery,
+        EvaluatorOverallPassFail,
     ]
 
     results_a = evaluate(
