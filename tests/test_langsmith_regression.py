@@ -226,6 +226,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                         {"key": "expected_tool_names", "score": 1},
                         {"key": "first_pass_tool_use", "score": 1},
                         {"key": "secondary_tool_recovery", "score": None},
+                        {"key": "overall_pass_fail", "score": 1},
                     ]
                 },
             }
@@ -263,6 +264,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                 module.evaluator_expected_tool_names,
                 module.evaluator_first_pass_tool_use,
                 module.evaluator_secondary_tool_recovery,
+                module.evaluator_overall_pass_fail,
             ],
             "client": None,
             "experiment_prefix": "deepclaw-post",
@@ -284,6 +286,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
         "tool_call_required": 1.0,
         "expected_tool_names": 1.0,
         "first_pass_tool_use": 1.0,
+        "overall_pass_fail": 1.0,
     }
     assert result["examples"] == [
         {
@@ -295,7 +298,10 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                 "expected_tool_names": 1,
                 "first_pass_tool_use": 1,
                 "secondary_tool_recovery": None,
+                "overall_pass_fail": 1,
             },
+            "pass_fail": "PASS",
+            "failure_reasons": [],
             "tool_calls_seen": True,
             "tool_names": ["execute"],
             "retried": False,
@@ -304,6 +310,79 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
             "first_pass_text": None,
         }
     ]
+
+
+def test_rollup_status_fails_when_required_metric_fails():
+    module = _load_module()
+
+    result = module.rollup_pass_fail(
+        metrics={
+            "tool_call_required": 1,
+            "expected_tool_names": 0,
+            "first_pass_tool_use": 1,
+            "secondary_tool_recovery": None,
+        },
+        example_outputs={
+            "requires_tool_call": True,
+            "expected_tool_names": ["execute"],
+            "must_succeed_first_pass": True,
+        },
+    )
+
+    assert result == {
+        "pass_fail": "FAIL",
+        "failure_reasons": ["wrong tool used"],
+    }
+
+
+def test_rollup_status_passes_no_tool_example_when_no_tool_required():
+    module = _load_module()
+
+    result = module.rollup_pass_fail(
+        metrics={
+            "tool_call_required": 1,
+            "expected_tool_names": None,
+            "first_pass_tool_use": None,
+            "secondary_tool_recovery": None,
+        },
+        example_outputs={
+            "requires_tool_call": False,
+        },
+    )
+
+    assert result == {
+        "pass_fail": "PASS",
+        "failure_reasons": [],
+    }
+
+
+def test_evaluator_overall_pass_fail_returns_binary_score_and_reason():
+    module = _load_module()
+
+    result = module.evaluator_overall_pass_fail(
+        {
+            "outputs": {
+                "tool_calls_seen": True,
+                "tool_names": ["read_file"],
+                "retried": False,
+                "attempts": 1,
+                "first_pass_tool_calls_seen": True,
+            }
+        },
+        {
+            "outputs": {
+                "requires_tool_call": True,
+                "expected_tool_names": ["execute"],
+                "must_succeed_first_pass": True,
+            }
+        },
+    )
+
+    assert result == {
+        "key": "overall_pass_fail",
+        "score": 0,
+        "comment": "FAIL: wrong tool used",
+    }
 
 
 def test_ensure_baseline_worktree_refreshes_existing_path(monkeypatch, tmp_path):

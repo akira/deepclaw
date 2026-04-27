@@ -56,7 +56,30 @@ class HeartbeatConfig:
 
 @dataclass
 class TerminalConfig:
+    compression: str = "none"
     env_passthrough: list[str] = field(default_factory=list)
+
+
+_ALLOWED_TERMINAL_COMPRESSION = frozenset({"none", "rtk"})
+
+
+def _normalize_terminal_compression(value: Any) -> str:
+    normalized = str(value or TerminalConfig.compression).strip().lower()
+    if normalized not in _ALLOWED_TERMINAL_COMPRESSION:
+        msg = (
+            "terminal.compression must be one of "
+            f"{sorted(_ALLOWED_TERMINAL_COMPRESSION)!r}; got {value!r}"
+        )
+        raise ValueError(msg)
+    return normalized
+
+
+@dataclass
+class GenerationConfig:
+    temperature: float | None = None
+    max_tokens: int | None = None
+    top_p: float | None = None
+    repetition_penalty: float | None = None
 
 
 @dataclass
@@ -64,6 +87,7 @@ class DeepClawConfig:
     model: str = "anthropic:claude-sonnet-4-6-20250514"
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     workspace_root: str = "~/.deepclaw/workspace"
     command_timeout: int = 300  # seconds, default 5 minutes
@@ -147,6 +171,20 @@ def _to_float(value: Any, default: float) -> float:
         return default
 
 
+def _to_optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _to_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
@@ -177,6 +215,15 @@ DEFAULT_CONFIG_YAML = """\
 
 # Model — use provider:model format (default: anthropic:claude-sonnet-4-6)
 # model: "openai:gpt-4o"
+# model: "deepinfra:deepseek-ai/DeepSeek-V3"
+
+# Optional generation defaults. DeepInfra support maps these through to the
+# LangChain community adapter when using a deepinfra:* model.
+# generation:
+#   temperature: 0.2
+#   max_tokens: 4096
+#   top_p: 0.9
+#   repetition_penalty: 1.05
 
 # Shell command timeout in seconds (default: 300 = 5 minutes)
 # command_timeout: 300
@@ -207,6 +254,7 @@ DEFAULT_CONFIG_YAML = """\
 # Use this when a trusted skill or workflow needs one of DeepClaw's own API keys
 # available inside shell commands.
 # terminal:
+#   compression: rtk
 #   env_passthrough:
 #     - LANGSMITH_API_KEY
 #     - LANGCHAIN_API_KEY
@@ -235,6 +283,7 @@ def load_config() -> DeepClawConfig:
     yaml_streaming = yaml_telegram.get("streaming", {}) or {}
     yaml_workspace = yaml_data.get("workspace", {}) or {}
     yaml_heartbeat = yaml_data.get("heartbeat", {}) or {}
+    yaml_generation = yaml_data.get("generation", {}) or {}
     yaml_terminal = yaml_data.get("terminal", {}) or {}
 
     streaming = TelegramStreamingConfig(
@@ -261,6 +310,29 @@ def load_config() -> DeepClawConfig:
         streaming=streaming,
     )
 
+    generation = GenerationConfig(
+        temperature=(
+            _to_optional_float(yaml_generation.get("temperature"))
+            if yaml_generation.get("temperature") is not None
+            else None
+        ),
+        max_tokens=(
+            _to_optional_int(yaml_generation.get("max_tokens"))
+            if yaml_generation.get("max_tokens") is not None
+            else None
+        ),
+        top_p=(
+            _to_optional_float(yaml_generation.get("top_p"))
+            if yaml_generation.get("top_p") is not None
+            else None
+        ),
+        repetition_penalty=(
+            _to_optional_float(yaml_generation.get("repetition_penalty"))
+            if yaml_generation.get("repetition_penalty") is not None
+            else None
+        ),
+    )
+
     model = _resolve(ENV_DEEPCLAW_MODEL, dot_env, yaml_data.get("model")) or ""
 
     workspace_root = str(yaml_workspace.get("root", DeepClawConfig.workspace_root))
@@ -278,7 +350,10 @@ def load_config() -> DeepClawConfig:
     )
 
     terminal = TerminalConfig(
-        env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", []))
+        compression=_normalize_terminal_compression(
+            yaml_terminal.get("compression", TerminalConfig.compression)
+        ),
+        env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", [])),
     )
 
     command_timeout = _to_int(
@@ -290,6 +365,7 @@ def load_config() -> DeepClawConfig:
         model=model,
         telegram=telegram,
         heartbeat=heartbeat,
+        generation=generation,
         terminal=terminal,
         workspace_root=workspace_root,
         command_timeout=command_timeout,

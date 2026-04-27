@@ -199,6 +199,60 @@ def evaluator_secondary_tool_recovery(run, example):
     }
 
 
+def rollup_pass_fail(metrics: dict[str, Any], example_outputs: dict[str, Any]) -> dict[str, Any]:
+    """Derive a per-example PASS/FAIL rollup from the metric set.
+
+    PASS means every applicable required metric succeeded.
+    FAIL means at least one applicable required metric failed.
+    Metrics with score None are treated as not applicable.
+    """
+
+    failure_reasons: list[str] = []
+
+    required = bool(example_outputs.get("requires_tool_call"))
+    expected_tool_names = _normalize_tool_names(example_outputs.get("expected_tool_names"))
+    must_succeed_first_pass = bool(example_outputs.get("must_succeed_first_pass"))
+
+    tool_call_required = metrics.get("tool_call_required")
+    if tool_call_required == 0:
+        if required:
+            failure_reasons.append("missing required tool call")
+        else:
+            failure_reasons.append("used a tool when no tool call was expected")
+
+    expected_tool_metric = metrics.get("expected_tool_names")
+    if expected_tool_names and expected_tool_metric == 0:
+        failure_reasons.append("wrong tool used")
+
+    first_pass_metric = metrics.get("first_pass_tool_use")
+    if required and must_succeed_first_pass and first_pass_metric == 0:
+        failure_reasons.append("missed first-pass requirement")
+
+    return {
+        "pass_fail": "FAIL" if failure_reasons else "PASS",
+        "failure_reasons": failure_reasons,
+    }
+
+
+def evaluator_overall_pass_fail(run, example):
+    """Emit a binary overall pass/fail metric for LangSmith UI display."""
+    metrics = {
+        "tool_call_required": evaluator_tool_call(run, example).get("score"),
+        "expected_tool_names": evaluator_expected_tool_names(run, example).get("score"),
+        "first_pass_tool_use": evaluator_first_pass_tool_use(run, example).get("score"),
+        "secondary_tool_recovery": evaluator_secondary_tool_recovery(run, example).get("score"),
+    }
+    example_outputs = _get_outputs(example)
+    rollup = rollup_pass_fail(metrics, example_outputs)
+    return {
+        "key": "overall_pass_fail",
+        "score": 1 if rollup["pass_fail"] == "PASS" else 0,
+        "comment": (
+            "PASS" if not rollup["failure_reasons"] else f"FAIL: {'; '.join(rollup['failure_reasons'])}"
+        ),
+    }
+
+
 def run_eval(
     client: Client,
     dataset_name: str,
@@ -221,6 +275,7 @@ def run_eval(
             evaluator_expected_tool_names,
             evaluator_first_pass_tool_use,
             evaluator_secondary_tool_recovery,
+            evaluator_overall_pass_fail,
         ],
         client=client,
         experiment_prefix=experiment_prefix,
@@ -274,6 +329,7 @@ def run_eval(
                 "user_text": example_inputs.get("user_text"),
                 "category": example_outputs.get("category"),
                 "metrics": metrics,
+                **rollup_pass_fail(metrics, example_outputs),
                 "tool_calls_seen": run_outputs.get("tool_calls_seen"),
                 "tool_names": run_outputs.get("tool_names"),
                 "retried": run_outputs.get("retried"),

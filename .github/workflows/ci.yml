@@ -37,5 +37,12 @@ jobs:
       - name: Install dependencies
         run: UV_NO_SOURCES=1 uv pip install --system -e ".[dev]"
 
+      - name: Install RTK
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/rtk" --version
+          "$HOME/.local/bin/rtk" gain
+
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short

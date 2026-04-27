@@ -888,6 +888,7 @@ KNOWN_PROVIDERS = (
     "bedrock",
     "vertex",
     "nvidia",
+    "deepinfra",
 )
 
 
