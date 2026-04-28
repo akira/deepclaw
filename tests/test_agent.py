@@ -304,6 +304,24 @@ class TestDeepClawLocalShellBackend:
         assert compressed.output == "hello-from-backend"
 
 
+class TestContextManagementSettings:
+    def test_uses_fraction_based_compaction_and_filesystem_eviction_defaults(self):
+        settings = agent_mod._context_management_settings()
+
+        assert settings["summarization"]["trigger"] == ("fraction", 0.85)
+        assert settings["summarization"]["keep"] == ("fraction", 0.10)
+        assert settings["summarization"]["truncate_args_settings"] == {
+            "trigger": ("fraction", 0.50),
+            "keep": ("fraction", 0.10),
+            "max_length": 2000,
+            "truncation_text": "...(argument truncated)",
+        }
+        assert settings["filesystem"] == {
+            "tool_token_limit_before_evict": 20000,
+            "human_message_token_limit_before_evict": 50000,
+        }
+
+
 class TestCreateAgent:
     def test_wires_cli_style_context_backends_and_summarization(self, tmp_path, monkeypatch):
         captured = {}
@@ -324,6 +342,10 @@ class TestCreateAgent:
                 self.default = default
                 self.routes = routes
 
+        class FakeFilesystemMiddleware:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
         def fake_create_deep_agent(**kwargs):
             captured.update(kwargs)
             return "agent"
@@ -339,6 +361,9 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "DeepClawLocalShellBackend", FakeShellBackend)
         monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
+        monkeypatch.setattr(
+            agent_mod, "FilesystemMiddleware", FakeFilesystemMiddleware, raising=False
+        )
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(
@@ -365,6 +390,16 @@ class TestCreateAgent:
         assert (
             captured["backend"].routes["/conversation_history/"].kwargs["root_dir"]
             == tmp_path / "runtime" / "conversation_history"
+        )
+        assert any(
+            isinstance(middleware, FakeFilesystemMiddleware)
+            and middleware.kwargs
+            == {
+                "backend": captured["backend"],
+                "tool_token_limit_before_evict": 20000,
+                "human_message_token_limit_before_evict": 50000,
+            }
+            for middleware in captured["middleware"]
         )
         assert any(
             isinstance(middleware, agent_mod.LocalContextMiddleware)

@@ -12,6 +12,7 @@ from deepagents.backends import LocalShellBackend
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -210,6 +211,8 @@ You have opinions and you share them. When uncertain, make a reasonable assumpti
 - Act first, explain after.
 - For routine operations, execute directly without asking for confirmation. Never stop to ask unless you are genuinely blocked with no way to proceed.
 - Read first, act second. Understand the codebase before changing it.
+- For large files or command outputs, prefer paginated reads and targeted searches over dumping everything into context.
+- If the user clearly switches to a new task after a long thread, use compact_conversation before proceeding so fresh work starts with a tighter context window.
 - Do the simplest thing that works. No over-engineering.
 - Keep going until the task is actually done. Don't stop halfway and narrate what you'd do.
 - If something breaks, diagnose why before trying again.
@@ -460,14 +463,32 @@ def _composite_backend(default_backend):
     )
 
 
+def _context_management_settings() -> dict[str, dict[str, object]]:
+    """Return centralized context-compaction and eviction settings."""
+    return {
+        "summarization": {
+            "trigger": ("fraction", 0.85),
+            "keep": ("fraction", 0.10),
+            "truncate_args_settings": {
+                "trigger": ("fraction", 0.50),
+                "keep": ("fraction", 0.10),
+                "max_length": 2000,
+                "truncation_text": "...(argument truncated)",
+            },
+        },
+        "filesystem": {
+            "tool_token_limit_before_evict": 20000,
+            "human_message_token_limit_before_evict": 50000,
+        },
+    }
+
+
 def _append_summarization_middleware(middleware: list, model: str, backend) -> None:
-    """Add Deepagents compact/offload middleware when the SDK supports it."""
+    """Add DeepAgents summarization middleware and manual compaction tool."""
     try:
         from deepagents.middleware.summarization import (  # noqa: PLC0415
+            SummarizationMiddleware,
             create_summarization_tool_middleware,
-        )
-        from langchain.agents.middleware.summarization import (  # noqa: PLC0415
-            SummarizationMiddleware as LCSummarizationMiddleware,
         )
     except ImportError:
         logger.warning(
@@ -476,15 +497,14 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
         )
         return
 
-    # Message-count trigger for long-running threads that haven't hit
-    # deepagents' token-based threshold (~170k tokens). Uses langchain's
-    # before_model + RemoveMessage — doesn't conflict with deepagents'
-    # wrap_model_call + _summarization_event mechanism.
+    settings = _context_management_settings()["summarization"]
     middleware.append(
-        LCSummarizationMiddleware(
+        SummarizationMiddleware(
             model=model,
-            trigger=("messages", 80),
-            keep=("messages", 30),
+            backend=backend,
+            trigger=settings["trigger"],
+            keep=settings["keep"],
+            truncate_args_settings=settings["truncate_args_settings"],
         )
     )
     middleware.append(create_summarization_tool_middleware(model, backend))
@@ -525,6 +545,14 @@ def create_agent(config, checkpointer):
         middleware.append(LocalContextMiddleware(backend=backend))
     else:
         logger.warning("Local context middleware skipped; backend cannot execute commands")
+
+    context_settings = _context_management_settings()
+    middleware.append(
+        FilesystemMiddleware(
+            backend=composite_backend,
+            **context_settings["filesystem"],
+        )
+    )
 
     # Deepagents CLI-style context compaction/offload. This adds the
     # compact_conversation tool and stores historical messages under the
