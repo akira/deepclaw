@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents.middleware.types import ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain.tools import ToolRuntime
 from langchain.tools.tool_node import ToolCallRequest
@@ -368,33 +369,26 @@ class TestCompactionFallbackSummary:
         assert agent_mod._normalize_compaction_summary(summary, []) == summary
 
 
-class TestAppendSummarizationMiddleware:
-    def test_passes_structured_summary_prompt_into_deepagents_middleware(self, monkeypatch):
+class TestDeepClawSummarizationFactory:
+    def test_builds_custom_summarization_middleware_with_structured_prompt(self, monkeypatch):
         captured = {}
 
         class FakeSummarizationMiddleware:
             def __init__(self, **kwargs):
                 captured["summarization_kwargs"] = kwargs
 
-        class FakeSummarizationToolMiddleware:
-            def __init__(self, summarization):
-                captured["tool_middleware_summarization"] = summarization
-
         fake_module = types.ModuleType("deepagents.middleware.summarization")
         fake_module.SummarizationMiddleware = FakeSummarizationMiddleware
-        fake_module.SummarizationToolMiddleware = FakeSummarizationToolMiddleware
+        fake_module.SummarizationToolMiddleware = type("FakeSummarizationToolMiddleware", (), {})
         monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", fake_module)
 
-        middleware = []
-        agent_mod._append_summarization_middleware(middleware, "test:model", "backend")
+        middleware = agent_mod._create_deepclaw_summarization_middleware("test:model", "backend")
 
         assert (
             captured["summarization_kwargs"]["summary_prompt"]
             == agent_mod.CONTEXT_CHECKPOINT_SUMMARY_PROMPT
         )
-        assert middleware[-1].__class__.__name__ == "DeepClawSummarizationToolMiddleware"
-        assert middleware[0].name == "deepclaw_summarization"
-        assert middleware[-1].name == "deepclaw_summarization_tool"
+        assert middleware.name == "deepclaw_summarization"
 
     def test_falls_back_to_absolute_token_thresholds_without_model_profile(self, monkeypatch):
         captured = {"calls": []}
@@ -407,18 +401,13 @@ class TestAppendSummarizationMiddleware:
                         "Model profile information is required to use fractional token limits"
                     )
 
-        class FakeSummarizationToolMiddleware:
-            def __init__(self, summarization):
-                captured["tool_middleware_summarization"] = summarization
-
         fake_module = types.ModuleType("deepagents.middleware.summarization")
         fake_module.SummarizationMiddleware = FakeSummarizationMiddleware
-        fake_module.SummarizationToolMiddleware = FakeSummarizationToolMiddleware
+        fake_module.SummarizationToolMiddleware = type("FakeSummarizationToolMiddleware", (), {})
         monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", fake_module)
 
-        middleware = []
-        agent_mod._append_summarization_middleware(
-            middleware, "baseten:moonshotai/Kimi-K2.6", "backend"
+        agent_mod._create_deepclaw_summarization_middleware(
+            "baseten:moonshotai/Kimi-K2.6", "backend"
         )
 
         assert len(captured["calls"]) == 2
@@ -428,6 +417,46 @@ class TestAppendSummarizationMiddleware:
             "tokens",
             40000,
         )
+
+    def test_builds_manual_compaction_tool_middleware(self, monkeypatch):
+        class FakeSummarizationMiddleware:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeSummarizationToolMiddleware:
+            def __init__(self, summarization):
+                self.summarization = summarization
+
+        fake_module = types.ModuleType("deepagents.middleware.summarization")
+        fake_module.SummarizationMiddleware = FakeSummarizationMiddleware
+        fake_module.SummarizationToolMiddleware = FakeSummarizationToolMiddleware
+        monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", fake_module)
+
+        middleware = agent_mod._create_deepclaw_summarization_tool_middleware(
+            "test:model", "backend"
+        )
+
+        assert middleware.name == "deepclaw_summarization_tool"
+        assert middleware.summarization.name == "deepclaw_summarization"
+
+    def test_patches_deepagents_production_summarization_factory(self, monkeypatch):
+        import deepagents.graph as deepagents_graph
+
+        original_factory = deepagents_graph.create_summarization_middleware
+        monkeypatch.setattr(
+            agent_mod,
+            "_create_deepclaw_summarization_middleware",
+            lambda model, backend: ("custom", model, backend),
+        )
+
+        with agent_mod._patched_deepagents_summarization_factory():
+            assert deepagents_graph.create_summarization_middleware("m", "b") == (
+                "custom",
+                "m",
+                "b",
+            )
+
+        assert deepagents_graph.create_summarization_middleware is original_factory
 
 
 class FakeMiddlewareBackend:
@@ -493,13 +522,8 @@ def _build_test_summarization_middleware(monkeypatch, backend):
             return 60
 
     monkeypatch.setattr(deep_sum, "LCSummarizationMiddleware", FakeLCSummarizationMiddleware)
-    monkeypatch.setattr(
-        deep_sum, "create_summarization_tool_middleware", lambda model, backend: "compact-tool"
-    )
 
-    middleware_stack = []
-    agent_mod._append_summarization_middleware(middleware_stack, "test:model", backend)
-    return middleware_stack[0]
+    return agent_mod._create_deepclaw_summarization_middleware("test:model", backend)
 
 
 class TestRuntimeContextManagementBehavior:
@@ -583,7 +607,7 @@ class TestRuntimeContextManagementBehavior:
 
     def test_filesystem_middleware_offloads_large_tool_results(self):
         backend = FakeMiddlewareBackend()
-        middleware = agent_mod.FilesystemMiddleware(
+        middleware = FilesystemMiddleware(
             backend=backend,
             tool_token_limit_before_evict=1,
             human_message_token_limit_before_evict=50000,
@@ -618,7 +642,7 @@ class TestRuntimeContextManagementBehavior:
 
     def test_filesystem_middleware_offloads_large_human_messages(self):
         backend = FakeMiddlewareBackend()
-        middleware = agent_mod.FilesystemMiddleware(
+        middleware = FilesystemMiddleware(
             backend=backend,
             tool_token_limit_before_evict=20000,
             human_message_token_limit_before_evict=1,
@@ -654,7 +678,9 @@ class TestRuntimeContextManagementBehavior:
 
 
 class TestCreateAgent:
-    def test_wires_cli_style_context_backends_and_summarization(self, tmp_path, monkeypatch):
+    def test_wires_cli_style_context_backends_and_manual_compaction_tool(
+        self, tmp_path, monkeypatch
+    ):
         captured = {}
 
         class FakeShellBackend:
@@ -673,16 +699,9 @@ class TestCreateAgent:
                 self.default = default
                 self.routes = routes
 
-        class FakeFilesystemMiddleware:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-
         def fake_create_deep_agent(**kwargs):
             captured.update(kwargs)
             return "agent"
-
-        def fake_append_summarization(middleware, model, backend):
-            middleware.append(("summarization", model, backend))
 
         monkeypatch.setattr(agent_mod, "_setup_auth", lambda: None)
         monkeypatch.setattr(agent_mod, "_load_soul", lambda: "soul")
@@ -692,13 +711,17 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "DeepClawLocalShellBackend", FakeShellBackend)
         monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
-        monkeypatch.setattr(
-            agent_mod, "FilesystemMiddleware", FakeFilesystemMiddleware, raising=False
-        )
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(
-            agent_mod, "_append_summarization_middleware", fake_append_summarization
+            agent_mod,
+            "_create_deepclaw_summarization_tool_middleware",
+            lambda model, backend: ("compact-tool", model, backend),
+        )
+        monkeypatch.setattr(
+            agent_mod,
+            "_patched_deepagents_summarization_factory",
+            lambda: __import__("contextlib").nullcontext(),
         )
 
         stale_file = tmp_path / "runtime" / "large_tool_results" / "stale.txt"
@@ -722,22 +745,15 @@ class TestCreateAgent:
             captured["backend"].routes["/conversation_history/"].kwargs["root_dir"]
             == tmp_path / "runtime" / "conversation_history"
         )
-        assert any(
-            isinstance(middleware, FakeFilesystemMiddleware)
-            and middleware.kwargs
-            == {
-                "backend": captured["backend"],
-                "tool_token_limit_before_evict": 20000,
-                "human_message_token_limit_before_evict": 50000,
-            }
-            for middleware in captured["middleware"]
+        assert not any(
+            isinstance(middleware, FilesystemMiddleware) for middleware in captured["middleware"]
         )
         assert any(
             isinstance(middleware, agent_mod.LocalContextMiddleware)
             for middleware in captured["middleware"]
         )
         assert any(
-            middleware[0] == "summarization" and middleware[1] == "test:model"
+            middleware[0] == "compact-tool" and middleware[1] == "test:model"
             for middleware in captured["middleware"]
             if isinstance(middleware, tuple)
         )
@@ -776,7 +792,14 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(
-            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+            agent_mod,
+            "_create_deepclaw_summarization_tool_middleware",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_mod,
+            "_patched_deepagents_summarization_factory",
+            lambda: __import__("contextlib").nullcontext(),
         )
 
         config = DeepClawConfig(model="openai:gpt-5.3-codex", workspace_root=str(tmp_path))
@@ -820,7 +843,14 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(
-            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+            agent_mod,
+            "_create_deepclaw_summarization_tool_middleware",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_mod,
+            "_patched_deepagents_summarization_factory",
+            lambda: __import__("contextlib").nullcontext(),
         )
 
         config = DeepClawConfig(model="anthropic:claude-sonnet-4-6", workspace_root=str(tmp_path))

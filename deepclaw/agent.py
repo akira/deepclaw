@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -13,7 +14,6 @@ from deepagents.backends import LocalShellBackend
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse
-from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -614,19 +614,16 @@ def _context_management_settings() -> dict[str, dict[str, object]]:
     }
 
 
-def _append_summarization_middleware(middleware: list, model: str, backend) -> None:
-    """Add DeepAgents summarization middleware and manual compaction tool."""
+def _create_deepclaw_summarization_middleware(model: str, backend):
+    """Build DeepClaw's customized summarization middleware instance."""
     try:
-        from deepagents.middleware.summarization import (  # noqa: PLC0415
-            SummarizationMiddleware,
-            SummarizationToolMiddleware,
-        )
+        from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: PLC0415
     except ImportError:
         logger.warning(
             "Installed deepagents version does not provide summarization middleware; "
             "compact_conversation is unavailable"
         )
-        return
+        return None
 
     class DeepClawSummarizationMiddleware(SummarizationMiddleware):
         @property
@@ -641,14 +638,9 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
             summary = await super()._acreate_summary(messages_to_summarize)
             return _normalize_compaction_summary(summary, messages_to_summarize)
 
-    class DeepClawSummarizationToolMiddleware(SummarizationToolMiddleware):
-        @property
-        def name(self) -> str:
-            return "deepclaw_summarization_tool"
-
     settings = _context_management_settings()["summarization"]
 
-    def _build_middleware(config: dict[str, object]) -> DeepClawSummarizationMiddleware:
+    def _build_instance(config: dict[str, object]) -> DeepClawSummarizationMiddleware:
         return DeepClawSummarizationMiddleware(
             model=model,
             backend=backend,
@@ -659,7 +651,7 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
         )
 
     try:
-        summarization_middleware = _build_middleware(settings)
+        return _build_instance(settings)
     except ValueError as exc:
         if "Model profile information is required to use fractional token limits" not in str(exc):
             raise
@@ -668,11 +660,43 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
             "Model %s does not expose profile limits; falling back to absolute token-based summarization thresholds",
             model,
         )
-        summarization_middleware = _build_middleware(fallback_settings)
+        return _build_instance(fallback_settings)
 
-    middleware.append(summarization_middleware)
-    tool_middleware = DeepClawSummarizationToolMiddleware(summarization_middleware)
-    middleware.append(tool_middleware)
+
+def _create_deepclaw_summarization_tool_middleware(model: str, backend):
+    """Build a manual compact_conversation tool middleware backed by DeepClaw summarization."""
+    try:
+        from deepagents.middleware.summarization import SummarizationToolMiddleware  # noqa: PLC0415
+    except ImportError:
+        logger.warning(
+            "Installed deepagents version does not provide summarization middleware; "
+            "compact_conversation is unavailable"
+        )
+        return None
+
+    summarization_middleware = _create_deepclaw_summarization_middleware(model, backend)
+    if summarization_middleware is None:
+        return None
+
+    class DeepClawSummarizationToolMiddleware(SummarizationToolMiddleware):
+        @property
+        def name(self) -> str:
+            return "deepclaw_summarization_tool"
+
+    return DeepClawSummarizationToolMiddleware(summarization_middleware)
+
+
+@contextmanager
+def _patched_deepagents_summarization_factory():
+    """Temporarily route DeepAgents' production summarization factory through DeepClaw's customization."""
+    import deepagents.graph as deepagents_graph  # noqa: PLC0415
+
+    original_factory = deepagents_graph.create_summarization_middleware
+    deepagents_graph.create_summarization_middleware = _create_deepclaw_summarization_middleware
+    try:
+        yield
+    finally:
+        deepagents_graph.create_summarization_middleware = original_factory
 
 
 def create_agent(config, checkpointer):
@@ -711,30 +735,12 @@ def create_agent(config, checkpointer):
     else:
         logger.warning("Local context middleware skipped; backend cannot execute commands")
 
-    context_settings = _context_management_settings()
-    # DeepAgents' real create_deep_agent() path already adds FilesystemMiddleware
-    # with the same default eviction thresholds. Avoid duplicating it in
-    # production, but keep wiring it when the factory is monkeypatched in tests.
-    if getattr(create_deep_agent, "__module__", "") != "deepagents.graph":
-        middleware.append(
-            FilesystemMiddleware(
-                backend=composite_backend,
-                **context_settings["filesystem"],
-            )
-        )
-
-    # Deepagents already injects its own auto-summarization middleware inside the
-    # real create_deep_agent() path. Adding our custom summarization middleware on
-    # top of that causes duplicate middleware assertions at runtime. Keep the
-    # helper available for tests and future factory customization, but only wire
-    # it when create_deep_agent has been monkeypatched (for unit tests / local
-    # inspection) rather than when calling the real DeepAgents factory.
-    if getattr(create_deep_agent, "__module__", "") != "deepagents.graph":
-        _append_summarization_middleware(
-            middleware,
-            agent_model or config.model or DeepClawConfig.model,
-            composite_backend,
-        )
+    manual_compaction_tool_middleware = _create_deepclaw_summarization_tool_middleware(
+        agent_model or config.model or DeepClawConfig.model,
+        composite_backend,
+    )
+    if manual_compaction_tool_middleware is not None:
+        middleware.append(manual_compaction_tool_middleware)
 
     # System prompt from SOUL.md, always followed by tool-use enforcement.
     # Add stronger execution guidance for GPT/Codex-family models, which are
@@ -754,12 +760,13 @@ def create_agent(config, checkpointer):
     # Tool plugins
     tools = discover_tools()
 
-    return create_deep_agent(
-        model=agent_model,
-        backend=composite_backend,
-        checkpointer=checkpointer,
-        middleware=middleware,
-        system_prompt=system_prompt,
-        tools=tools or None,
-        subagents=DEFAULT_SUBAGENTS,
-    )
+    with _patched_deepagents_summarization_factory():
+        return create_deep_agent(
+            model=agent_model,
+            backend=composite_backend,
+            checkpointer=checkpointer,
+            middleware=middleware,
+            system_prompt=system_prompt,
+            tools=tools or None,
+            subagents=DEFAULT_SUBAGENTS,
+        )
