@@ -39,8 +39,9 @@ class TestResolveBasetenModel:
         assert type(resolved).__name__ == "FakeChatBaseten"
         assert captured == {
             "model": "moonshotai/Kimi-K2-Instruct-0905",
-            "streaming": False,
-            "disable_streaming": True,
+            "streaming": True,
+            "disable_streaming": False,
+            "stream_usage": True,
             "temperature": 0.25,
             "max_tokens": 2048,
             "top_p": 0.8,

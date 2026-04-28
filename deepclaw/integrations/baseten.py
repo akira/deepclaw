@@ -32,8 +32,9 @@ def resolve_baseten_model(config: DeepClawConfig):
     chat_cls = load_chat_baseten_class()
     generation = config.generation
     kwargs = {
-        "streaming": False,
-        "disable_streaming": True,
+        "streaming": True,
+        "disable_streaming": False,
+        "stream_usage": True,
     }
     if model_name.startswith(("https://", "http://")):
         kwargs["model_url"] = model_name
