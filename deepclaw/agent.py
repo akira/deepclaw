@@ -1,11 +1,13 @@
 """Agent factory for DeepClaw."""
 
+import copy
 import logging
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
@@ -32,6 +35,8 @@ from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
 
 logger = logging.getLogger(__name__)
+
+_DEEPAGENTS_SUMMARIZATION_FACTORY_LOCK = threading.RLock()
 
 
 class DeepClawLocalShellBackend(LocalShellBackend):
@@ -686,17 +691,42 @@ def _create_deepclaw_summarization_tool_middleware(model: str, backend):
     return DeepClawSummarizationToolMiddleware(summarization_middleware)
 
 
+def _build_subagent_compaction_middleware(spec: dict, model: str, backend) -> list:
+    """Return manual compaction middleware for declarative subagents only."""
+    if "graph_id" in spec or "runnable" in spec:
+        return []
+
+    subagent_model = spec.get("model") or model
+    middleware = _create_deepclaw_summarization_tool_middleware(subagent_model, backend)
+    return [middleware] if middleware is not None else []
+
+
+def _build_deepclaw_subagents(model: str, backend) -> list[dict]:
+    """Build production subagent specs with DeepClaw compaction tooling attached."""
+    subagents: list[dict] = [copy.deepcopy(GENERAL_PURPOSE_SUBAGENT)]
+    subagents.extend(copy.deepcopy(spec) for spec in DEFAULT_SUBAGENTS)
+
+    for spec in subagents:
+        existing_middleware = list(spec.get("middleware", []))
+        existing_middleware.extend(_build_subagent_compaction_middleware(spec, model, backend))
+        if existing_middleware:
+            spec["middleware"] = existing_middleware
+
+    return subagents
+
+
 @contextmanager
 def _patched_deepagents_summarization_factory():
     """Temporarily route DeepAgents' production summarization factory through DeepClaw's customization."""
     import deepagents.graph as deepagents_graph  # noqa: PLC0415
 
-    original_factory = deepagents_graph.create_summarization_middleware
-    deepagents_graph.create_summarization_middleware = _create_deepclaw_summarization_middleware
-    try:
-        yield
-    finally:
-        deepagents_graph.create_summarization_middleware = original_factory
+    with _DEEPAGENTS_SUMMARIZATION_FACTORY_LOCK:
+        original_factory = deepagents_graph.create_summarization_middleware
+        deepagents_graph.create_summarization_middleware = _create_deepclaw_summarization_middleware
+        try:
+            yield
+        finally:
+            deepagents_graph.create_summarization_middleware = original_factory
 
 
 def create_agent(config, checkpointer):
@@ -768,5 +798,8 @@ def create_agent(config, checkpointer):
             middleware=middleware,
             system_prompt=system_prompt,
             tools=tools or None,
-            subagents=DEFAULT_SUBAGENTS,
+            subagents=_build_deepclaw_subagents(
+                agent_model or config.model or DeepClawConfig.model,
+                composite_backend,
+            ),
         )

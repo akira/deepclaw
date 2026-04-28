@@ -439,6 +439,24 @@ class TestDeepClawSummarizationFactory:
         assert middleware.name == "deepclaw_summarization_tool"
         assert middleware.summarization.name == "deepclaw_summarization"
 
+    def test_builds_production_subagents_with_manual_compaction(self, monkeypatch):
+        monkeypatch.setattr(
+            agent_mod,
+            "_create_deepclaw_summarization_tool_middleware",
+            lambda model, backend: f"compact:{model}:{backend}",
+        )
+
+        subagents = agent_mod._build_deepclaw_subagents("test:model", "backend")
+
+        assert subagents[0]["name"] == "general-purpose"
+        assert subagents[0]["middleware"] == ["compact:test:model:backend"]
+        assert {spec["name"] for spec in subagents[1:]} == {"researcher", "coder", "sysadmin"}
+        assert all(spec["middleware"] == ["compact:test:model:backend"] for spec in subagents)
+        assert all(
+            spec is not source
+            for spec, source in zip(subagents[1:], agent_mod.DEFAULT_SUBAGENTS, strict=False)
+        )
+
     def test_patches_deepagents_production_summarization_factory(self, monkeypatch):
         import deepagents.graph as deepagents_graph
 
@@ -457,6 +475,25 @@ class TestDeepClawSummarizationFactory:
             )
 
         assert deepagents_graph.create_summarization_middleware is original_factory
+
+    def test_serializes_factory_patch_with_lock(self, monkeypatch):
+        events = []
+
+        class FakeLock:
+            def __enter__(self):
+                events.append("enter")
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                events.append("exit")
+                return False
+
+        monkeypatch.setattr(agent_mod, "_DEEPAGENTS_SUMMARIZATION_FACTORY_LOCK", FakeLock())
+
+        with agent_mod._patched_deepagents_summarization_factory():
+            events.append("inside")
+
+        assert events == ["enter", "inside", "exit"]
 
 
 class FakeMiddlewareBackend:
@@ -720,6 +757,11 @@ class TestCreateAgent:
         )
         monkeypatch.setattr(
             agent_mod,
+            "_build_deepclaw_subagents",
+            lambda model, backend: [("subagent-compact-tool", model, backend)],
+        )
+        monkeypatch.setattr(
+            agent_mod,
             "_patched_deepagents_summarization_factory",
             lambda: __import__("contextlib").nullcontext(),
         )
@@ -757,6 +799,9 @@ class TestCreateAgent:
             for middleware in captured["middleware"]
             if isinstance(middleware, tuple)
         )
+        assert captured["subagents"] == [
+            ("subagent-compact-tool", "test:model", captured["backend"])
+        ]
 
     def test_includes_openai_execution_guidance_for_gpt_models(self, tmp_path, monkeypatch):
         captured = {}
@@ -796,6 +841,7 @@ class TestCreateAgent:
             "_create_deepclaw_summarization_tool_middleware",
             lambda *args, **kwargs: None,
         )
+        monkeypatch.setattr(agent_mod, "_build_deepclaw_subagents", lambda *args, **kwargs: [])
         monkeypatch.setattr(
             agent_mod,
             "_patched_deepagents_summarization_factory",
@@ -847,6 +893,7 @@ class TestCreateAgent:
             "_create_deepclaw_summarization_tool_middleware",
             lambda *args, **kwargs: None,
         )
+        monkeypatch.setattr(agent_mod, "_build_deepclaw_subagents", lambda *args, **kwargs: [])
         monkeypatch.setattr(
             agent_mod,
             "_patched_deepagents_summarization_factory",
