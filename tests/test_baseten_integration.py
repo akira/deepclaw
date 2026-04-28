@@ -103,6 +103,15 @@ class TestResolveBasetenModel:
         with pytest.raises(ValueError, match="Baseten model name cannot be empty"):
             resolve_baseten_model(config)
 
+    def test_baseten_raises_helpful_error_when_dependency_missing(self, monkeypatch):
+        monkeypatch.setattr(
+            "deepclaw.integrations.baseten.import_module",
+            lambda _name: (_ for _ in ()).throw(ImportError("missing langchain_baseten")),
+        )
+
+        with pytest.raises(RuntimeError, match="Baseten models require langchain-baseten"):
+            resolve_baseten_model(DeepClawConfig(model="baseten:moonshotai/Kimi-K2.6"))
+
 
 class TestCreateAgentBaseten:
     def test_create_agent_passes_resolved_baseten_model_instance(self, tmp_path, monkeypatch):
