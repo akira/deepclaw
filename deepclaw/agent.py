@@ -598,6 +598,16 @@ def _context_management_settings() -> dict[str, dict[str, object]]:
                 "max_length": 2000,
                 "truncation_text": "...(argument truncated)",
             },
+            "fallback": {
+                "trigger": ("tokens", 80000),
+                "keep": ("messages", 8),
+                "truncate_args_settings": {
+                    "trigger": ("tokens", 40000),
+                    "keep": ("messages", 8),
+                    "max_length": 2000,
+                    "truncation_text": "...(argument truncated)",
+                },
+            },
         },
         "filesystem": {
             "tool_token_limit_before_evict": 20000,
@@ -611,7 +621,7 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
     try:
         from deepagents.middleware.summarization import (  # noqa: PLC0415
             SummarizationMiddleware,
-            create_summarization_tool_middleware,
+            SummarizationToolMiddleware,
         )
     except ImportError:
         logger.warning(
@@ -621,6 +631,10 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
         return
 
     class DeepClawSummarizationMiddleware(SummarizationMiddleware):
+        @property
+        def name(self) -> str:
+            return "deepclaw_summarization"
+
         def _create_summary(self, messages_to_summarize):
             summary = super()._create_summary(messages_to_summarize)
             return _normalize_compaction_summary(summary, messages_to_summarize)
@@ -629,18 +643,38 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
             summary = await super()._acreate_summary(messages_to_summarize)
             return _normalize_compaction_summary(summary, messages_to_summarize)
 
+    class DeepClawSummarizationToolMiddleware(SummarizationToolMiddleware):
+        @property
+        def name(self) -> str:
+            return "deepclaw_summarization_tool"
+
     settings = _context_management_settings()["summarization"]
-    middleware.append(
-        DeepClawSummarizationMiddleware(
+
+    def _build_middleware(config: dict[str, object]) -> DeepClawSummarizationMiddleware:
+        return DeepClawSummarizationMiddleware(
             model=model,
             backend=backend,
-            trigger=settings["trigger"],
-            keep=settings["keep"],
+            trigger=config["trigger"],
+            keep=config["keep"],
             summary_prompt=settings["summary_prompt"],
-            truncate_args_settings=settings["truncate_args_settings"],
+            truncate_args_settings=config["truncate_args_settings"],
         )
-    )
-    middleware.append(create_summarization_tool_middleware(model, backend))
+
+    try:
+        summarization_middleware = _build_middleware(settings)
+    except ValueError as exc:
+        if "Model profile information is required to use fractional token limits" not in str(exc):
+            raise
+        fallback_settings = settings["fallback"]
+        logger.warning(
+            "Model %s does not expose profile limits; falling back to absolute token-based summarization thresholds",
+            model,
+        )
+        summarization_middleware = _build_middleware(fallback_settings)
+
+    middleware.append(summarization_middleware)
+    tool_middleware = DeepClawSummarizationToolMiddleware(summarization_middleware)
+    middleware.append(tool_middleware)
 
 
 def create_agent(config, checkpointer):
@@ -680,21 +714,29 @@ def create_agent(config, checkpointer):
         logger.warning("Local context middleware skipped; backend cannot execute commands")
 
     context_settings = _context_management_settings()
-    middleware.append(
-        FilesystemMiddleware(
-            backend=composite_backend,
-            **context_settings["filesystem"],
+    # DeepAgents' real create_deep_agent() path already adds FilesystemMiddleware
+    # with the same default eviction thresholds. Avoid duplicating it in
+    # production, but keep wiring it when the factory is monkeypatched in tests.
+    if getattr(create_deep_agent, "__module__", "") != "deepagents.graph":
+        middleware.append(
+            FilesystemMiddleware(
+                backend=composite_backend,
+                **context_settings["filesystem"],
+            )
         )
-    )
 
-    # Deepagents CLI-style context compaction/offload. This adds the
-    # compact_conversation tool and stores historical messages under the
-    # composite backend's /conversation_history/ route.
-    _append_summarization_middleware(
-        middleware,
-        agent_model or config.model or DeepClawConfig.model,
-        composite_backend,
-    )
+    # Deepagents already injects its own auto-summarization middleware inside the
+    # real create_deep_agent() path. Adding our custom summarization middleware on
+    # top of that causes duplicate middleware assertions at runtime. Keep the
+    # helper available for tests and future factory customization, but only wire
+    # it when create_deep_agent has been monkeypatched (for unit tests / local
+    # inspection) rather than when calling the real DeepAgents factory.
+    if getattr(create_deep_agent, "__module__", "") != "deepagents.graph":
+        _append_summarization_middleware(
+            middleware,
+            agent_model or config.model or DeepClawConfig.model,
+            composite_backend,
+        )
 
     # System prompt from SOUL.md, always followed by tool-use enforcement.
     # Add stronger execution guidance for GPT/Codex-family models, which are

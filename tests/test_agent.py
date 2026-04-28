@@ -6,9 +6,14 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelRequest, ModelResponse
+from langchain.tools import ToolRuntime
+from langchain.tools.tool_node import ToolCallRequest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.runtime import Runtime
 
 from deepclaw import agent as agent_mod
 from deepclaw.config import DeepClawConfig
@@ -371,13 +376,13 @@ class TestAppendSummarizationMiddleware:
             def __init__(self, **kwargs):
                 captured["summarization_kwargs"] = kwargs
 
+        class FakeSummarizationToolMiddleware:
+            def __init__(self, summarization):
+                captured["tool_middleware_summarization"] = summarization
+
         fake_module = types.ModuleType("deepagents.middleware.summarization")
         fake_module.SummarizationMiddleware = FakeSummarizationMiddleware
-        fake_module.create_summarization_tool_middleware = lambda model, backend: (
-            "compact-tool",
-            model,
-            backend,
-        )
+        fake_module.SummarizationToolMiddleware = FakeSummarizationToolMiddleware
         monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", fake_module)
 
         middleware = []
@@ -387,7 +392,265 @@ class TestAppendSummarizationMiddleware:
             captured["summarization_kwargs"]["summary_prompt"]
             == agent_mod.CONTEXT_CHECKPOINT_SUMMARY_PROMPT
         )
-        assert middleware[-1] == ("compact-tool", "test:model", "backend")
+        assert middleware[-1].__class__.__name__ == "DeepClawSummarizationToolMiddleware"
+        assert middleware[0].name == "deepclaw_summarization"
+        assert middleware[-1].name == "deepclaw_summarization_tool"
+
+    def test_falls_back_to_absolute_token_thresholds_without_model_profile(self, monkeypatch):
+        captured = {"calls": []}
+
+        class FakeSummarizationMiddleware:
+            def __init__(self, **kwargs):
+                captured["calls"].append(kwargs)
+                if kwargs["trigger"] == ("fraction", 0.85):
+                    raise ValueError(
+                        "Model profile information is required to use fractional token limits"
+                    )
+
+        class FakeSummarizationToolMiddleware:
+            def __init__(self, summarization):
+                captured["tool_middleware_summarization"] = summarization
+
+        fake_module = types.ModuleType("deepagents.middleware.summarization")
+        fake_module.SummarizationMiddleware = FakeSummarizationMiddleware
+        fake_module.SummarizationToolMiddleware = FakeSummarizationToolMiddleware
+        monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", fake_module)
+
+        middleware = []
+        agent_mod._append_summarization_middleware(
+            middleware, "baseten:moonshotai/Kimi-K2.6", "backend"
+        )
+
+        assert len(captured["calls"]) == 2
+        assert captured["calls"][1]["trigger"] == ("tokens", 80000)
+        assert captured["calls"][1]["keep"] == ("messages", 8)
+        assert captured["calls"][1]["truncate_args_settings"]["trigger"] == (
+            "tokens",
+            40000,
+        )
+
+
+class FakeMiddlewareBackend:
+    def __init__(self):
+        self.writes = []
+        self.download_requests = []
+
+    def write(self, path, content):
+        self.writes.append((path, content))
+        return types.SimpleNamespace(error=None)
+
+    async def awrite(self, path, content):
+        self.writes.append((path, content))
+        return types.SimpleNamespace(error=None)
+
+    def download_files(self, paths):
+        self.download_requests.append(tuple(paths))
+        return []
+
+
+def _build_test_summarization_middleware(monkeypatch, backend):
+    import deepagents.middleware.summarization as deep_sum
+
+    class FakeLCSummarizationMiddleware:
+        def __init__(
+            self,
+            model,
+            trigger,
+            keep,
+            token_counter,
+            summary_prompt,
+            trim_tokens_to_summarize,
+        ):
+            self.model = model
+            self.trigger = trigger
+            self.keep = keep
+            self.token_counter = token_counter
+            self.summary_prompt = summary_prompt
+            self.trim_tokens_to_summarize = trim_tokens_to_summarize
+
+        def _get_profile_limits(self):
+            return 1000
+
+        def _should_summarize(self, messages, total_tokens):
+            trigger_type, trigger_value = self.trigger
+            if trigger_type == "fraction":
+                return total_tokens >= int(self._get_profile_limits() * trigger_value)
+            return False
+
+        def _determine_cutoff_index(self, messages):
+            return max(1, len(messages) - 2)
+
+        def _partition_messages(self, messages, cutoff_index):
+            return messages[:cutoff_index], messages[cutoff_index:]
+
+        def _create_summary(self, messages):
+            return "## Active Task\nStub summary"
+
+        async def _acreate_summary(self, messages):
+            return self._create_summary(messages)
+
+        def _partial_token_counter(self, messages):
+            return 60
+
+    monkeypatch.setattr(deep_sum, "LCSummarizationMiddleware", FakeLCSummarizationMiddleware)
+    monkeypatch.setattr(
+        deep_sum, "create_summarization_tool_middleware", lambda model, backend: "compact-tool"
+    )
+
+    middleware_stack = []
+    agent_mod._append_summarization_middleware(middleware_stack, "test:model", backend)
+    return middleware_stack[0]
+
+
+class TestRuntimeContextManagementBehavior:
+    def test_wrap_model_call_summarizes_and_offloads_history(self, monkeypatch):
+        backend = FakeMiddlewareBackend()
+        middleware = _build_test_summarization_middleware(monkeypatch, backend)
+
+        middleware._lc_helper.token_counter = lambda messages, tools=None: 900
+        monkeypatch.setattr(middleware, "_determine_cutoff_index", lambda messages: 2)
+        monkeypatch.setattr(
+            middleware, "_create_summary", lambda messages: "## Active Task\nSummarized work"
+        )
+
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        request = ModelRequest(
+            model=Mock(),
+            messages=[
+                HumanMessage(content="old user request"),
+                AIMessage(content="old assistant work"),
+                HumanMessage(content="recent request"),
+                AIMessage(content="recent assistant work"),
+            ],
+            tools=[],
+            state={},
+            runtime=Runtime(context=None),
+        )
+
+        response = middleware.wrap_model_call(request, handler)
+
+        assert isinstance(response, ExtendedModelResponse)
+        assert backend.writes
+        offload_path, offload_content = backend.writes[0]
+        assert offload_path.startswith("/conversation_history/")
+        assert "old user request" in offload_content
+        assert "old assistant work" in offload_content
+        summary_message = captured["messages"][0]
+        assert offload_path in summary_message.content
+        assert "## Active Task\nSummarized work" in summary_message.content
+        assert response.command.update["_summarization_event"]["file_path"] == offload_path
+
+    def test_wrap_model_call_truncates_old_tool_args_before_handler(self, monkeypatch):
+        backend = FakeMiddlewareBackend()
+        middleware = _build_test_summarization_middleware(monkeypatch, backend)
+
+        middleware._lc_helper.token_counter = lambda messages, tools=None: 600
+        monkeypatch.setattr(middleware, "_determine_truncate_cutoff_index", lambda messages: 1)
+
+        oversized_call = {
+            "name": "write_file",
+            "args": {"file_path": "/tmp/demo.txt", "content": "x" * 2500},
+            "id": "call_1",
+            "type": "tool_call",
+        }
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        request = ModelRequest(
+            model=Mock(),
+            messages=[
+                AIMessage(content="tool call", tool_calls=[oversized_call]),
+                HumanMessage(content="recent user message"),
+            ],
+            tools=[],
+            state={},
+            runtime=Runtime(context=None),
+        )
+
+        middleware.wrap_model_call(request, handler)
+
+        truncated_content = captured["messages"][0].tool_calls[0]["args"]["content"]
+        assert truncated_content.endswith("...(argument truncated)")
+        assert len(truncated_content) < len(oversized_call["args"]["content"])
+
+    def test_filesystem_middleware_offloads_large_tool_results(self):
+        backend = FakeMiddlewareBackend()
+        middleware = agent_mod.FilesystemMiddleware(
+            backend=backend,
+            tool_token_limit_before_evict=1,
+            human_message_token_limit_before_evict=50000,
+        )
+        runtime = ToolRuntime(
+            state={},
+            context=None,
+            config={},
+            stream_writer=lambda *_args, **_kwargs: None,
+            tools=[],
+            tool_call_id="call_1",
+            store=None,
+        )
+        request = ToolCallRequest(
+            tool_call={"name": "search_files", "args": {}, "id": "call_1", "type": "tool_call"},
+            tool=None,
+            state={},
+            runtime=runtime,
+        )
+
+        result = middleware.wrap_tool_call(
+            request,
+            lambda _request: ToolMessage(
+                content="X" * 40,
+                name="search_files",
+                tool_call_id="call_1",
+            ),
+        )
+
+        assert backend.writes[0][0] == "/large_tool_results/call_1"
+        assert "/large_tool_results/call_1" in result.content
+
+    def test_filesystem_middleware_offloads_large_human_messages(self):
+        backend = FakeMiddlewareBackend()
+        middleware = agent_mod.FilesystemMiddleware(
+            backend=backend,
+            tool_token_limit_before_evict=20000,
+            human_message_token_limit_before_evict=1,
+        )
+        captured = {}
+
+        def handler(request):
+            captured["messages"] = request.messages
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        request = ModelRequest(
+            model=Mock(),
+            messages=[
+                HumanMessage(content="small"),
+                HumanMessage(content="Y" * 40),
+            ],
+            tools=[],
+            state={},
+            runtime=Runtime(context=None),
+        )
+
+        response = middleware.wrap_model_call(request, handler)
+
+        assert isinstance(response, ExtendedModelResponse)
+        offload_path, offload_content = backend.writes[0]
+        assert offload_path.startswith("/conversation_history/")
+        assert offload_content == "Y" * 40
+        assert offload_path in str(captured["messages"][-1].content)
+        assert (
+            response.command.update["messages"][0].additional_kwargs["lc_evicted_to"]
+            == offload_path
+        )
 
 
 class TestCreateAgent:
