@@ -4,7 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from deepclaw.config import DeepClawConfig
-from deepclaw.deepinfra import DEEPINFRA_PROVIDER, resolve_deepinfra_model
+from deepclaw.integrations.deepinfra import DEEPINFRA_PROVIDER, resolve_deepinfra_model
 
 
 class TestDeepInfraHelpers:
@@ -25,7 +25,7 @@ class TestDeepInfraHelpers:
                 return [{"content": msg.content} for msg in messages], {"stop": stop}
 
         monkeypatch.setattr(
-            "deepclaw.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
+            "deepclaw.integrations.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
         )
         config = DeepClawConfig(model="deepinfra:deepseek-ai/DeepSeek-V3")
         config.generation.temperature = 0.25
@@ -55,7 +55,7 @@ class TestDeepInfraHelpers:
                 return [{"content": msg.content} for msg in messages], {"stop": stop}
 
         monkeypatch.setattr(
-            "deepclaw.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
+            "deepclaw.integrations.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
         )
         model = resolve_deepinfra_model(DeepClawConfig(model="deepinfra:foo/bar"))
 

@@ -216,9 +216,11 @@ DEFAULT_CONFIG_YAML = """\
 # Model — use provider:model format (default: anthropic:claude-sonnet-4-6)
 # model: "openai:gpt-4o"
 # model: "deepinfra:deepseek-ai/DeepSeek-V3"
+# model: "baseten:moonshotai/Kimi-K2-Instruct-0905"
+# model: "baseten:https://model-<id>.api.baseten.co/environments/production/sync/v1"
 
-# Optional generation defaults. DeepInfra support maps these through to the
-# LangChain community adapter when using a deepinfra:* model.
+# Optional generation defaults. DeepInfra and Baseten support map these through
+# to their LangChain adapters when using deepinfra:* or baseten:* models.
 # generation:
 #   temperature: 0.2
 #   max_tokens: 4096

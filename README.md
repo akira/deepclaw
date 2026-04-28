@@ -103,6 +103,20 @@ export DEEPCLAW_MODEL=deepinfra:deepseek-ai/DeepSeek-V3
 export DEEPINFRA_API_TOKEN=***
 ```
 
+**Baseten example (optional):**
+```yaml
+model: "baseten:moonshotai/Kimi-K2-Instruct-0905"
+generation:
+  temperature: 0.2
+  max_tokens: 4096
+  top_p: 0.9
+```
+
+```bash
+export DEEPCLAW_MODEL='baseten:https://model-<id>.api.baseten.co/environments/production/sync/v1'
+export BASETEN_API_KEY=***
+```
+
 Supported providers (requires the provider's API key and langchain package):
 
 | Provider | Model example | API key env var | Package |
@@ -110,13 +124,14 @@ Supported providers (requires the provider's API key and langchain package):
 | Anthropic | `anthropic:claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | (included) |
 | OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` | `langchain-openai` |
 | DeepInfra | `deepinfra:deepseek-ai/DeepSeek-V3` | `DEEPINFRA_API_TOKEN` | `langchain-community` |
+| Baseten | `baseten:moonshotai/Kimi-K2-Instruct-0905` or `baseten:https://model-<id>.api.baseten.co/environments/production/sync/v1` | `BASETEN_API_KEY` | `langchain-baseten` |
 | Google | `google-genai:gemini-2.5-pro` | `GOOGLE_API_KEY` | `langchain-google-genai` |
 | Groq | `groq:llama-3.3-70b` | `GROQ_API_KEY` | `langchain-groq` |
 | OpenRouter | `openrouter:anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` | `langchain-openrouter` |
 
 Install additional providers as needed:
 ```bash
-uv pip install langchain-openai  # for OpenAI models
+uv pip install langchain-openai langchain-baseten  # for OpenAI or Baseten models
 # DeepInfra support uses langchain-community and is bundled with this repo.
 ```
 
