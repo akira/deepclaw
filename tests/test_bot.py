@@ -1344,6 +1344,9 @@ class TestValidateModel:
     def test_valid_deepinfra(self):
         assert _validate_model("deepinfra:deepseek-ai/DeepSeek-V3") is None
 
+    def test_valid_baseten(self):
+        assert _validate_model("baseten:moonshotai/Kimi-K2-Instruct-0905") is None
+
     def test_missing_colon(self):
         assert _validate_model("claude-sonnet") is not None
 

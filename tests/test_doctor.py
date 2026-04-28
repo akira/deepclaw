@@ -144,10 +144,22 @@ class TestCheckLlmApiKey:
         assert result.status == STATUS_OK
         assert "DEEPINFRA_API_KEY" in result.message
 
+    def test_baseten_api_key_set(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
+        monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+        monkeypatch.setenv("BASETEN_API_KEY", "bt-test")
+        result = check_llm_api_key()
+        assert result.status == STATUS_OK
+        assert "BASETEN_API_KEY" in result.message
+
     def test_no_key_set(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
+        monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+        monkeypatch.delenv("BASETEN_API_KEY", raising=False)
         result = check_llm_api_key()
         assert result.status == STATUS_FAIL
 

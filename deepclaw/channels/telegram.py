@@ -889,6 +889,7 @@ KNOWN_PROVIDERS = (
     "vertex",
     "nvidia",
     "deepinfra",
+    "baseten",
 )
 
 

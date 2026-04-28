@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 
 from deepclaw import agent as agent_mod
 from deepclaw.config import DeepClawConfig
-from deepclaw.deepinfra import DEEPINFRA_PROVIDER, resolve_deepinfra_model
+from deepclaw.integrations.deepinfra import DEEPINFRA_PROVIDER, resolve_deepinfra_model
 
 
 class TestResolveAgentModel:
@@ -29,7 +29,7 @@ class TestResolveAgentModel:
                 return [{"content": msg.content} for msg in messages], {"stop": stop}
 
         monkeypatch.setattr(
-            "deepclaw.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
+            "deepclaw.integrations.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
         )
         config = DeepClawConfig(model="deepinfra:deepseek-ai/DeepSeek-V3")
         config.generation.temperature = 0.25
@@ -59,7 +59,7 @@ class TestResolveAgentModel:
                 return [{"content": msg.content} for msg in messages], {"stop": stop}
 
         monkeypatch.setattr(
-            "deepclaw.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
+            "deepclaw.integrations.deepinfra.load_chat_deepinfra_class", lambda: FakeChatDeepInfra
         )
         model = resolve_deepinfra_model(DeepClawConfig(model="deepinfra:foo/bar"))
 
@@ -114,7 +114,7 @@ class TestCreateAgentDeepInfra:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
-        monkeypatch.setattr(agent_mod, "resolve_deepinfra_model", lambda config: fake_model)
+        monkeypatch.setattr(agent_mod, "resolve_provider_model", lambda config: fake_model)
         monkeypatch.setattr(
             agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
         )

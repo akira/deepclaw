@@ -78,10 +78,12 @@ def check_llm_api_key() -> Check:
         return Check("LLM API key", STATUS_OK, "DEEPINFRA_API_TOKEN is set")
     if os.environ.get("DEEPINFRA_API_KEY"):
         return Check("LLM API key", STATUS_OK, "DEEPINFRA_API_KEY is set")
+    if os.environ.get("BASETEN_API_KEY"):
+        return Check("LLM API key", STATUS_OK, "BASETEN_API_KEY is set")
     return Check(
         "LLM API key",
         STATUS_FAIL,
-        "None of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPINFRA_API_TOKEN, or DEEPINFRA_API_KEY is set",
+        "None of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPINFRA_API_TOKEN, DEEPINFRA_API_KEY, or BASETEN_API_KEY is set",
     )
 
 
