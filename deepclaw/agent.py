@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -314,6 +315,127 @@ Before finalizing:
 
 OPENAI_MODEL_GUIDANCE_MODELS = ("gpt", "codex")
 
+CONTEXT_CHECKPOINT_SUMMARY_PROMPT = """\
+You are creating a compact checkpoint summary for an in-progress DeepClaw conversation.
+
+Produce a concise but information-dense handoff using exactly these markdown sections:
+
+## Active Task
+State the immediate task currently in progress.
+
+## Goal
+Describe the overall user goal or desired outcome.
+
+## Constraints & Preferences
+List important constraints, user preferences, safety limits, environment facts, and explicit decisions. If none, say `None`.
+
+## Completed Actions
+List concrete actions already taken, including meaningful results. Prefer bullets. If none, say `None`.
+
+## Active State
+Record the current branch, runtime/service state, key files, configs, trace IDs, or other live state needed to resume accurately. If none, say `None`.
+
+## Next Steps
+List the most important next actions to continue the work.
+
+Requirements:
+- Be specific and factual.
+- Preserve decisions, failures, and partial progress that should not be repeated.
+- Prefer short bullets over prose where possible.
+- Do not output any text before or after these sections.
+"""
+
+_BAD_COMPACTION_SUMMARY_PATTERNS = (
+    re.compile(r"previous conversation was too long to summarize", re.IGNORECASE),
+)
+
+
+def _message_text(message) -> str:
+    """Extract plain text content from a LangChain message-like object."""
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+        return " ".join(part.strip() for part in parts if part and str(part).strip())
+    return str(content).strip()
+
+
+def _clip_summary_text(text: str, limit: int = 240) -> str:
+    """Normalize whitespace and clip long snippets for fallback summaries."""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _latest_message_text(messages: list, roles: set[str]) -> str | None:
+    """Return the newest message text whose role/type matches one of `roles`."""
+    for message in reversed(messages):
+        role = getattr(message, "type", None) or getattr(message, "role", None)
+        if role in roles:
+            text = _message_text(message)
+            if text:
+                return _clip_summary_text(text)
+    return None
+
+
+def _build_compaction_fallback_summary(messages: list) -> str:
+    """Build a structured fallback when model summarization returns a useless stub."""
+    latest_user = _latest_message_text(messages, {"human", "user"})
+    latest_ai = _latest_message_text(messages, {"ai", "assistant"})
+    active_task = (
+        latest_user or "Continue the current user request from the preserved recent messages."
+    )
+    completed = latest_ai or "None"
+    constraints = [
+        "Preserve prior decisions and avoid repeating completed work.",
+        "Use `/conversation_history/...` if offloaded details are needed.",
+    ]
+    if latest_user and "compact_conversation" in latest_user:
+        constraints.append(
+            "Keep `compact_conversation` available for explicit task shifts in long threads."
+        )
+
+    completed_lines = [f"- {completed}"] if completed != "None" else ["None"]
+    constraint_lines = [f"- {item}" for item in constraints] if constraints else ["None"]
+
+    return "\n".join(
+        [
+            "## Active Task",
+            active_task,
+            "",
+            "## Goal",
+            "Continue the user's in-progress objective without losing critical prior context.",
+            "",
+            "## Constraints & Preferences",
+            *constraint_lines,
+            "",
+            "## Completed Actions",
+            *completed_lines,
+            "",
+            "## Active State",
+            "- Earlier conversation may be offloaded under `/conversation_history/` for this thread.",
+            "- Recent preserved messages remain in the active context window.",
+            "",
+            "## Next Steps",
+            "- Continue from the latest user request, consulting offloaded history only if more detail is needed.",
+        ]
+    )
+
+
+def _normalize_compaction_summary(summary: str, messages: list) -> str:
+    """Replace known-bad compaction output with a structured fallback summary."""
+    cleaned = (summary or "").strip()
+    if cleaned and not any(pattern.search(cleaned) for pattern in _BAD_COMPACTION_SUMMARY_PATTERNS):
+        return cleaned
+    return _build_compaction_fallback_summary(messages)
+
 
 def _load_soul() -> str | None:
     """Load SOUL.md from ~/.deepclaw/SOUL.md.
@@ -469,6 +591,7 @@ def _context_management_settings() -> dict[str, dict[str, object]]:
         "summarization": {
             "trigger": ("fraction", 0.85),
             "keep": ("fraction", 0.10),
+            "summary_prompt": CONTEXT_CHECKPOINT_SUMMARY_PROMPT,
             "truncate_args_settings": {
                 "trigger": ("fraction", 0.50),
                 "keep": ("fraction", 0.10),
@@ -497,13 +620,23 @@ def _append_summarization_middleware(middleware: list, model: str, backend) -> N
         )
         return
 
+    class DeepClawSummarizationMiddleware(SummarizationMiddleware):
+        def _create_summary(self, messages_to_summarize):
+            summary = super()._create_summary(messages_to_summarize)
+            return _normalize_compaction_summary(summary, messages_to_summarize)
+
+        async def _acreate_summary(self, messages_to_summarize):
+            summary = await super()._acreate_summary(messages_to_summarize)
+            return _normalize_compaction_summary(summary, messages_to_summarize)
+
     settings = _context_management_settings()["summarization"]
     middleware.append(
-        SummarizationMiddleware(
+        DeepClawSummarizationMiddleware(
             model=model,
             backend=backend,
             trigger=settings["trigger"],
             keep=settings["keep"],
+            summary_prompt=settings["summary_prompt"],
             truncate_args_settings=settings["truncate_args_settings"],
         )
     )

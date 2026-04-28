@@ -3,9 +3,12 @@
 import os
 import shutil
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deepclaw import agent as agent_mod
 from deepclaw.config import DeepClawConfig
@@ -320,6 +323,71 @@ class TestContextManagementSettings:
             "tool_token_limit_before_evict": 20000,
             "human_message_token_limit_before_evict": 50000,
         }
+
+    def test_uses_structured_checkpoint_summary_prompt(self):
+        prompt = agent_mod.CONTEXT_CHECKPOINT_SUMMARY_PROMPT
+
+        assert "## Active Task" in prompt
+        assert "## Goal" in prompt
+        assert "## Constraints & Preferences" in prompt
+        assert "## Completed Actions" in prompt
+        assert "## Active State" in prompt
+        assert "## Next Steps" in prompt
+
+
+class TestCompactionFallbackSummary:
+    def test_replaces_useless_placeholder_with_structured_fallback(self):
+        messages = [
+            HumanMessage(
+                content="Please fix context bloat in DeepClaw and keep compact_conversation available."
+            ),
+            AIMessage(
+                content="I switched to DeepAgents middleware and reviewed the trace evidence."
+            ),
+        ]
+
+        result = agent_mod._normalize_compaction_summary(
+            "Previous conversation was too long to summarize.",
+            messages,
+        )
+
+        assert "## Active Task" in result
+        assert "context bloat in DeepClaw" in result
+        assert "## Completed Actions" in result
+        assert "reviewed the trace evidence" in result
+        assert "## Next Steps" in result
+
+    def test_keeps_useful_summary_content(self):
+        summary = "## Active Task\nShip the fix\n\n## Goal\nReduce context bloat"
+
+        assert agent_mod._normalize_compaction_summary(summary, []) == summary
+
+
+class TestAppendSummarizationMiddleware:
+    def test_passes_structured_summary_prompt_into_deepagents_middleware(self, monkeypatch):
+        captured = {}
+
+        class FakeSummarizationMiddleware:
+            def __init__(self, **kwargs):
+                captured["summarization_kwargs"] = kwargs
+
+        fake_module = types.ModuleType("deepagents.middleware.summarization")
+        fake_module.SummarizationMiddleware = FakeSummarizationMiddleware
+        fake_module.create_summarization_tool_middleware = lambda model, backend: (
+            "compact-tool",
+            model,
+            backend,
+        )
+        monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", fake_module)
+
+        middleware = []
+        agent_mod._append_summarization_middleware(middleware, "test:model", "backend")
+
+        assert (
+            captured["summarization_kwargs"]["summary_prompt"]
+            == agent_mod.CONTEXT_CHECKPOINT_SUMMARY_PROMPT
+        )
+        assert middleware[-1] == ("compact-tool", "test:model", "backend")
 
 
 class TestCreateAgent:
