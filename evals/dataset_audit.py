@@ -7,12 +7,13 @@ import argparse
 import json
 import sys
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from langsmith import Client
 
-WORKSPACE_ENV = "/home/ubuntu/.deepclaw/.env"
+WORKSPACE_ENV = str(Path("~/.deepclaw/.env").expanduser())
 DEFAULT_DATASET = "deepclaw"
 
 
