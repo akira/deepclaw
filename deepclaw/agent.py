@@ -345,11 +345,21 @@ Requirements:
 - Be specific and factual.
 - Preserve decisions, failures, and partial progress that should not be repeated.
 - Prefer short bullets over prose where possible.
+- `## Active Task`, `## Goal`, and `## Next Steps` must contain the concrete user objective and immediate continuation plan, not generic placeholders.
+- Never use vague lines like `Continue the user's in-progress objective`, `Continue from the latest user request`, or `None` when the conversation contains a real task.
 - Do not output any text before or after these sections.
 """
 
 _BAD_COMPACTION_SUMMARY_PATTERNS = (
     re.compile(r"previous conversation was too long to summarize", re.IGNORECASE),
+)
+
+_GENERIC_COMPACTION_PLACEHOLDERS = (
+    "continue the user's in-progress objective",
+    "continue the current user request from the preserved recent messages",
+    "continue from the latest user request",
+    "continue the work",
+    "none",
 )
 
 
@@ -388,13 +398,72 @@ def _latest_message_text(messages: list, roles: set[str]) -> str | None:
     return None
 
 
+def _first_message_text(messages: list, roles: set[str]) -> str | None:
+    """Return the oldest message text whose role/type matches one of `roles`."""
+    for message in messages:
+        role = getattr(message, "type", None) or getattr(message, "role", None)
+        if role in roles:
+            text = _message_text(message)
+            if text:
+                return _clip_summary_text(text)
+    return None
+
+
+def _summary_section_text(summary: str, heading: str) -> str:
+    """Extract the body text for a markdown summary section."""
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(summary)
+    if not match:
+        return ""
+    return match.group("body").strip()
+
+
+def _contains_generic_placeholder(text: str) -> bool:
+    """Return `True` when a summary section contains only generic filler text."""
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return True
+
+    bullet_lines = [
+        " ".join(line.strip().lstrip("-*•").split())
+        for line in (text or "").splitlines()
+        if line.strip()
+    ]
+    if bullet_lines and all(line in _GENERIC_COMPACTION_PLACEHOLDERS for line in bullet_lines):
+        return True
+
+    return normalized in _GENERIC_COMPACTION_PLACEHOLDERS
+
+
+def _summary_loses_active_task(summary: str, messages: list) -> bool:
+    """Detect structured summaries that omit the concrete task and next step."""
+    latest_user = _latest_message_text(messages, {"human", "user"})
+    if not latest_user:
+        return False
+
+    if not any(section in summary for section in ("## Active Task", "## Goal", "## Next Steps")):
+        return False
+
+    required_sections = (
+        _summary_section_text(summary, "Active Task"),
+        _summary_section_text(summary, "Goal"),
+        _summary_section_text(summary, "Next Steps"),
+    )
+    return any(_contains_generic_placeholder(section) for section in required_sections)
+
+
 def _build_compaction_fallback_summary(messages: list) -> str:
     """Build a structured fallback when model summarization returns a useless stub."""
     latest_user = _latest_message_text(messages, {"human", "user"})
+    first_user = _first_message_text(messages, {"human", "user"})
     latest_ai = _latest_message_text(messages, {"ai", "assistant"})
     active_task = (
-        latest_user or "Continue the current user request from the preserved recent messages."
+        latest_user or "Recover the most recent concrete user request from preserved context."
     )
+    goal = first_user or active_task
     completed = latest_ai or "None"
     constraints = [
         "Preserve prior decisions and avoid repeating completed work.",
@@ -407,6 +476,12 @@ def _build_compaction_fallback_summary(messages: list) -> str:
 
     completed_lines = [f"- {completed}"] if completed != "None" else ["None"]
     constraint_lines = [f"- {item}" for item in constraints] if constraints else ["None"]
+    next_steps = [
+        f"- Continue the concrete active task: {active_task}",
+        "- Consult `/conversation_history/...` only if additional detail is required to resume accurately.",
+    ]
+    if completed != "None":
+        next_steps.insert(1, f"- Build directly on this latest completed work: {completed}")
 
     return "\n".join(
         [
@@ -414,7 +489,7 @@ def _build_compaction_fallback_summary(messages: list) -> str:
             active_task,
             "",
             "## Goal",
-            "Continue the user's in-progress objective without losing critical prior context.",
+            goal,
             "",
             "## Constraints & Preferences",
             *constraint_lines,
@@ -427,7 +502,7 @@ def _build_compaction_fallback_summary(messages: list) -> str:
             "- Recent preserved messages remain in the active context window.",
             "",
             "## Next Steps",
-            "- Continue from the latest user request, consulting offloaded history only if more detail is needed.",
+            *next_steps,
         ]
     )
 
@@ -435,7 +510,11 @@ def _build_compaction_fallback_summary(messages: list) -> str:
 def _normalize_compaction_summary(summary: str, messages: list) -> str:
     """Replace known-bad compaction output with a structured fallback summary."""
     cleaned = (summary or "").strip()
-    if cleaned and not any(pattern.search(cleaned) for pattern in _BAD_COMPACTION_SUMMARY_PATTERNS):
+    if (
+        cleaned
+        and not any(pattern.search(cleaned) for pattern in _BAD_COMPACTION_SUMMARY_PATTERNS)
+        and not _summary_loses_active_task(cleaned, messages)
+    ):
         return cleaned
     return _build_compaction_fallback_summary(messages)
 

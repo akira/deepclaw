@@ -31,6 +31,7 @@ EvaluatorToolCall = _REGRESSION_MODULE.evaluator_tool_call
 EvaluatorExpectedToolNames = _REGRESSION_MODULE.evaluator_expected_tool_names
 EvaluatorFirstPassToolUse = _REGRESSION_MODULE.evaluator_first_pass_tool_use
 EvaluatorSecondaryToolRecovery = _REGRESSION_MODULE.evaluator_secondary_tool_recovery
+EvaluatorFinalAnswerQualityJudge = _REGRESSION_MODULE.evaluator_final_answer_quality_judge
 EvaluatorOverallPassFail = _REGRESSION_MODULE.evaluator_overall_pass_fail
 
 DEFAULT_DATASET = "deepclaw"
@@ -208,6 +209,7 @@ def main() -> None:
         EvaluatorExpectedToolNames,
         EvaluatorFirstPassToolUse,
         EvaluatorSecondaryToolRecovery,
+        EvaluatorFinalAnswerQualityJudge,
         EvaluatorOverallPassFail,
     ]
 
