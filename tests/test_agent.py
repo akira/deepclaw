@@ -359,9 +359,73 @@ class TestCompactionFallbackSummary:
 
         assert "## Active Task" in result
         assert "context bloat in DeepClaw" in result
+        assert "## Goal" in result
+        assert "Please fix context bloat in DeepClaw" in result
         assert "## Completed Actions" in result
         assert "reviewed the trace evidence" in result
         assert "## Next Steps" in result
+        assert "Continue the concrete active task" in result
+        assert "Continue the user's in-progress objective" not in result
+
+    def test_replaces_generic_structured_summary_that_loses_task_identity(self):
+        messages = [
+            HumanMessage(
+                content="Clone the OpenSWE repo and prepare a detailed adaptation report for DeepClaw."
+            ),
+            AIMessage(content="I cloned the repo and started reading the prompt and system files."),
+        ]
+        summary = """## Active Task
+None
+
+## Goal
+Continue the user's in-progress objective without losing critical prior context.
+
+## Constraints & Preferences
+- Preserve prior decisions.
+
+## Completed Actions
+- Cloned the repo.
+
+## Active State
+- Repo available locally.
+
+## Next Steps
+- Continue from the latest user request.
+"""
+
+        result = agent_mod._normalize_compaction_summary(summary, messages)
+
+        assert "Clone the OpenSWE repo" in result
+        assert "Continue the user's in-progress objective" not in result
+        assert "Continue from the latest user request" not in result
+        assert "Build directly on this latest completed work" in result
+
+    def test_keeps_useful_summary_that_mentions_none_as_normal_text(self):
+        messages = [
+            HumanMessage(
+                content="Audit the branch and explain whether none of the commits regress compaction."
+            ),
+        ]
+        summary = """## Active Task
+Audit the branch and explain whether none of the commits regress compaction.
+
+## Goal
+Determine whether the compaction fix is safe to merge.
+
+## Constraints & Preferences
+- None beyond preserving the current branch state.
+
+## Completed Actions
+- Compared the current branch against origin/main.
+
+## Active State
+- Branch is fix/compaction-task-handoff.
+
+## Next Steps
+- Summarize findings and prepare the PR description.
+"""
+
+        assert agent_mod._normalize_compaction_summary(summary, messages) == summary.strip()
 
     def test_keeps_useful_summary_content(self):
         summary = "## Active Task\nShip the fix\n\n## Goal\nReduce context bloat"
