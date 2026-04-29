@@ -23,14 +23,14 @@ Use the `deepclaw` dataset as the source of truth. Add or edit examples there di
 
 ### 1a. Audit the dataset contract
 ```bash
-/home/ubuntu/deepclaw/.venv/bin/python evals/dataset_audit.py --dataset deepclaw
+python -m evals.dataset_audit --dataset deepclaw
 ```
 
 ### 2. Run baseline vs current comparison
 ```bash
-/home/ubuntu/deepclaw/.venv/bin/python evals/langsmith_regression.py \
+python -m evals.langsmith_regression \
   --dataset deepclaw \
-  --repo /home/ubuntu/deepclaw \
+  --repo "$(pwd)" \
   --baseline-commit origin/main \
   --baseline-worktree /tmp/deepclaw-eval-baseline \
   --category memory-and-skills \
@@ -40,9 +40,9 @@ Use the `deepclaw` dataset as the source of truth. Add or edit examples there di
 
 ### 3. Run pairwise comparison between two models
 ```bash
-/home/ubuntu/deepclaw/.venv/bin/python evals/langsmith_pairwise.py \
+python -m evals.langsmith_pairwise \
   --dataset deepclaw \
-  --repo /home/ubuntu/deepclaw \
+  --repo "$(pwd)" \
   --model-a anthropic:claude-haiku-4-5 \
   --model-b openai:gpt-4o-mini \
   --category codebase-inspection \
