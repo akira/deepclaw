@@ -263,6 +263,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
                 module.evaluator_expected_tool_names,
                 module.evaluator_first_pass_tool_use,
                 module.evaluator_secondary_tool_recovery,
+                module.evaluator_final_answer_quality_judge,
                 module.evaluator_overall_pass_fail,
             ],
             "client": None,
@@ -305,6 +306,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
             "attempts": 1,
             "first_pass_tool_calls_seen": True,
             "first_pass_text": None,
+            "final_text": None,
         }
     ]
 
