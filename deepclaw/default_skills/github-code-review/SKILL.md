@@ -25,6 +25,12 @@ Perform code reviews on local changes before pushing, or review open PRs on GitH
 - If a concern can be grounded in a search, test, or static check, do that before making a review claim.
 - Review output should be evidence-backed, not just plausible.
 
+## Verification
+
+- Review the diff and enough surrounding file context to understand each blocking concern.
+- Run the most relevant tests, linters, or verification commands before approving or requesting changes when the repo supports them.
+- Tie each review claim to a concrete file, line, and observed risk or regression.
+
 ### Setup (for PR interactions)
 
 ```bash
