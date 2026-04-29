@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import subprocess
 import sys
@@ -15,10 +16,22 @@ from dotenv import load_dotenv
 from langsmith import Client
 from langsmith.evaluation import evaluate
 
+EVALS_DIR = Path(__file__).resolve().parent
+_EXAMPLE_FILTERS_PATH = EVALS_DIR / "example_filters.py"
+_EXAMPLE_FILTERS_SPEC = importlib.util.spec_from_file_location(
+    "deepclaw_example_filters", _EXAMPLE_FILTERS_PATH
+)
+if _EXAMPLE_FILTERS_SPEC is None or _EXAMPLE_FILTERS_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load example_filters module from {_EXAMPLE_FILTERS_PATH}")
+_EXAMPLE_FILTERS_MODULE = importlib.util.module_from_spec(_EXAMPLE_FILTERS_SPEC)
+_EXAMPLE_FILTERS_SPEC.loader.exec_module(_EXAMPLE_FILTERS_MODULE)
+filter_examples = _EXAMPLE_FILTERS_MODULE.filter_examples
+
 WORKSPACE_ENV = "/home/ubuntu/.deepclaw/.env"
 DEFAULT_DATASET = "deepclaw"
 DEFAULT_MODEL = "openai:gpt-5.3-codex"
 DEFAULT_RESULTS_PATH = "/tmp/deepclaw-evals/results.json"
+DEFAULT_TRACE_PROJECT = "deepclaw-eval-target"
 WORKER_SCRIPT_PATH = Path(__file__).with_name("worker_run_case.py")
 
 
@@ -57,6 +70,37 @@ def _normalize_tool_names(names: Any) -> list[str]:
     return normalized
 
 
+def resolve_examples(
+    client: Client,
+    *,
+    dataset_name: str,
+    example_ids: list[str] | None,
+    example_limit: int | None,
+    categories: list[str] | None,
+    eval_modes: list[str] | None,
+    behavior_tags: list[str] | None,
+    side_effect_risks: list[str] | None,
+):
+    examples = list(client.list_examples(dataset_name=dataset_name, limit=200))
+    if example_ids:
+        by_id = {str(example.id): example for example in examples}
+        missing = [example_id for example_id in example_ids if example_id not in by_id]
+        if missing:
+            raise ValueError(f"Example ids not found in dataset {dataset_name!r}: {missing}")
+        selected = [by_id[example_id] for example_id in example_ids]
+    else:
+        selected = examples
+
+    return filter_examples(
+        selected,
+        categories=categories,
+        eval_modes=eval_modes,
+        behavior_tags=behavior_tags,
+        side_effect_risks=side_effect_risks,
+        example_limit=example_limit,
+    )
+
+
 def git_metadata_for_repo(repo_path: str) -> dict[str, str | None]:
     def _run_git(*args: str) -> str | None:
         completed = subprocess.run(
@@ -80,7 +124,12 @@ def git_metadata_for_repo(repo_path: str) -> dict[str, str | None]:
     }
 
 
-def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
+def run_case(
+    repo_path: str,
+    user_text: str,
+    model_name: str,
+    trace_project: str,
+) -> dict[str, Any]:
     completed = subprocess.run(
         [
             sys.executable,
@@ -93,6 +142,8 @@ def run_case(repo_path: str, user_text: str, model_name: str) -> dict[str, Any]:
             model_name,
             "--workspace-env",
             WORKSPACE_ENV,
+            "--trace-project",
+            trace_project,
         ],
         capture_output=True,
         text=True,
@@ -249,17 +300,23 @@ def evaluator_overall_pass_fail(run, example):
 
 
 def run_eval(
+    *,
     client: Client,
-    dataset_name: str,
+    dataset_name,
     repo_path: str,
     experiment_prefix: str,
     model_name: str,
-    *,
     baseline_commit: str,
     run_kind: str,
+    trace_project: str,
 ):
     def target(inputs: dict[str, Any]) -> dict[str, Any]:
-        return run_case(repo_path=repo_path, user_text=inputs["user_text"], model_name=model_name)
+        return run_case(
+            repo_path=repo_path,
+            user_text=inputs["user_text"],
+            model_name=model_name,
+            trace_project=trace_project,
+        )
 
     git_metadata = git_metadata_for_repo(repo_path)
     results = evaluate(
@@ -369,30 +426,49 @@ def main() -> None:
     parser.add_argument("--baseline-commit", default="origin/main")
     parser.add_argument("--baseline-worktree", default="/tmp/deepclaw-eval-baseline")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--trace-project", default=DEFAULT_TRACE_PROJECT)
+    parser.add_argument("--example-id", dest="example_ids", action="append")
+    parser.add_argument("--example-limit", type=int)
+    parser.add_argument("--category", dest="categories", action="append")
+    parser.add_argument("--eval-mode", dest="eval_modes", action="append")
+    parser.add_argument("--behavior-tag", dest="behavior_tags", action="append")
+    parser.add_argument("--side-effect-risk", dest="side_effect_risks", action="append")
     parser.add_argument("--results-path", default=DEFAULT_RESULTS_PATH)
     args = parser.parse_args()
 
     client = get_client()
+    data = resolve_examples(
+        client,
+        dataset_name=args.dataset,
+        example_ids=args.example_ids,
+        example_limit=args.example_limit,
+        categories=args.categories,
+        eval_modes=args.eval_modes,
+        behavior_tags=args.behavior_tags,
+        side_effect_risks=args.side_effect_risks,
+    )
     baseline_repo = ensure_baseline_worktree(
         args.baseline_commit, args.baseline_worktree, args.repo
     )
     baseline = run_eval(
         client=client,
-        dataset_name=args.dataset,
+        dataset_name=data,
         repo_path=baseline_repo,
         experiment_prefix="deepclaw-pre",
         model_name=args.model,
         baseline_commit=args.baseline_commit,
         run_kind="baseline",
+        trace_project=args.trace_project,
     )
     post = run_eval(
         client=client,
-        dataset_name=args.dataset,
+        dataset_name=data,
         repo_path=args.repo,
         experiment_prefix="deepclaw-post",
         model_name=args.model,
         baseline_commit=args.baseline_commit,
         run_kind="post",
+        trace_project=args.trace_project,
     )
     result_payload = {"baseline": baseline, "post": post}
     results_path = Path(args.results_path)

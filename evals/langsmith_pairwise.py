@@ -27,6 +27,7 @@ _REGRESSION_SPEC.loader.exec_module(_REGRESSION_MODULE)
 
 WORKSPACE_ENV = _REGRESSION_MODULE.WORKSPACE_ENV
 run_case = _REGRESSION_MODULE.run_case
+resolve_examples = _REGRESSION_MODULE.resolve_examples
 EvaluatorToolCall = _REGRESSION_MODULE.evaluator_tool_call
 EvaluatorExpectedToolNames = _REGRESSION_MODULE.evaluator_expected_tool_names
 EvaluatorFirstPassToolUse = _REGRESSION_MODULE.evaluator_first_pass_tool_use
@@ -37,6 +38,7 @@ DEFAULT_DATASET = "deepclaw"
 DEFAULT_MODEL_A = "anthropic:claude-haiku-4-5"
 DEFAULT_MODEL_B = "openai:gpt-4o-mini"
 DEFAULT_RESULTS_PATH = "/tmp/deepclaw-evals/pairwise-results.json"
+DEFAULT_TRACE_PROJECT = _REGRESSION_MODULE.DEFAULT_TRACE_PROJECT
 _DEFAULT_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 
 
@@ -66,32 +68,16 @@ def _normalize_tool_names(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
-def make_target(repo_path: str, model_name: str):
+def make_target(repo_path: str, model_name: str, trace_project: str):
     def target(inputs: dict[str, Any]) -> dict[str, Any]:
-        return run_case(repo_path=repo_path, user_text=inputs["user_text"], model_name=model_name)
+        return run_case(
+            repo_path=repo_path,
+            user_text=inputs["user_text"],
+            model_name=model_name,
+            trace_project=trace_project,
+        )
 
     return target
-
-
-def resolve_examples(
-    client: Client,
-    *,
-    dataset_name: str,
-    example_ids: list[str] | None,
-    example_limit: int | None,
-):
-    if example_ids:
-        by_id = {
-            str(example.id): example
-            for example in client.list_examples(dataset_name=dataset_name, limit=100)
-        }
-        missing = [example_id for example_id in example_ids if example_id not in by_id]
-        if missing:
-            raise ValueError(f"Example ids not found in dataset {dataset_name!r}: {missing}")
-        return [by_id[example_id] for example_id in example_ids]
-    if example_limit is not None:
-        return list(client.list_examples(dataset_name=dataset_name, limit=example_limit))
-    return dataset_name
 
 
 def pairwise_tool_use_preference(runs, example):
@@ -191,8 +177,13 @@ def main() -> None:
     parser.add_argument("--repo", default="/home/ubuntu/deepclaw")
     parser.add_argument("--model-a", default=DEFAULT_MODEL_A)
     parser.add_argument("--model-b", default=DEFAULT_MODEL_B)
+    parser.add_argument("--trace-project", default=DEFAULT_TRACE_PROJECT)
     parser.add_argument("--example-id", dest="example_ids", action="append")
     parser.add_argument("--example-limit", type=int)
+    parser.add_argument("--category", dest="categories", action="append")
+    parser.add_argument("--eval-mode", dest="eval_modes", action="append")
+    parser.add_argument("--behavior-tag", dest="behavior_tags", action="append")
+    parser.add_argument("--side-effect-risk", dest="side_effect_risks", action="append")
     parser.add_argument("--results-path", default=DEFAULT_RESULTS_PATH)
     args = parser.parse_args()
 
@@ -202,6 +193,10 @@ def main() -> None:
         dataset_name=args.dataset,
         example_ids=args.example_ids,
         example_limit=args.example_limit,
+        categories=args.categories,
+        eval_modes=args.eval_modes,
+        behavior_tags=args.behavior_tags,
+        side_effect_risks=args.side_effect_risks,
     )
     scalar_evaluators = [
         EvaluatorToolCall,
@@ -212,7 +207,7 @@ def main() -> None:
     ]
 
     results_a = evaluate(
-        make_target(args.repo, args.model_a),
+        make_target(args.repo, args.model_a, args.trace_project),
         data=data,
         evaluators=scalar_evaluators,
         client=client,
@@ -230,7 +225,7 @@ def main() -> None:
     )
 
     results_b = evaluate(
-        make_target(args.repo, args.model_b),
+        make_target(args.repo, args.model_b, args.trace_project),
         data=data,
         evaluators=scalar_evaluators,
         client=client,

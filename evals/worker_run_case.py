@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--user-text", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--workspace-env", required=True)
+    parser.add_argument("--trace-project", required=True)
     return parser.parse_args()
 
 
@@ -65,6 +66,7 @@ async def amain() -> None:
     os.environ["HOME"] = home_dir
     os.environ.setdefault("LANGSMITH_TRACING", "false")
     load_dotenv(args.workspace_env, override=True)
+    os.environ["LANGSMITH_PROJECT"] = args.trace_project
 
     repo_root = Path(args.repo).resolve()
     os.chdir(repo_root)
