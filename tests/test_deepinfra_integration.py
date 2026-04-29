@@ -116,7 +116,14 @@ class TestCreateAgentDeepInfra:
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(agent_mod, "resolve_provider_model", lambda config: fake_model)
         monkeypatch.setattr(
-            agent_mod, "_append_summarization_middleware", lambda *args, **kwargs: None
+            agent_mod,
+            "_create_deepclaw_summarization_tool_middleware",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_mod,
+            "_patched_deepagents_summarization_factory",
+            lambda: __import__("contextlib").nullcontext(),
         )
 
         config = DeepClawConfig(

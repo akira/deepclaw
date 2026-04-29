@@ -1,10 +1,14 @@
 """Agent factory for DeepClaw."""
 
+import copy
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -14,6 +18,7 @@ from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
@@ -30,6 +35,8 @@ from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
 
 logger = logging.getLogger(__name__)
+
+_DEEPAGENTS_SUMMARIZATION_FACTORY_LOCK = threading.RLock()
 
 
 class DeepClawLocalShellBackend(LocalShellBackend):
@@ -311,6 +318,127 @@ Before finalizing:
 
 OPENAI_MODEL_GUIDANCE_MODELS = ("gpt", "codex")
 
+CONTEXT_CHECKPOINT_SUMMARY_PROMPT = """\
+You are creating a compact checkpoint summary for an in-progress DeepClaw conversation.
+
+Produce a concise but information-dense handoff using exactly these markdown sections:
+
+## Active Task
+State the immediate task currently in progress.
+
+## Goal
+Describe the overall user goal or desired outcome.
+
+## Constraints & Preferences
+List important constraints, user preferences, safety limits, environment facts, and explicit decisions. If none, say `None`.
+
+## Completed Actions
+List concrete actions already taken, including meaningful results. Prefer bullets. If none, say `None`.
+
+## Active State
+Record the current branch, runtime/service state, key files, configs, trace IDs, or other live state needed to resume accurately. If none, say `None`.
+
+## Next Steps
+List the most important next actions to continue the work.
+
+Requirements:
+- Be specific and factual.
+- Preserve decisions, failures, and partial progress that should not be repeated.
+- Prefer short bullets over prose where possible.
+- Do not output any text before or after these sections.
+"""
+
+_BAD_COMPACTION_SUMMARY_PATTERNS = (
+    re.compile(r"previous conversation was too long to summarize", re.IGNORECASE),
+)
+
+
+def _message_text(message) -> str:
+    """Extract plain text content from a LangChain message-like object."""
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+        return " ".join(part.strip() for part in parts if part and str(part).strip())
+    return str(content).strip()
+
+
+def _clip_summary_text(text: str, limit: int = 240) -> str:
+    """Normalize whitespace and clip long snippets for fallback summaries."""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _latest_message_text(messages: list, roles: set[str]) -> str | None:
+    """Return the newest message text whose role/type matches one of `roles`."""
+    for message in reversed(messages):
+        role = getattr(message, "type", None) or getattr(message, "role", None)
+        if role in roles:
+            text = _message_text(message)
+            if text:
+                return _clip_summary_text(text)
+    return None
+
+
+def _build_compaction_fallback_summary(messages: list) -> str:
+    """Build a structured fallback when model summarization returns a useless stub."""
+    latest_user = _latest_message_text(messages, {"human", "user"})
+    latest_ai = _latest_message_text(messages, {"ai", "assistant"})
+    active_task = (
+        latest_user or "Continue the current user request from the preserved recent messages."
+    )
+    completed = latest_ai or "None"
+    constraints = [
+        "Preserve prior decisions and avoid repeating completed work.",
+        "Use `/conversation_history/...` if offloaded details are needed.",
+    ]
+    if latest_user and "compact_conversation" in latest_user:
+        constraints.append(
+            "Keep `compact_conversation` available for explicit task shifts in long threads."
+        )
+
+    completed_lines = [f"- {completed}"] if completed != "None" else ["None"]
+    constraint_lines = [f"- {item}" for item in constraints] if constraints else ["None"]
+
+    return "\n".join(
+        [
+            "## Active Task",
+            active_task,
+            "",
+            "## Goal",
+            "Continue the user's in-progress objective without losing critical prior context.",
+            "",
+            "## Constraints & Preferences",
+            *constraint_lines,
+            "",
+            "## Completed Actions",
+            *completed_lines,
+            "",
+            "## Active State",
+            "- Earlier conversation may be offloaded under `/conversation_history/` for this thread.",
+            "- Recent preserved messages remain in the active context window.",
+            "",
+            "## Next Steps",
+            "- Continue from the latest user request, consulting offloaded history only if more detail is needed.",
+        ]
+    )
+
+
+def _normalize_compaction_summary(summary: str, messages: list) -> str:
+    """Replace known-bad compaction output with a structured fallback summary."""
+    cleaned = (summary or "").strip()
+    if cleaned and not any(pattern.search(cleaned) for pattern in _BAD_COMPACTION_SUMMARY_PATTERNS):
+        return cleaned
+    return _build_compaction_fallback_summary(messages)
+
 
 def _load_soul() -> str | None:
     """Load SOUL.md from ~/.deepclaw/SOUL.md.
@@ -460,34 +588,145 @@ def _composite_backend(default_backend):
     )
 
 
-def _append_summarization_middleware(middleware: list, model: str, backend) -> None:
-    """Add Deepagents compact/offload middleware when the SDK supports it."""
+def _context_management_settings() -> dict[str, dict[str, object]]:
+    """Return centralized context-compaction and eviction settings."""
+    return {
+        "summarization": {
+            "trigger": ("fraction", 0.85),
+            "keep": ("fraction", 0.10),
+            "summary_prompt": CONTEXT_CHECKPOINT_SUMMARY_PROMPT,
+            "truncate_args_settings": {
+                "trigger": ("fraction", 0.50),
+                "keep": ("fraction", 0.10),
+                "max_length": 2000,
+                "truncation_text": "...(argument truncated)",
+            },
+            "fallback": {
+                "trigger": ("tokens", 80000),
+                "keep": ("messages", 8),
+                "truncate_args_settings": {
+                    "trigger": ("tokens", 40000),
+                    "keep": ("messages", 8),
+                    "max_length": 2000,
+                    "truncation_text": "...(argument truncated)",
+                },
+            },
+        },
+        "filesystem": {
+            "tool_token_limit_before_evict": 20000,
+            "human_message_token_limit_before_evict": 50000,
+        },
+    }
+
+
+def _create_deepclaw_summarization_middleware(model: str, backend):
+    """Build DeepClaw's customized summarization middleware instance."""
     try:
-        from deepagents.middleware.summarization import (  # noqa: PLC0415
-            create_summarization_tool_middleware,
-        )
-        from langchain.agents.middleware.summarization import (  # noqa: PLC0415
-            SummarizationMiddleware as LCSummarizationMiddleware,
-        )
+        from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: PLC0415
     except ImportError:
         logger.warning(
             "Installed deepagents version does not provide summarization middleware; "
             "compact_conversation is unavailable"
         )
-        return
+        return None
 
-    # Message-count trigger for long-running threads that haven't hit
-    # deepagents' token-based threshold (~170k tokens). Uses langchain's
-    # before_model + RemoveMessage — doesn't conflict with deepagents'
-    # wrap_model_call + _summarization_event mechanism.
-    middleware.append(
-        LCSummarizationMiddleware(
+    class DeepClawSummarizationMiddleware(SummarizationMiddleware):
+        @property
+        def name(self) -> str:
+            return "deepclaw_summarization"
+
+        def _create_summary(self, messages_to_summarize):
+            summary = super()._create_summary(messages_to_summarize)
+            return _normalize_compaction_summary(summary, messages_to_summarize)
+
+        async def _acreate_summary(self, messages_to_summarize):
+            summary = await super()._acreate_summary(messages_to_summarize)
+            return _normalize_compaction_summary(summary, messages_to_summarize)
+
+    settings = _context_management_settings()["summarization"]
+
+    def _build_instance(config: dict[str, object]) -> DeepClawSummarizationMiddleware:
+        return DeepClawSummarizationMiddleware(
             model=model,
-            trigger=("messages", 80),
-            keep=("messages", 30),
+            backend=backend,
+            trigger=config["trigger"],
+            keep=config["keep"],
+            summary_prompt=settings["summary_prompt"],
+            truncate_args_settings=config["truncate_args_settings"],
         )
-    )
-    middleware.append(create_summarization_tool_middleware(model, backend))
+
+    try:
+        return _build_instance(settings)
+    except ValueError as exc:
+        if "Model profile information is required to use fractional token limits" not in str(exc):
+            raise
+        fallback_settings = settings["fallback"]
+        logger.warning(
+            "Model %s does not expose profile limits; falling back to absolute token-based summarization thresholds",
+            model,
+        )
+        return _build_instance(fallback_settings)
+
+
+def _create_deepclaw_summarization_tool_middleware(model: str, backend):
+    """Build a manual compact_conversation tool middleware backed by DeepClaw summarization."""
+    try:
+        from deepagents.middleware.summarization import SummarizationToolMiddleware  # noqa: PLC0415
+    except ImportError:
+        logger.warning(
+            "Installed deepagents version does not provide summarization middleware; "
+            "compact_conversation is unavailable"
+        )
+        return None
+
+    summarization_middleware = _create_deepclaw_summarization_middleware(model, backend)
+    if summarization_middleware is None:
+        return None
+
+    class DeepClawSummarizationToolMiddleware(SummarizationToolMiddleware):
+        @property
+        def name(self) -> str:
+            return "deepclaw_summarization_tool"
+
+    return DeepClawSummarizationToolMiddleware(summarization_middleware)
+
+
+def _build_subagent_compaction_middleware(spec: dict, model: str, backend) -> list:
+    """Return manual compaction middleware for declarative subagents only."""
+    if "graph_id" in spec or "runnable" in spec:
+        return []
+
+    subagent_model = spec.get("model") or model
+    middleware = _create_deepclaw_summarization_tool_middleware(subagent_model, backend)
+    return [middleware] if middleware is not None else []
+
+
+def _build_deepclaw_subagents(model: str, backend) -> list[dict]:
+    """Build production subagent specs with DeepClaw compaction tooling attached."""
+    subagents: list[dict] = [copy.deepcopy(GENERAL_PURPOSE_SUBAGENT)]
+    subagents.extend(copy.deepcopy(spec) for spec in DEFAULT_SUBAGENTS)
+
+    for spec in subagents:
+        existing_middleware = list(spec.get("middleware", []))
+        existing_middleware.extend(_build_subagent_compaction_middleware(spec, model, backend))
+        if existing_middleware:
+            spec["middleware"] = existing_middleware
+
+    return subagents
+
+
+@contextmanager
+def _patched_deepagents_summarization_factory():
+    """Temporarily route DeepAgents' production summarization factory through DeepClaw's customization."""
+    import deepagents.graph as deepagents_graph  # noqa: PLC0415
+
+    with _DEEPAGENTS_SUMMARIZATION_FACTORY_LOCK:
+        original_factory = deepagents_graph.create_summarization_middleware
+        deepagents_graph.create_summarization_middleware = _create_deepclaw_summarization_middleware
+        try:
+            yield
+        finally:
+            deepagents_graph.create_summarization_middleware = original_factory
 
 
 def create_agent(config, checkpointer):
@@ -526,14 +765,12 @@ def create_agent(config, checkpointer):
     else:
         logger.warning("Local context middleware skipped; backend cannot execute commands")
 
-    # Deepagents CLI-style context compaction/offload. This adds the
-    # compact_conversation tool and stores historical messages under the
-    # composite backend's /conversation_history/ route.
-    _append_summarization_middleware(
-        middleware,
+    manual_compaction_tool_middleware = _create_deepclaw_summarization_tool_middleware(
         agent_model or config.model or DeepClawConfig.model,
         composite_backend,
     )
+    if manual_compaction_tool_middleware is not None:
+        middleware.append(manual_compaction_tool_middleware)
 
     # System prompt from SOUL.md, always followed by tool-use enforcement.
     # Add stronger execution guidance for GPT/Codex-family models, which are
@@ -553,12 +790,16 @@ def create_agent(config, checkpointer):
     # Tool plugins
     tools = discover_tools()
 
-    return create_deep_agent(
-        model=agent_model,
-        backend=composite_backend,
-        checkpointer=checkpointer,
-        middleware=middleware,
-        system_prompt=system_prompt,
-        tools=tools or None,
-        subagents=DEFAULT_SUBAGENTS,
-    )
+    with _patched_deepagents_summarization_factory():
+        return create_deep_agent(
+            model=agent_model,
+            backend=composite_backend,
+            checkpointer=checkpointer,
+            middleware=middleware,
+            system_prompt=system_prompt,
+            tools=tools or None,
+            subagents=_build_deepclaw_subagents(
+                agent_model or config.model or DeepClawConfig.model,
+                composite_backend,
+            ),
+        )
