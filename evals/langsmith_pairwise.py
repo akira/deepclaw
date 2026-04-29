@@ -36,6 +36,7 @@ EvaluatorFinalAnswerQualityJudge = _REGRESSION_MODULE.evaluator_final_answer_qua
 EvaluatorOverallPassFail = _REGRESSION_MODULE.evaluator_overall_pass_fail
 
 DEFAULT_DATASET = "deepclaw"
+DEFAULT_REPO = str(REPO_ROOT)
 DEFAULT_MODEL_A = "anthropic:claude-haiku-4-5"
 DEFAULT_MODEL_B = "openai:gpt-4o-mini"
 DEFAULT_RESULTS_PATH = "/tmp/deepclaw-evals/pairwise-results.json"
@@ -175,7 +176,7 @@ def summarize_pairwise_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
-    parser.add_argument("--repo", default="/home/ubuntu/deepclaw")
+    parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--model-a", default=DEFAULT_MODEL_A)
     parser.add_argument("--model-b", default=DEFAULT_MODEL_B)
     parser.add_argument("--trace-project", default=DEFAULT_TRACE_PROJECT)
