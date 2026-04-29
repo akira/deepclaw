@@ -27,7 +27,7 @@ _EXAMPLE_FILTERS_MODULE = importlib.util.module_from_spec(_EXAMPLE_FILTERS_SPEC)
 _EXAMPLE_FILTERS_SPEC.loader.exec_module(_EXAMPLE_FILTERS_MODULE)
 filter_examples = _EXAMPLE_FILTERS_MODULE.filter_examples
 
-WORKSPACE_ENV = "/home/ubuntu/.deepclaw/.env"
+WORKSPACE_ENV = str(Path("~/.deepclaw/.env").expanduser())
 DEFAULT_DATASET = "deepclaw"
 DEFAULT_MODEL = "openai:gpt-5.3-codex"
 DEFAULT_RESULTS_PATH = "/tmp/deepclaw-evals/results.json"
