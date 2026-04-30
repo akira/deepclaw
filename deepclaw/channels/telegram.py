@@ -256,7 +256,7 @@ def _active_run_text() -> str:
 
 def _pending_approval_text() -> str:
     """Return the user-visible message for an unresolved safety review."""
-    return "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
+    return "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
 
 
 def _pending_approval_markup(pending_id: str) -> InlineKeyboardMarkup:
@@ -264,11 +264,23 @@ def _pending_approval_markup(pending_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Approve", callback_data=f"safety:approve:{pending_id}"),
+                InlineKeyboardButton("Approve once", callback_data=f"safety:approve_once:{pending_id}"),
+                InlineKeyboardButton("Approve session", callback_data=f"safety:approve_session:{pending_id}"),
                 InlineKeyboardButton("Deny", callback_data=f"safety:deny:{pending_id}"),
             ]
         ]
     )
+
+
+def _parse_approve_scope(raw_text: str) -> str:
+    """Extract approval scope from `/approve ...`."""
+    args = (raw_text or "").split(maxsplit=1)
+    if len(args) < 2:
+        return "once"
+    scope = args[1].strip().lower()
+    if scope in {"session", "sess"}:
+        return "session"
+    return "once"
 
 
 def _parse_deny_reason(raw_text: str) -> str:
@@ -1095,6 +1107,12 @@ async def _resume_pending_interrupt(
         approvals = _pending_approvals(context)
         if next_pending:
             approvals[chat_id] = next_pending
+            pending_text = next_pending.get("message") or "Safety review required."
+            reply_kwargs = {"reply_markup": _pending_approval_markup(next_pending["id"])}
+            if update.message is not None:
+                await update.message.reply_text(pending_text, **reply_kwargs)
+            elif update.callback_query and update.callback_query.message is not None:
+                await update.callback_query.message.reply_text(pending_text, **reply_kwargs)
         else:
             approvals.pop(chat_id, None)
     except asyncio.CancelledError:
@@ -1118,12 +1136,13 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not pending:
         await update.message.reply_text("No pending safety approval for this chat.")
         return
+    scope = _parse_approve_scope(update.message.text)
     await _resume_pending_interrupt(
         update,
         context,
         chat_id=chat_id,
         pending=pending,
-        decision={"type": "approve"},
+        decision={"type": "approve", "scope": scope},
     )
 
 
@@ -1185,8 +1204,10 @@ async def cmd_approval_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 )
         return
 
-    if action == "approve":
-        decision: dict[str, Any] = {"type": "approve"}
+    if action == "approve_once":
+        decision: dict[str, Any] = {"type": "approve", "scope": "once"}
+    elif action == "approve_session":
+        decision = {"type": "approve", "scope": "session"}
     elif action == "deny":
         decision = {"type": "reject", "message": "Command rejected via inline deny button"}
     else:

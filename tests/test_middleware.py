@@ -1,5 +1,6 @@
 """Tests for deepclaw.middleware module."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -308,12 +309,18 @@ class TestSafetyMiddlewareIntegration:
         return SafetyMiddleware()
 
     def _make_request(
-        self, name: str, args: dict, call_id: str = "call_1", state: dict | None = None
+        self,
+        name: str,
+        args: dict,
+        call_id: str = "call_1",
+        state: dict | None = None,
+        thread_id: str = "thread-1",
     ):
         """Create a mock ToolCallRequest."""
         request = MagicMock()
         request.tool_call = _make_tool_call(name, args, call_id)
         request.state = state or {}
+        request.runtime = SimpleNamespace(config={"configurable": {"thread_id": thread_id}})
         return request
 
     @pytest.mark.asyncio
@@ -447,3 +454,69 @@ class TestSafetyMiddlewareIntegration:
         result = await middleware.awrap_tool_call(request, handler)
         handler.assert_awaited_once()
         assert result == expected
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.middleware.interrupt")
+    async def test_session_approved_warning_is_not_reprompted_for_same_thread(
+        self, mock_interrupt, middleware
+    ):
+        from deepclaw import middleware as middleware_mod
+
+        middleware_mod._THREAD_APPROVALS.clear()
+        mock_interrupt.return_value = {"type": "approve", "scope": "session"}
+
+        first_request = self._make_request(
+            "execute",
+            {"command": "python3 - <<'PY'\nprint('one')\nPY"},
+            thread_id="thread-session",
+        )
+        second_request = self._make_request(
+            "execute",
+            {"command": "python3 - <<'PY'\nprint('two')\nPY"},
+            call_id="call_2",
+            thread_id="thread-session",
+        )
+        first_expected = ToolMessage(content="ok-1", name="execute", tool_call_id="call_1")
+        second_expected = ToolMessage(content="ok-2", name="execute", tool_call_id="call_2")
+        first_handler = AsyncMock(return_value=first_expected)
+        second_handler = AsyncMock(return_value=second_expected)
+
+        try:
+            first_result = await middleware.awrap_tool_call(first_request, first_handler)
+            second_result = await middleware.awrap_tool_call(second_request, second_handler)
+        finally:
+            middleware_mod._THREAD_APPROVALS.clear()
+
+        assert first_result == first_expected
+        assert second_result == second_expected
+        first_handler.assert_awaited_once_with(first_request)
+        second_handler.assert_awaited_once_with(second_request)
+        mock_interrupt.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("deepclaw.middleware.load_config")
+    @patch("deepclaw.middleware.interrupt")
+    async def test_cron_allowlist_skips_prompt_for_allowlisted_warning_keys(
+        self, mock_interrupt, mock_load_config, middleware
+    ):
+        class _Terminal:
+            env_passthrough = []
+            cron_approval_allowlist = ["dangerous:code_injection"]
+
+        class _Config:
+            terminal = _Terminal()
+
+        mock_load_config.return_value = _Config()
+        request = self._make_request(
+            "execute",
+            {"command": "python3 - <<'PY'\nprint('cron')\nPY"},
+            thread_id="cron-job-1",
+        )
+        expected = ToolMessage(content="cron-ok", name="execute", tool_call_id="call_1")
+        handler = AsyncMock(return_value=expected)
+
+        result = await middleware.awrap_tool_call(request, handler)
+
+        assert result == expected
+        handler.assert_awaited_once_with(request)
+        mock_interrupt.assert_not_called()
