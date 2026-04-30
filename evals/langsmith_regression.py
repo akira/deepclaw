@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +101,79 @@ def resolve_examples(
         side_effect_risks=side_effect_risks,
         example_limit=example_limit,
     )
+
+
+def _normalize_text_patterns(patterns: Any) -> list[str]:
+    if not isinstance(patterns, list):
+        return []
+    normalized = []
+    for pattern in patterns:
+        if isinstance(pattern, str) and pattern.strip():
+            normalized.append(pattern.strip())
+    return normalized
+
+
+@lru_cache(maxsize=1)
+def _judge_client_and_model() -> tuple[object | None, str | None]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None, None
+    try:
+        from openai import OpenAI  # noqa: PLC0415
+    except ImportError:
+        return None, None
+    model = os.getenv("DEEPCLOW_EVAL_JUDGE_MODEL", "gpt-4o-mini")
+    return OpenAI(api_key=api_key), model
+
+
+def _judge_final_answer(
+    *,
+    user_text: str,
+    final_text: str,
+    rubric: str,
+    failure_examples: list[str],
+) -> dict[str, Any]:
+    client, model = _judge_client_and_model()
+    if client is None or model is None:
+        return {
+            "score": None,
+            "comment": "judge unavailable (missing OPENAI_API_KEY or openai package)",
+        }
+
+    examples_block = "\n".join(f"- {example}" for example in failure_examples) or "- None provided"
+    prompt = (
+        "You are judging whether an assistant's final answer preserved the active task and session goal after compaction. "
+        "Return strict JSON with keys pass:boolean, score:number, comment:string. "
+        "Use score 1 for pass and 0 for fail.\n\n"
+        f"User prompt:\n{user_text}\n\n"
+        f"Assistant final answer:\n{final_text}\n\n"
+        f"Evaluation rubric:\n{rubric}\n\n"
+        f"Concrete failure examples to treat as FAIL if substantially present:\n{examples_block}\n"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "Judge the answer strictly. Return only JSON.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+    content = response.choices[0].message.content or "{}"
+    parsed = json.loads(content)
+    score = parsed.get("score")
+    if score is None:
+        score = 1 if parsed.get("pass") else 0
+    try:
+        numeric_score = 1 if float(score) >= 0.5 else 0
+    except Exception:
+        numeric_score = 1 if parsed.get("pass") else 0
+    return {
+        "score": numeric_score,
+        "comment": str(parsed.get("comment") or "llm judge verdict"),
+    }
 
 
 def git_metadata_for_repo(repo_path: str) -> dict[str, str | None]:
@@ -250,6 +325,34 @@ def evaluator_secondary_tool_recovery(run, example):
     }
 
 
+def evaluator_final_answer_quality_judge(run, example):
+    outputs = _get_outputs(run)
+    expected = _get_outputs(example)
+    if not bool(expected.get("judge_final_answer")):
+        return {
+            "key": "final_answer_quality_judge",
+            "score": None,
+            "comment": "judge_final_answer not specified",
+        }
+
+    rubric = str(
+        expected.get("judge_rubric")
+        or "The answer should preserve the active task/session goal after compaction and should not ask the user to restate the goal when prior context already establishes it."
+    )
+    failure_examples = _normalize_text_patterns(expected.get("judge_failure_examples"))
+    judged = _judge_final_answer(
+        user_text=str(_get_inputs(example).get("user_text") or ""),
+        final_text=str(outputs.get("final_text") or ""),
+        rubric=rubric,
+        failure_examples=failure_examples,
+    )
+    return {
+        "key": "final_answer_quality_judge",
+        "score": judged.get("score"),
+        "comment": judged.get("comment"),
+    }
+
+
 def rollup_pass_fail(metrics: dict[str, Any], example_outputs: dict[str, Any]) -> dict[str, Any]:
     """Derive a per-example PASS/FAIL rollup from the metric set."""
 
@@ -258,6 +361,7 @@ def rollup_pass_fail(metrics: dict[str, Any], example_outputs: dict[str, Any]) -
     required = bool(example_outputs.get("requires_tool_call"))
     expected_tool_names = _normalize_tool_names(example_outputs.get("expected_tool_names"))
     must_succeed_first_pass = bool(example_outputs.get("must_succeed_first_pass"))
+    judge_final_answer = bool(example_outputs.get("judge_final_answer"))
 
     tool_call_required = metrics.get("tool_call_required")
     if tool_call_required == 0:
@@ -274,6 +378,10 @@ def rollup_pass_fail(metrics: dict[str, Any], example_outputs: dict[str, Any]) -
     if required and must_succeed_first_pass and first_pass_metric == 0:
         failure_reasons.append("missed first-pass requirement")
 
+    final_answer_quality = metrics.get("final_answer_quality_judge")
+    if judge_final_answer and final_answer_quality == 0:
+        failure_reasons.append("final answer quality judge failed")
+
     return {
         "pass_fail": "FAIL" if failure_reasons else "PASS",
         "failure_reasons": failure_reasons,
@@ -287,6 +395,9 @@ def evaluator_overall_pass_fail(run, example):
         "expected_tool_names": evaluator_expected_tool_names(run, example).get("score"),
         "first_pass_tool_use": evaluator_first_pass_tool_use(run, example).get("score"),
         "secondary_tool_recovery": evaluator_secondary_tool_recovery(run, example).get("score"),
+        "final_answer_quality_judge": evaluator_final_answer_quality_judge(run, example).get(
+            "score"
+        ),
     }
     example_outputs = _get_outputs(example)
     rollup = rollup_pass_fail(metrics, example_outputs)
@@ -327,6 +438,7 @@ def run_eval(
             evaluator_expected_tool_names,
             evaluator_first_pass_tool_use,
             evaluator_secondary_tool_recovery,
+            evaluator_final_answer_quality_judge,
             evaluator_overall_pass_fail,
         ],
         client=client,
@@ -388,6 +500,7 @@ def run_eval(
                 "attempts": run_outputs.get("attempts"),
                 "first_pass_tool_calls_seen": run_outputs.get("first_pass_tool_calls_seen"),
                 "first_pass_text": run_outputs.get("first_pass_text"),
+                "final_text": run_outputs.get("final_text"),
             }
         )
     summary = {
