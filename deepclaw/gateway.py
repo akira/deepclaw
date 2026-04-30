@@ -623,7 +623,9 @@ class Gateway:
                         if wait_timeout is None:
                             chunk = await asyncio.shield(pending_chunk)
                         else:
-                            chunk = await asyncio.wait_for(asyncio.shield(pending_chunk), timeout=wait_timeout)
+                            chunk = await asyncio.wait_for(
+                                asyncio.shield(pending_chunk), timeout=wait_timeout
+                            )
                         pending_chunk = None
                     except StopAsyncIteration:
                         pending_chunk = None
@@ -660,11 +662,15 @@ class Gateway:
                             if tool_name:
                                 last_tool_name = str(tool_name)
                                 tool_args = _resolve_tool_args(block, tool_name, message_tool_calls)
-                                args_preview = redact_secrets(str(tool_args)[:200]) if tool_args else ""
+                                args_preview = (
+                                    redact_secrets(str(tool_args)[:200]) if tool_args else ""
+                                )
                                 logger.info("Tool call [%s]: %s", tool_name, args_preview)
                                 if not tool_args:
                                     block_preview = redact_secrets(str(dict(block))[:300])
-                                    tool_calls_preview = redact_secrets(str(message_tool_calls)[:500])
+                                    tool_calls_preview = redact_secrets(
+                                        str(message_tool_calls)[:500]
+                                    )
                                     additional_kwargs = redact_secrets(
                                         str(getattr(message_obj, "additional_kwargs", {}))[:500]
                                     )
@@ -752,7 +758,11 @@ class Gateway:
                             text = block.get("text", "")
                             if not text:
                                 continue
-                            if last_render_was_tool and accumulated and not accumulated.endswith("\n"):
+                            if (
+                                last_render_was_tool
+                                and accumulated
+                                and not accumulated.endswith("\n")
+                            ):
                                 accumulated += "\n"
                                 chars_since_edit += 1
                             accumulated += text
