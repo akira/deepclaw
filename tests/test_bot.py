@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphRecursionError
 from telegram import InlineKeyboardMarkup
 
 from deepclaw.auth import is_user_allowed
@@ -423,8 +424,96 @@ class TestGatewayRedaction:
         assert any("[REDACTED]" in text for _, _, text in channel.edits)
 
     @pytest.mark.asyncio
+    async def test_gateway_passes_recursion_limit_from_max_turns(self):
+        agent = _FakeStreamingAgent(
+            [(SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {})]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming, max_turns=7)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="do thing")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        config = agent.astream_calls[0][1]["config"]
+        assert config["recursion_limit"] == 7
+
+    @pytest.mark.asyncio
+    async def test_gateway_reports_turn_limit_when_graph_hits_recursion_limit(self):
+        class _RecursionAgent:
+            async def astream(self, *_args, **_kwargs):
+                raise GraphRecursionError("recursion boom")
+                yield  # pragma: no cover
+
+            async def aget_state(self, _config):
+                return SimpleNamespace(interrupts=())
+
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=_RecursionAgent(), streaming_config=streaming, max_turns=5)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="loop forever")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        final_text = channel.edits[-1][2]
+        assert "maximum turn limit (5)" in final_text
+        assert "/clear to start fresh" in final_text
+
+    @pytest.mark.asyncio
+    async def test_gateway_reports_inactivity_timeout(self):
+        class _SlowAgent:
+            async def astream(self, *_args, **_kwargs):
+                await asyncio.sleep(0.05)
+                yield (SimpleNamespace(content_blocks=[{"type": "text", "text": "late"}]), {})
+
+            async def aget_state(self, _config):
+                return SimpleNamespace(interrupts=())
+
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(
+            agent=_SlowAgent(),
+            streaming_config=streaming,
+            gateway_timeout=0.01,
+            gateway_timeout_warning=0,
+        )
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="wait")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        final_text = channel.edits[-1][2]
+        assert "inactive for" in final_text
+        assert "Try again, or use /clear to start fresh" in final_text
+
+    @pytest.mark.asyncio
+    async def test_gateway_sends_inactivity_warning_before_timeout(self):
+        class _SlowAgent:
+            async def astream(self, *_args, **_kwargs):
+                await asyncio.sleep(0.03)
+                yield (SimpleNamespace(content_blocks=[{"type": "text", "text": "late"}]), {})
+
+            async def aget_state(self, _config):
+                return SimpleNamespace(interrupts=())
+
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(
+            agent=_SlowAgent(),
+            streaming_config=streaming,
+            gateway_timeout=0.02,
+            gateway_timeout_warning=0.01,
+        )
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="wait")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert any("No activity for" in text for _, text in channel.sent)
+        assert "inactive for" in channel.edits[-1][2]
+
+    @pytest.mark.asyncio
     async def test_tool_logging_redacts_sensitive_args_and_results(self, monkeypatch):
         secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+
         agent = _FakeStreamingAgent(
             [
                 (

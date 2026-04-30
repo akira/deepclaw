@@ -938,7 +938,13 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Failed to switch to model {model_arg} — agent creation failed. Keeping current model."
             )
             return
-        new_gateway = Gateway(agent=new_agent, streaming_config=new_config.telegram.streaming)
+        new_gateway = Gateway(
+            agent=new_agent,
+            streaming_config=new_config.telegram.streaming,
+            max_turns=new_config.max_turns,
+            gateway_timeout=new_config.gateway_timeout,
+            gateway_timeout_warning=new_config.gateway_timeout_warning,
+        )
 
         # Commit atomically — all-or-nothing from here
         context.bot_data[MODEL_OVERRIDE_KEY] = model_arg
@@ -1548,7 +1554,13 @@ async def post_init(application: Application) -> None:
     application.bot_data["agent"] = agent
 
     # Create the shared gateway
-    gateway = Gateway(agent=agent, streaming_config=config.telegram.streaming)
+    gateway = Gateway(
+        agent=agent,
+        streaming_config=config.telegram.streaming,
+        max_turns=config.max_turns,
+        gateway_timeout=config.gateway_timeout,
+        gateway_timeout_warning=config.gateway_timeout_warning,
+    )
     application.bot_data[GATEWAY_KEY] = gateway
 
     # Load allowed users: config + persisted file

@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 from deepclaw.channels.base import Channel, IncomingMessage
@@ -417,12 +418,34 @@ def chunk_message(text: str, limit: int = 4096) -> list[str]:
     return chunks
 
 
+class _GatewayInactivityTimeout(RuntimeError):
+    """Raised when the agent stops producing stream activity for too long."""
+
+    def __init__(self, idle_seconds: float, last_tool: str | None) -> None:
+        super().__init__(f"Agent inactive for {idle_seconds:.1f}s")
+        self.idle_seconds = idle_seconds
+        self.last_tool = last_tool
+
+
 class Gateway:
     """Shared message handler that invokes the agent and streams responses back through channels."""
 
-    def __init__(self, agent, streaming_config):
+    def __init__(
+        self,
+        agent,
+        streaming_config,
+        *,
+        max_turns: int = 60,
+        gateway_timeout: float = 1800,
+        gateway_timeout_warning: float = 900,
+    ):
         self.agent = agent
         self.streaming_config = streaming_config
+        self.max_turns = max(0, int(max_turns))
+        self.gateway_timeout = None if gateway_timeout <= 0 else float(gateway_timeout)
+        self.gateway_timeout_warning = (
+            None if gateway_timeout_warning <= 0 else float(gateway_timeout_warning)
+        )
         self._queue_state: dict[str, dict[str, Any]] = {}
 
     def get_queue_snapshot(self, chat_id: str) -> dict[str, Any] | None:
@@ -437,9 +460,15 @@ class Gateway:
         return copied
 
     @staticmethod
-    def _run_config(thread_id: str, *, chat_id: str, channel_name: str) -> dict[str, Any]:
+    def _run_config(
+        thread_id: str,
+        *,
+        chat_id: str,
+        channel_name: str,
+        recursion_limit: int | None = None,
+    ) -> dict[str, Any]:
         """Build per-invocation config for checkpointing and trace metadata."""
-        return {
+        config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id},
             "metadata": {
                 "active_thread_id": thread_id,
@@ -448,6 +477,9 @@ class Gateway:
                 "updated_at": datetime.now(tz=UTC).isoformat(),
             },
         }
+        if recursion_limit and recursion_limit > 0:
+            config["recursion_limit"] = recursion_limit
+        return config
 
     async def _edit_redacted_message(
         self, channel: Channel, chat_id: str, message_id: str, text: str
@@ -533,155 +565,223 @@ class Gateway:
             chunk_progress: dict[str, str] = {}
             last_chunk_line: str | None = None
             last_render_was_tool = False
+            last_tool_name: str | None = None
             run_config = self._run_config(
                 thread_id,
                 chat_id=chat_id,
                 channel_name=channel.name,
+                recursion_limit=self.max_turns,
             )
-            async for chunk in self.agent.astream(
+            stream = self.agent.astream(
                 payload,
                 config=run_config,
                 stream_mode="messages",
-            ):
-                if not isinstance(chunk, tuple) or len(chunk) != 2:
-                    continue
-                message_obj, _metadata = chunk
-
-                if isinstance(message_obj, ToolMessage):
-                    tool_name = getattr(message_obj, "name", "unknown")
-                    content = message_obj.content
-                    preview = redact_secrets(str(content)[:200]) if content else "(empty)"
-                    logger.info("Tool result [%s]: %s", tool_name, preview)
-                    continue
-
-                if not hasattr(message_obj, "content_blocks"):
-                    continue
-
-                message_tool_calls = _extract_message_tool_calls(message_obj)
-
-                for block in message_obj.content_blocks:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = block.get("type")
-
-                    if block_type in ("tool_call", "tool_call_chunk"):
-                        tool_calls_seen = True
-                        tool_name = block.get("name")
-                        if tool_name:
-                            tool_args = _resolve_tool_args(block, tool_name, message_tool_calls)
-                            args_preview = redact_secrets(str(tool_args)[:200]) if tool_args else ""
-                            logger.info("Tool call [%s]: %s", tool_name, args_preview)
-                            if not tool_args:
-                                block_preview = redact_secrets(str(dict(block))[:300])
-                                tool_calls_preview = redact_secrets(str(message_tool_calls)[:500])
-                                additional_kwargs = redact_secrets(
-                                    str(getattr(message_obj, "additional_kwargs", {}))[:500]
-                                )
-                                response_metadata = redact_secrets(
-                                    str(getattr(message_obj, "response_metadata", {}))[:500]
-                                )
-                                logger.warning(
-                                    "Tool call [%s] missing resolved args; block=%s message_tool_calls=%s additional_kwargs=%s response_metadata=%s message_type=%s",
-                                    tool_name,
-                                    block_preview,
-                                    tool_calls_preview,
-                                    additional_kwargs,
-                                    response_metadata,
-                                    type(message_obj).__name__,
-                                )
-                            tool_line = _format_tool_progress_line(tool_name, tool_args)
-                            tool_summary = _format_tool_summary(tool_name, tool_args)
-                            progress_key = _block_progress_key(block, tool_name)
-                            now_wall = time.time()
-                            if block_type == "tool_call_chunk":
-                                if tool_summary:
-                                    if progress_key is not None:
-                                        previous_line = chunk_progress.get(progress_key)
-                                        if previous_line != tool_line:
-                                            accumulated, delta = _emit_progress_line(
-                                                accumulated,
-                                                queue_snapshot,
-                                                tool_line,
-                                                now=now_wall,
-                                            )
-                                            chars_since_edit += delta
-                                            chunk_progress[progress_key] = tool_line
-                                            last_render_was_tool = True
-                                    elif last_chunk_line != tool_line:
-                                        accumulated, delta = _emit_progress_line(
-                                            accumulated,
-                                            queue_snapshot,
-                                            tool_line,
-                                            now=now_wall,
-                                        )
-                                        chars_since_edit += delta
-                                        last_chunk_line = tool_line
-                                        last_render_was_tool = True
-                                else:
-                                    if progress_key is not None:
-                                        previous_line = chunk_progress.get(progress_key)
-                                        if previous_line != tool_line:
-                                            accumulated, delta = _emit_progress_line(
-                                                accumulated,
-                                                queue_snapshot,
-                                                tool_line,
-                                                now=now_wall,
-                                            )
-                                            chars_since_edit += delta
-                                            chunk_progress[progress_key] = tool_line
-                                            last_render_was_tool = True
-                                    elif last_chunk_line != tool_line:
-                                        accumulated, delta = _emit_progress_line(
-                                            accumulated,
-                                            queue_snapshot,
-                                            tool_line,
-                                            now=now_wall,
-                                        )
-                                        chars_since_edit += delta
-                                        last_chunk_line = tool_line
-                                        last_render_was_tool = True
-                            else:
-                                chunk_line = (
-                                    chunk_progress.pop(progress_key, None)
-                                    if progress_key is not None
-                                    else last_chunk_line
-                                )
-                                if chunk_line != tool_line:
-                                    accumulated, delta = _emit_progress_line(
-                                        accumulated,
-                                        queue_snapshot,
-                                        tool_line,
-                                        now=now_wall,
-                                    )
-                                    chars_since_edit += delta
-                                    last_render_was_tool = True
-                                if progress_key is None:
-                                    last_chunk_line = None
-                    elif block_type == "text":
-                        text = block.get("text", "")
-                        if not text:
-                            continue
-                        if last_render_was_tool and accumulated and not accumulated.endswith("\n"):
-                            accumulated += "\n"
-                            chars_since_edit += 1
-                        accumulated += text
-                        queue_snapshot["updated_at"] = time.time()
-                        chars_since_edit += len(text)
-                        last_render_was_tool = False
+            )
+            stream_iter = stream.__aiter__()
+            pending_chunk: asyncio.Task[Any] | None = None
+            last_activity = time.monotonic()
+            warning_sent = False
+            try:
+                while True:
+                    if self.gateway_timeout is None:
+                        wait_timeout = None
                     else:
+                        idle_seconds = time.monotonic() - last_activity
+                        warning_wait: float | None = None
+                        if (
+                            not warning_sent
+                            and self.gateway_timeout_warning is not None
+                            and self.gateway_timeout_warning < self.gateway_timeout
+                        ):
+                            if idle_seconds >= self.gateway_timeout_warning:
+                                warning_sent = True
+                                warning_minutes = max(1, int(self.gateway_timeout_warning // 60))
+                                remaining_seconds = max(0.0, self.gateway_timeout - idle_seconds)
+                                remaining_minutes = max(1, int(remaining_seconds // 60))
+                                await self._send_redacted_message(
+                                    channel,
+                                    chat_id,
+                                    (
+                                        f"⚠️ No activity for {warning_minutes} min. "
+                                        f"If the agent does not respond soon, it will be timed out in "
+                                        f"{remaining_minutes} min. You can continue waiting, or use "
+                                        "/clear."
+                                    ),
+                                )
+                            else:
+                                warning_wait = self.gateway_timeout_warning - idle_seconds
+                        remaining = self.gateway_timeout - idle_seconds
+                        if remaining <= 0:
+                            raise _GatewayInactivityTimeout(idle_seconds, last_tool_name)
+                        wait_timeout = remaining
+                        if warning_wait is not None:
+                            wait_timeout = min(wait_timeout, warning_wait)
+
+                    try:
+                        if pending_chunk is None:
+                            pending_chunk = asyncio.create_task(anext(stream_iter))
+                        if wait_timeout is None:
+                            chunk = await asyncio.shield(pending_chunk)
+                        else:
+                            chunk = await asyncio.wait_for(asyncio.shield(pending_chunk), timeout=wait_timeout)
+                        pending_chunk = None
+                    except StopAsyncIteration:
+                        pending_chunk = None
+                        break
+                    except TimeoutError:
                         continue
 
-                    now = time.monotonic()
-                    elapsed = now - last_edit_time
-                    if (
-                        elapsed >= self.streaming_config.edit_interval
-                        or chars_since_edit >= self.streaming_config.buffer_threshold
-                    ):
-                        display = accumulated + CURSOR_INDICATOR
-                        if len(display) <= limit:
-                            await self._edit_redacted_message(channel, chat_id, msg_id, display)
-                        last_edit_time = time.monotonic()
-                        chars_since_edit = 0
+                    last_activity = time.monotonic()
+
+                    if not isinstance(chunk, tuple) or len(chunk) != 2:
+                        continue
+                    message_obj, _metadata = chunk
+
+                    if isinstance(message_obj, ToolMessage):
+                        tool_name = getattr(message_obj, "name", "unknown")
+                        content = message_obj.content
+                        preview = redact_secrets(str(content)[:200]) if content else "(empty)"
+                        logger.info("Tool result [%s]: %s", tool_name, preview)
+                        continue
+
+                    if not hasattr(message_obj, "content_blocks"):
+                        continue
+
+                    message_tool_calls = _extract_message_tool_calls(message_obj)
+
+                    for block in message_obj.content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        block_type = block.get("type")
+
+                        if block_type in ("tool_call", "tool_call_chunk"):
+                            tool_calls_seen = True
+                            tool_name = block.get("name")
+                            if tool_name:
+                                last_tool_name = str(tool_name)
+                                tool_args = _resolve_tool_args(block, tool_name, message_tool_calls)
+                                args_preview = redact_secrets(str(tool_args)[:200]) if tool_args else ""
+                                logger.info("Tool call [%s]: %s", tool_name, args_preview)
+                                if not tool_args:
+                                    block_preview = redact_secrets(str(dict(block))[:300])
+                                    tool_calls_preview = redact_secrets(str(message_tool_calls)[:500])
+                                    additional_kwargs = redact_secrets(
+                                        str(getattr(message_obj, "additional_kwargs", {}))[:500]
+                                    )
+                                    response_metadata = redact_secrets(
+                                        str(getattr(message_obj, "response_metadata", {}))[:500]
+                                    )
+                                    logger.warning(
+                                        "Tool call [%s] missing resolved args; block=%s message_tool_calls=%s additional_kwargs=%s response_metadata=%s message_type=%s",
+                                        tool_name,
+                                        block_preview,
+                                        tool_calls_preview,
+                                        additional_kwargs,
+                                        response_metadata,
+                                        type(message_obj).__name__,
+                                    )
+                                tool_line = _format_tool_progress_line(tool_name, tool_args)
+                                tool_summary = _format_tool_summary(tool_name, tool_args)
+                                progress_key = _block_progress_key(block, tool_name)
+                                now_wall = time.time()
+                                if block_type == "tool_call_chunk":
+                                    if tool_summary:
+                                        if progress_key is not None:
+                                            previous_line = chunk_progress.get(progress_key)
+                                            if previous_line != tool_line:
+                                                accumulated, delta = _emit_progress_line(
+                                                    accumulated,
+                                                    queue_snapshot,
+                                                    tool_line,
+                                                    now=now_wall,
+                                                )
+                                                chars_since_edit += delta
+                                                chunk_progress[progress_key] = tool_line
+                                                last_render_was_tool = True
+                                        elif last_chunk_line != tool_line:
+                                            accumulated, delta = _emit_progress_line(
+                                                accumulated,
+                                                queue_snapshot,
+                                                tool_line,
+                                                now=now_wall,
+                                            )
+                                            chars_since_edit += delta
+                                            last_chunk_line = tool_line
+                                            last_render_was_tool = True
+                                    else:
+                                        if progress_key is not None:
+                                            previous_line = chunk_progress.get(progress_key)
+                                            if previous_line != tool_line:
+                                                accumulated, delta = _emit_progress_line(
+                                                    accumulated,
+                                                    queue_snapshot,
+                                                    tool_line,
+                                                    now=now_wall,
+                                                )
+                                                chars_since_edit += delta
+                                                chunk_progress[progress_key] = tool_line
+                                                last_render_was_tool = True
+                                        elif last_chunk_line != tool_line:
+                                            accumulated, delta = _emit_progress_line(
+                                                accumulated,
+                                                queue_snapshot,
+                                                tool_line,
+                                                now=now_wall,
+                                            )
+                                            chars_since_edit += delta
+                                            last_chunk_line = tool_line
+                                            last_render_was_tool = True
+                                else:
+                                    chunk_line = (
+                                        chunk_progress.pop(progress_key, None)
+                                        if progress_key is not None
+                                        else last_chunk_line
+                                    )
+                                    if chunk_line != tool_line:
+                                        accumulated, delta = _emit_progress_line(
+                                            accumulated,
+                                            queue_snapshot,
+                                            tool_line,
+                                            now=now_wall,
+                                        )
+                                        chars_since_edit += delta
+                                        last_render_was_tool = True
+                                    if progress_key is None:
+                                        last_chunk_line = None
+                        elif block_type == "text":
+                            text = block.get("text", "")
+                            if not text:
+                                continue
+                            if last_render_was_tool and accumulated and not accumulated.endswith("\n"):
+                                accumulated += "\n"
+                                chars_since_edit += 1
+                            accumulated += text
+                            queue_snapshot["updated_at"] = time.time()
+                            chars_since_edit += len(text)
+                            last_render_was_tool = False
+                        else:
+                            continue
+
+                        now = time.monotonic()
+                        elapsed = now - last_edit_time
+                        if (
+                            elapsed >= self.streaming_config.edit_interval
+                            or chars_since_edit >= self.streaming_config.buffer_threshold
+                        ):
+                            display = accumulated + CURSOR_INDICATOR
+                            if len(display) <= limit:
+                                await self._edit_redacted_message(channel, chat_id, msg_id, display)
+                            last_edit_time = time.monotonic()
+                            chars_since_edit = 0
+            finally:
+                if pending_chunk is not None and not pending_chunk.done():
+                    pending_chunk.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await pending_chunk
+                aclose = getattr(stream_iter, "aclose", None)
+                if aclose is not None:
+                    with contextlib.suppress(Exception):
+                        await aclose()
 
             return tool_calls_seen
 
@@ -708,6 +808,36 @@ class Gateway:
                 chars_since_edit = 0
                 await _stream_once({"messages": [{"role": "user", "content": _NUDGE_MESSAGE}]})
                 pending = await self._get_pending_interrupt(channel, thread_id, chat_id=chat_id)
+        except GraphRecursionError:
+            logger.warning("Agent hit recursion limit for thread %s", thread_id)
+            accumulated = (
+                f"⚠️ The agent hit the maximum turn limit ({self.max_turns}) and was stopped. "
+                "Try breaking the task into smaller steps, or use /clear to start fresh."
+            )
+            queue_snapshot["status"] = "error"
+            queue_snapshot["pending_approval"] = None
+            queue_snapshot["updated_at"] = time.time()
+        except _GatewayInactivityTimeout as exc:
+            logger.warning(
+                "Agent inactive for %.1fs on thread %s (last_tool=%s)",
+                exc.idle_seconds,
+                thread_id,
+                exc.last_tool or "none",
+            )
+            timeout_minutes = max(1, int(exc.idle_seconds // 60))
+            if exc.last_tool:
+                accumulated = (
+                    f"⏱️ The agent was inactive for {timeout_minutes} min and was stopped. "
+                    f"It appeared stuck while using `{exc.last_tool}`. Try again, or use /clear to start fresh."
+                )
+            else:
+                accumulated = (
+                    f"⏱️ The agent was inactive for {timeout_minutes} min and was stopped. "
+                    "It may have been waiting on a model or tool response. Try again, or use /clear to start fresh."
+                )
+            queue_snapshot["status"] = "error"
+            queue_snapshot["pending_approval"] = None
+            queue_snapshot["updated_at"] = time.time()
         except Exception:
             logger.exception("Agent streaming failed")
             accumulated = accumulated or "Sorry, something went wrong processing your message."

@@ -383,6 +383,23 @@ class TestCommandTimeout:
         assert cfg.command_timeout == 300
 
 
+class TestAgentRunLimits:
+    def test_agent_limits_from_yaml(self, config_dir, monkeypatch):
+        monkeypatch.delenv("DEEPCLAW_MAX_TURNS", raising=False)
+        monkeypatch.delenv("DEEPCLAW_GATEWAY_TIMEOUT", raising=False)
+        monkeypatch.delenv("DEEPCLAW_GATEWAY_TIMEOUT_WARNING", raising=False)
+        _write_yaml(
+            config_dir,
+            "max_turns: 17\ngateway_timeout: 120\ngateway_timeout_warning: 45\n",
+        )
+
+        cfg = load_config()
+
+        assert cfg.max_turns == 17
+        assert cfg.gateway_timeout == 120
+        assert cfg.gateway_timeout_warning == 45
+
+
 class TestGenerationParsing:
     def test_invalid_generation_values_are_ignored(self, config_dir, monkeypatch):
         monkeypatch.delenv(ENV_COMMAND_TIMEOUT, raising=False)
