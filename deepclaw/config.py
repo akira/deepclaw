@@ -94,7 +94,7 @@ class DeepClawConfig:
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     workspace_root: str = "~/.deepclaw/workspace"
     command_timeout: int = 300  # seconds, default 5 minutes
-    max_turns: int = 60
+    max_turns: int = 500
     gateway_timeout: int = 1800
     gateway_timeout_warning: int = 900
 
@@ -236,8 +236,8 @@ DEFAULT_CONFIG_YAML = """\
 # Shell command timeout in seconds (default: 300 = 5 minutes)
 # command_timeout: 300
 
-# Hard cap on agent/tool turns before LangGraph aborts the run (default: 60)
-# max_turns: 60
+# Hard cap on agent/tool turns before LangGraph aborts the run (default: 500)
+# max_turns: 500
 
 # Gateway inactivity timeout in seconds (default: 1800 = 30 minutes idle)
 # gateway_timeout: 1800

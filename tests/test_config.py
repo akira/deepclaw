@@ -150,6 +150,9 @@ class TestLoadConfigDefaults:
         assert cfg.generation.repetition_penalty is None
         assert cfg.terminal.env_passthrough == []
         assert cfg.workspace_root == "~/.deepclaw/workspace"
+        assert cfg.max_turns == 500
+        assert cfg.gateway_timeout == 1800
+        assert cfg.gateway_timeout_warning == 900
 
 
 # ---------------------------------------------------------------------------

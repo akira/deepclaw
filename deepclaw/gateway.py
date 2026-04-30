@@ -435,7 +435,7 @@ class Gateway:
         agent,
         streaming_config,
         *,
-        max_turns: int = 60,
+        max_turns: int = 500,
         gateway_timeout: float = 1800,
         gateway_timeout_warning: float = 900,
     ):
