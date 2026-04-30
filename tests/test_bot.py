@@ -2058,9 +2058,17 @@ class TestSafetyApprovalCommands:
         assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"]["id"] == "interrupt-2"
         update.message.reply_text.assert_awaited_once()
         _, kwargs = update.message.reply_text.await_args
-        assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "safety:approve_once:interrupt-2"
-        assert kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "safety:approve_session:interrupt-2"
-        assert kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][1].callback_data
+            == "safety:approve_session:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
+        )
 
     @pytest.mark.asyncio
     async def test_approve_run_can_be_stopped_while_resume_interrupt_is_in_flight(self):
@@ -2188,9 +2196,17 @@ class TestSafetyApprovalCommands:
         assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"]["id"] == "interrupt-2"
         update.callback_query.message.reply_text.assert_awaited_once()
         _, kwargs = update.callback_query.message.reply_text.await_args
-        assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "safety:approve_once:interrupt-2"
-        assert kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "safety:approve_session:interrupt-2"
-        assert kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][1].callback_data
+            == "safety:approve_session:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
+        )
 
     @pytest.mark.asyncio
     async def test_callback_deny_rejects_pending_interrupt(self):

@@ -264,8 +264,12 @@ def _pending_approval_markup(pending_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Approve once", callback_data=f"safety:approve_once:{pending_id}"),
-                InlineKeyboardButton("Approve session", callback_data=f"safety:approve_session:{pending_id}"),
+                InlineKeyboardButton(
+                    "Approve once", callback_data=f"safety:approve_once:{pending_id}"
+                ),
+                InlineKeyboardButton(
+                    "Approve session", callback_data=f"safety:approve_session:{pending_id}"
+                ),
                 InlineKeyboardButton("Deny", callback_data=f"safety:deny:{pending_id}"),
             ]
         ]

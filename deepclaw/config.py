@@ -377,9 +377,7 @@ def load_config() -> DeepClawConfig:
             yaml_terminal.get("compression", TerminalConfig.compression)
         ),
         env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", [])),
-        cron_approval_allowlist=_to_str_list(
-            yaml_terminal.get("cron_approval_allowlist", [])
-        ),
+        cron_approval_allowlist=_to_str_list(yaml_terminal.get("cron_approval_allowlist", [])),
     )
 
     command_timeout = _to_int(
