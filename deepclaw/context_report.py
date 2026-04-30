@@ -198,6 +198,7 @@ def _skills_prompt(skills_metadata: list[dict[str, Any]], sources: list[str]) ->
     return SKILLS_SYSTEM_PROMPT.format(
         skills_locations=_format_skills_locations(sources),
         skills_list=_format_skills_list(skills_metadata, sources),
+        skills_load_warnings="",
     )
 
 
