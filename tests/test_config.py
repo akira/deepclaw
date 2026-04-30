@@ -150,6 +150,9 @@ class TestLoadConfigDefaults:
         assert cfg.generation.repetition_penalty is None
         assert cfg.terminal.env_passthrough == []
         assert cfg.workspace_root == "~/.deepclaw/workspace"
+        assert cfg.max_turns == 500
+        assert cfg.gateway_timeout == 1800
+        assert cfg.gateway_timeout_warning == 900
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +384,23 @@ class TestCommandTimeout:
         monkeypatch.delenv(ENV_COMMAND_TIMEOUT, raising=False)
         cfg = load_config()
         assert cfg.command_timeout == 300
+
+
+class TestAgentRunLimits:
+    def test_agent_limits_from_yaml(self, config_dir, monkeypatch):
+        monkeypatch.delenv("DEEPCLAW_MAX_TURNS", raising=False)
+        monkeypatch.delenv("DEEPCLAW_GATEWAY_TIMEOUT", raising=False)
+        monkeypatch.delenv("DEEPCLAW_GATEWAY_TIMEOUT_WARNING", raising=False)
+        _write_yaml(
+            config_dir,
+            "max_turns: 17\ngateway_timeout: 120\ngateway_timeout_warning: 45\n",
+        )
+
+        cfg = load_config()
+
+        assert cfg.max_turns == 17
+        assert cfg.gateway_timeout == 120
+        assert cfg.gateway_timeout_warning == 45
 
 
 class TestGenerationParsing:

@@ -27,6 +27,9 @@ ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 ENV_DEEPCLAW_MODEL = "DEEPCLAW_MODEL"
 ENV_DEEPCLAW_ALLOWED_USERS = "DEEPCLAW_ALLOWED_USERS"
 ENV_COMMAND_TIMEOUT = "DEEPCLAW_COMMAND_TIMEOUT"
+ENV_MAX_TURNS = "DEEPCLAW_MAX_TURNS"
+ENV_GATEWAY_TIMEOUT = "DEEPCLAW_GATEWAY_TIMEOUT"
+ENV_GATEWAY_TIMEOUT_WARNING = "DEEPCLAW_GATEWAY_TIMEOUT_WARNING"
 
 
 @dataclass
@@ -91,6 +94,9 @@ class DeepClawConfig:
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     workspace_root: str = "~/.deepclaw/workspace"
     command_timeout: int = 300  # seconds, default 5 minutes
+    max_turns: int = 500
+    gateway_timeout: int = 1800
+    gateway_timeout_warning: int = 900
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -230,6 +236,15 @@ DEFAULT_CONFIG_YAML = """\
 # Shell command timeout in seconds (default: 300 = 5 minutes)
 # command_timeout: 300
 
+# Hard cap on agent/tool turns before LangGraph aborts the run (default: 500)
+# max_turns: 500
+
+# Gateway inactivity timeout in seconds (default: 1800 = 30 minutes idle)
+# gateway_timeout: 1800
+
+# Warn before inactivity timeout (default: 900 = 15 minutes idle, 0 disables warning)
+# gateway_timeout_warning: 900
+
 # LangSmith tracing — add these to ~/.deepclaw/.env (not this file):
 #   LANGSMITH_API_KEY=lsv2_...
 #   LANGSMITH_TRACING=true
@@ -362,6 +377,22 @@ def load_config() -> DeepClawConfig:
         _resolve(ENV_COMMAND_TIMEOUT, dot_env, yaml_data.get("command_timeout")),
         DeepClawConfig.command_timeout,
     )
+    max_turns = _to_int(
+        _resolve(ENV_MAX_TURNS, dot_env, yaml_data.get("max_turns")),
+        DeepClawConfig.max_turns,
+    )
+    gateway_timeout = _to_int(
+        _resolve(ENV_GATEWAY_TIMEOUT, dot_env, yaml_data.get("gateway_timeout")),
+        DeepClawConfig.gateway_timeout,
+    )
+    gateway_timeout_warning = _to_int(
+        _resolve(
+            ENV_GATEWAY_TIMEOUT_WARNING,
+            dot_env,
+            yaml_data.get("gateway_timeout_warning"),
+        ),
+        DeepClawConfig.gateway_timeout_warning,
+    )
 
     config = DeepClawConfig(
         model=model,
@@ -371,6 +402,9 @@ def load_config() -> DeepClawConfig:
         terminal=terminal,
         workspace_root=workspace_root,
         command_timeout=command_timeout,
+        max_turns=max(0, max_turns),
+        gateway_timeout=max(0, gateway_timeout),
+        gateway_timeout_warning=max(0, gateway_timeout_warning),
     )
 
     logger.info(
