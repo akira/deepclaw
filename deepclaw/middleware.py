@@ -26,6 +26,8 @@ from deepclaw.safety import (
 
 logger = logging.getLogger(__name__)
 
+_THREAD_APPROVALS: dict[str, set[str]] = {}
+
 _USER_INTENT_BASH_RE = re.compile(
     r"\b(run|execute|command|cmd)\b.*\bbash\b|\bbash\b.*\b(run|execute|command|cmd)\b",
     re.IGNORECASE,
@@ -121,7 +123,78 @@ def _passthrough_env_warning() -> str | None:
     )
 
 
-def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> ToolMessage | None:
+def _warning_keys(
+    matches: list[Any],
+    intent_warning: str | None,
+    passthrough_warning: str | None,
+) -> list[str]:
+    """Return stable approval keys for session-scoped warning persistence."""
+    keys: list[str] = []
+    for match in matches:
+        category = getattr(match, "category", "unknown")
+        keys.append(f"dangerous:{category}")
+
+    if intent_warning == "User explicitly requested inline Python execution (`python -c`)":
+        keys.append("intent:inline_python")
+    elif intent_warning == "User explicitly requested bash execution":
+        keys.append("intent:bash")
+
+    if passthrough_warning:
+        try:
+            passthrough = sorted(load_config().terminal.env_passthrough)
+        except Exception:
+            passthrough = []
+        if passthrough:
+            keys.append(f"env_passthrough:{','.join(passthrough)}")
+
+    return list(dict.fromkeys(keys))
+
+
+def _is_thread_approved(thread_id: str | None, warning_keys: list[str]) -> bool:
+    """Return True when all warning keys were previously approved for this thread."""
+    if not thread_id or not warning_keys:
+        return False
+    approved = _THREAD_APPROVALS.get(thread_id, set())
+    return all(key in approved for key in warning_keys)
+
+
+def _approve_thread_warning_keys(thread_id: str | None, warning_keys: list[str]) -> None:
+    """Persist warning approvals for the current thread/session."""
+    if not thread_id or not warning_keys:
+        return
+    _THREAD_APPROVALS.setdefault(thread_id, set()).update(warning_keys)
+
+
+def _extract_thread_id(request: Any) -> str | None:
+    """Best-effort extraction of the active graph thread ID from the request runtime."""
+    runtime = getattr(request, "runtime", None)
+    config = getattr(runtime, "config", None)
+    if isinstance(config, Mapping):
+        configurable = config.get("configurable")
+        if isinstance(configurable, Mapping):
+            thread_id = configurable.get("thread_id")
+            if thread_id:
+                return str(thread_id)
+    return None
+
+
+def _is_cron_allowlisted(thread_id: str | None, warning_keys: list[str]) -> bool:
+    """Return True when a cron thread's warning keys are explicitly allowlisted."""
+    if not thread_id or not thread_id.startswith("cron-") or not warning_keys:
+        return False
+    try:
+        allowlist = set(load_config().terminal.cron_approval_allowlist)
+    except Exception:
+        allowlist = set()
+    return bool(allowlist) and all(key in allowlist for key in warning_keys)
+
+
+def _check_execute(
+    tool_call: dict,
+    state: Mapping[str, Any] | None = None,
+    *,
+    thread_id: str | None = None,
+) -> ToolMessage | None:
     """Check a shell command for dangerous patterns.
 
     Returns a ToolMessage if the command should be blocked, None otherwise.
@@ -135,6 +208,7 @@ def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> T
     matches = check_command(command)
     intent_warning = _user_intent_requires_review(state)
     passthrough_warning = _passthrough_env_warning()
+    warning_keys = _warning_keys(matches, intent_warning, passthrough_warning)
     warnings = [
         reason
         for reason in (
@@ -145,6 +219,22 @@ def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> T
         if reason
     ]
     if not warnings:
+        return None
+
+    if _is_thread_approved(thread_id, warning_keys):
+        logger.info(
+            "Skipping approval for thread %s; warnings already approved: %s",
+            thread_id,
+            warning_keys,
+        )
+        return None
+
+    if _is_cron_allowlisted(thread_id, warning_keys):
+        logger.info(
+            "Skipping approval for cron thread %s; warnings allowlisted: %s",
+            thread_id,
+            warning_keys,
+        )
         return None
 
     warning_text = "\n\n".join(warnings)
@@ -161,12 +251,16 @@ def _check_execute(tool_call: dict, state: Mapping[str, Any] | None = None) -> T
             "type": "safety_review",
             "tool": tool_call["name"],
             "command": command,
+            "scope": "once",
+            "approval_keys": warning_keys,
             "warning": warning_text,
             "message": f"⚠️ Potentially dangerous command:\n\n```\n{command}\n```\n\n{warning_text}\n\nApprove or deny?",
         }
     )
 
     if isinstance(decision, dict) and decision.get("type") == "approve":
+        if decision.get("scope") == "session":
+            _approve_thread_warning_keys(thread_id, warning_keys)
         return None  # Proceed with execution
 
     reason = "Command rejected by user"
@@ -242,7 +336,11 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             # --- Pre-execution safety gates ---
 
             if tool_name == _EXECUTE_TOOL:
-                blocked = _check_execute(tool_call, request_state)
+                blocked = _check_execute(
+                    tool_call,
+                    request_state,
+                    thread_id=_extract_thread_id(request),
+                )
                 if blocked is not None:
                     return blocked
 

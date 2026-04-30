@@ -205,7 +205,29 @@ terminal:
         assert cfg.generation.top_p == pytest.approx(0.9)
         assert cfg.generation.repetition_penalty == pytest.approx(1.05)
         assert cfg.terminal.env_passthrough == ["LANGSMITH_API_KEY", "CUSTOM_TOKEN"]
+        assert cfg.terminal.cron_approval_allowlist == []
         assert cfg.workspace_root == "/tmp/ws"
+
+    def test_cron_approval_allowlist_loads_from_yaml(self, config_dir, monkeypatch):
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("DEEPCLAW_MODEL", raising=False)
+        monkeypatch.delenv("DEEPCLAW_ALLOWED_USERS", raising=False)
+
+        _write_yaml(
+            config_dir,
+            """terminal:
+  cron_approval_allowlist:
+    - dangerous:code_injection
+    - env_passthrough:LANGSMITH_API_KEY
+""",
+        )
+
+        cfg = load_config()
+
+        assert cfg.terminal.cron_approval_allowlist == [
+            "dangerous:code_injection",
+            "env_passthrough:LANGSMITH_API_KEY",
+        ]
 
     def test_invalid_terminal_compression_raises(self, config_dir, monkeypatch):
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)

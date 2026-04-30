@@ -58,6 +58,7 @@ class HeartbeatConfig:
 class TerminalConfig:
     compression: str = "none"
     env_passthrough: list[str] = field(default_factory=list)
+    cron_approval_allowlist: list[str] = field(default_factory=list)
 
 
 _ALLOWED_TERMINAL_COMPRESSION = frozenset({"none", "rtk"})
@@ -255,11 +256,16 @@ DEFAULT_CONFIG_YAML = """\
 # Terminal child-process env passthrough for blocked DeepClaw-managed secrets.
 # Use this when a trusted skill or workflow needs one of DeepClaw's own API keys
 # available inside shell commands.
+# `cron_approval_allowlist` is a separate explicit trust list for scheduled jobs.
+# Use stable warning keys like `dangerous:code_injection` or
+# `env_passthrough:LANGSMITH_API_KEY` to bypass manual approval for cron-only runs.
 # terminal:
 #   compression: rtk
 #   env_passthrough:
 #     - LANGSMITH_API_KEY
 #     - LANGCHAIN_API_KEY
+#   cron_approval_allowlist:
+#     - dangerous:code_injection
 """
 
 
@@ -356,6 +362,9 @@ def load_config() -> DeepClawConfig:
             yaml_terminal.get("compression", TerminalConfig.compression)
         ),
         env_passthrough=_to_str_list(yaml_terminal.get("env_passthrough", [])),
+        cron_approval_allowlist=_to_str_list(
+            yaml_terminal.get("cron_approval_allowlist", [])
+        ),
     )
 
     command_timeout = _to_int(
