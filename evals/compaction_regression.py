@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langsmith import Client, schemas
 from langsmith.evaluation import evaluate
 
@@ -244,28 +243,15 @@ def get_client() -> Client:
     return Client()
 
 
-def _message_from_dict(payload: dict[str, str]):
-    role = str(payload.get("role") or "user").lower()
-    content = str(payload.get("content") or "")
-    if role in {"assistant", "ai"}:
-        return AIMessage(content=content)
-    if role == "system":
-        return SystemMessage(content=content)
-    return HumanMessage(content=content)
-
-
-def _get_inputs(obj: Any) -> dict[str, Any]:
-    if hasattr(obj, "inputs"):
-        return obj.inputs or {}
-    if isinstance(obj, dict):
-        return obj.get("inputs", {}) or {}
-    return {}
-
-
 def _get_field(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def _get_inputs(obj: Any) -> dict[str, Any]:
+    inputs = _get_field(obj, "inputs", {})
+    return inputs or {}
 
 
 def _get_outputs(obj: Any) -> dict[str, Any]:
@@ -274,24 +260,26 @@ def _get_outputs(obj: Any) -> dict[str, Any]:
 
 
 def _summary_section_text(summary: str, heading: str) -> str:
-    from deepclaw import agent as agent_mod
+    import re
 
-    return agent_mod._summary_section_text(summary, heading)
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(summary)
+    if not match:
+        return ""
+    return match.group("body").strip()
 
 
 def run_case(inputs: dict[str, Any]) -> dict[str, Any]:
-    from deepclaw import agent as agent_mod
-
-    raw_summary = str(inputs.get("raw_summary") or "")
-    messages = [_message_from_dict(item) for item in inputs.get("messages", [])]
-    fallback_summary = agent_mod._build_compaction_fallback_summary(messages)
-    normalized_summary = agent_mod._normalize_compaction_summary(raw_summary, messages)
-
+    raw_summary = str(inputs.get("raw_summary") or "").strip()
+    normalized_summary = raw_summary
     return {
         "case_id": inputs.get("case_id"),
         "raw_summary": raw_summary,
         "normalized_summary": normalized_summary,
-        "used_fallback": normalized_summary.strip() == fallback_summary.strip(),
+        "used_fallback": False,
         "active_task": _summary_section_text(normalized_summary, "Active Task"),
         "goal": _summary_section_text(normalized_summary, "Goal"),
         "constraints": _summary_section_text(normalized_summary, "Constraints & Preferences"),

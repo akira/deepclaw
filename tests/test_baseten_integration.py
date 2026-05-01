@@ -148,16 +148,6 @@ class TestCreateAgentBaseten:
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(agent_mod, "resolve_provider_model", lambda config: fake_model)
-        monkeypatch.setattr(
-            agent_mod,
-            "_create_deepclaw_summarization_tool_middleware",
-            lambda *args, **kwargs: None,
-        )
-        monkeypatch.setattr(
-            agent_mod,
-            "_patched_deepagents_summarization_factory",
-            lambda: __import__("contextlib").nullcontext(),
-        )
 
         config = DeepClawConfig(
             model="baseten:moonshotai/Kimi-K2-Instruct-0905", workspace_root=str(tmp_path)

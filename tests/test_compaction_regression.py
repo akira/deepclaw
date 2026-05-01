@@ -29,7 +29,7 @@ def test_dataset_examples_cover_observed_trace_case():
     assert "DO NOT CHANGE ANY CODE" in trace_case["outputs"]["required_constraint_substrings"]
 
 
-def test_run_case_reports_wrapper_poisoning_on_current_behavior():
+def test_run_case_preserves_raw_summary_without_custom_rewrite_layer():
     module = _load_module()
 
     case = next(
@@ -40,8 +40,8 @@ def test_run_case_reports_wrapper_poisoning_on_current_behavior():
 
     result = module.run_case(case["inputs"])
 
-    assert module.COMPACTION_WRAPPER_TEXT in result["active_task"]
-    assert result["used_fallback"] is True
+    assert result["normalized_summary"] == case["inputs"]["raw_summary"].strip()
+    assert result["used_fallback"] is False
 
 
 def test_evaluator_constraints_fails_when_required_constraint_missing():

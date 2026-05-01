@@ -114,20 +114,6 @@ class TestCreateAgentDeepInfra:
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
         monkeypatch.setattr(agent_mod, "resolve_provider_model", lambda config: fake_model)
-        monkeypatch.setattr(
-            agent_mod,
-            "_create_deepclaw_summarization_tool_middleware",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("custom manual compaction middleware should not be used")
-            ),
-        )
-        monkeypatch.setattr(
-            agent_mod,
-            "_patched_deepagents_summarization_factory",
-            lambda: (_ for _ in ()).throw(
-                AssertionError("summarization factory monkeypatch should not be used")
-            ),
-        )
 
         config = DeepClawConfig(
             model="deepinfra:meta-llama/Llama-3.3-70B-Instruct", workspace_root=str(tmp_path)
