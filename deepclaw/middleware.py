@@ -226,6 +226,17 @@ def _check_execute(
     if not warnings:
         return None
 
+    warning_text = "\n\n".join(warnings)
+    has_critical = any(m.severity == "critical" for m in matches)
+
+    # Critical-severity hard-block runs before any approval bypass, so a prior
+    # session approval of a warning-level command in the same category cannot
+    # silently authorize a critical command (e.g. `killall` -> `kill -9 -1`
+    # both share the `mass_process_kill` category).
+    if has_critical:
+        logger.warning("Blocked critical command: %s", command)
+        return _blocked_tool_message(tool_call, warning_text)
+
     if _is_thread_approved(state, warning_keys):
         logger.info(
             "Skipping approval for thread %s; warnings already approved in checkpoint state: %s",
@@ -241,13 +252,6 @@ def _check_execute(
             warning_keys,
         )
         return None
-
-    warning_text = "\n\n".join(warnings)
-    has_critical = any(m.severity == "critical" for m in matches)
-
-    if has_critical:
-        logger.warning("Blocked critical command: %s", command)
-        return _blocked_tool_message(tool_call, warning_text)
 
     # Warning-level: ask the human
     logger.info("Requesting approval for command: %s", command)

@@ -165,7 +165,7 @@ def _extract_pending_interrupt(state: Any, thread_id: str) -> dict[str, Any] | N
 def _format_pending_interrupt_message(pending: Mapping[str, Any]) -> str:
     """Format the Telegram-visible prompt for a pending safety review."""
     base = str(pending.get("message") or "Safety review required.").strip()
-    suffix = "Use /approve to continue or /deny <reason> to reject."
+    suffix = "Use /approve, /approve session, or /deny <reason> to respond."
     return f"{base}\n\n{suffix}" if base else suffix
 
 

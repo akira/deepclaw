@@ -868,7 +868,7 @@ class TestGatewayRedaction:
         assert state_config["metadata"]["channel"] == "telegram"
         assert "updated_at" in state_config["metadata"]
         assert channel.edits[-1][2].endswith(
-            "Use /approve to continue or /deny <reason> to reject."
+            "Use /approve, /approve session, or /deny <reason> to respond."
         )
 
     @pytest.mark.asyncio

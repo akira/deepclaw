@@ -139,6 +139,33 @@ class TestCheckExecute:
         result = _check_execute(tc)
         assert result is not None
 
+    def test_critical_not_bypassed_by_same_category_session_approval(self):
+        # `killall` (warning) and `kill -9 -1` (critical) share the
+        # mass_process_kill category, so a prior session approval of the
+        # warning key must not silently authorize the critical command.
+        tc = _make_tool_call("execute", {"command": "kill -9 -1"})
+        state = {"approval_state": {"approved_keys": ["dangerous:mass_process_kill"]}}
+        result = _check_execute(tc, state, thread_id="thread-session")
+        assert result is not None
+        assert result.status == "error"
+        assert "BLOCKED" in result.content
+
+    @patch("deepclaw.middleware.load_config")
+    def test_critical_not_bypassed_by_cron_allowlist(self, mock_load_config):
+        class _Terminal:
+            env_passthrough = []
+            cron_approval_allowlist = ["dangerous:mass_process_kill"]
+
+        class _Config:
+            terminal = _Terminal()
+
+        mock_load_config.return_value = _Config()
+        tc = _make_tool_call("execute", {"command": "kill -9 -1"})
+        result = _check_execute(tc, thread_id="cron-job-1")
+        assert result is not None
+        assert result.status == "error"
+        assert "BLOCKED" in result.content
+
     def test_empty_command_returns_none(self):
         tc = _make_tool_call("execute", {"command": ""})
         assert _check_execute(tc) is None
