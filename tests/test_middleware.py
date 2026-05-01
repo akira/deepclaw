@@ -144,8 +144,11 @@ class TestCheckExecute:
         # mass_process_kill category, so a prior session approval of the
         # warning key must not silently authorize the critical command.
         tc = _make_tool_call("execute", {"command": "kill -9 -1"})
-        state = {"approval_state": {"approved_keys": ["dangerous:mass_process_kill"]}}
-        result = _check_execute(tc, state, thread_id="thread-session")
+        result = _check_execute(
+            tc,
+            thread_id="thread-session",
+            approved_keys={"dangerous:mass_process_kill"},
+        )
         assert result is not None
         assert result.status == "error"
         assert "BLOCKED" in result.content
@@ -483,23 +486,24 @@ class TestSafetyMiddlewareIntegration:
         assert result == expected
 
     @pytest.mark.asyncio
+    @patch("deepclaw.middleware.aget_thread_approved_keys")
     @patch("deepclaw.middleware.interrupt")
     async def test_session_approved_warning_is_not_reprompted_for_same_thread(
-        self, mock_interrupt, middleware
+        self, mock_interrupt, mock_get_approved, middleware
     ):
         mock_interrupt.return_value = {"type": "approve", "scope": "session"}
+        # First call: no prior approvals; second call: approved key persisted.
+        mock_get_approved.side_effect = [set(), {"dangerous:code_injection"}]
 
         first_request = self._make_request(
             "execute",
             {"command": "python3 - <<'PY'\nprint('one')\nPY"},
-            state={"approval_state": {"approved_keys": []}},
             thread_id="thread-session",
         )
         second_request = self._make_request(
             "execute",
             {"command": "python3 - <<'PY'\nprint('two')\nPY"},
             call_id="call_2",
-            state={"approval_state": {"approved_keys": ["dangerous:code_injection"]}},
             thread_id="thread-session",
         )
         first_expected = ToolMessage(content="ok-1", name="execute", tool_call_id="call_1")

@@ -15,7 +15,7 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command, interrupt
 
-from deepclaw.approval_state import APPROVAL_STATE_KEY
+from deepclaw.approval_state import aget_thread_approved_keys
 from deepclaw.config import load_config
 from deepclaw.safety import (
     check_command,
@@ -149,25 +149,11 @@ def _warning_keys(
     return list(dict.fromkeys(keys))
 
 
-def _approved_warning_keys_from_state(state: Mapping[str, Any] | None) -> set[str]:
-    """Return session-approved warning keys persisted in LangGraph thread state."""
-    if not state:
-        return set()
-    approval_state = state.get(APPROVAL_STATE_KEY)
-    if not isinstance(approval_state, Mapping):
-        return set()
-    approved_keys = approval_state.get("approved_keys")
-    if not isinstance(approved_keys, list):
-        return set()
-    return {str(key) for key in approved_keys if str(key)}
-
-
-def _is_thread_approved(state: Mapping[str, Any] | None, warning_keys: list[str]) -> bool:
+def _is_thread_approved(approved_keys: set[str] | None, warning_keys: list[str]) -> bool:
     """Return True when all warning keys were previously approved for this thread."""
-    if not warning_keys:
+    if not warning_keys or not approved_keys:
         return False
-    approved = _approved_warning_keys_from_state(state)
-    return all(key in approved for key in warning_keys)
+    return all(key in approved_keys for key in warning_keys)
 
 
 def _extract_thread_id(request: Any) -> str | None:
@@ -199,6 +185,7 @@ def _check_execute(
     state: Mapping[str, Any] | None = None,
     *,
     thread_id: str | None = None,
+    approved_keys: set[str] | None = None,
 ) -> ToolMessage | None:
     """Check a shell command for dangerous patterns.
 
@@ -237,9 +224,9 @@ def _check_execute(
         logger.warning("Blocked critical command: %s", command)
         return _blocked_tool_message(tool_call, warning_text)
 
-    if _is_thread_approved(state, warning_keys):
+    if _is_thread_approved(approved_keys, warning_keys):
         logger.info(
-            "Skipping approval for thread %s; warnings already approved in checkpoint state: %s",
+            "Skipping approval for thread %s; warnings already approved for this session: %s",
             thread_id,
             warning_keys,
         )
@@ -343,10 +330,13 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             # --- Pre-execution safety gates ---
 
             if tool_name == _EXECUTE_TOOL:
+                thread_id = _extract_thread_id(request)
+                approved_keys = await aget_thread_approved_keys(thread_id) if thread_id else set()
                 blocked = _check_execute(
                     tool_call,
                     request_state,
-                    thread_id=_extract_thread_id(request),
+                    thread_id=thread_id,
+                    approved_keys=approved_keys,
                 )
                 if blocked is not None:
                     return blocked
