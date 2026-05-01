@@ -770,16 +770,10 @@ def _build_subagent_compaction_middleware(spec: dict, model: str, backend) -> li
 
 
 def _build_deepclaw_subagents(model: str, backend) -> list[dict]:
-    """Build production subagent specs with DeepClaw compaction tooling attached."""
+    """Build production subagent specs without DeepClaw-specific compaction hooks."""
+    _ = (model, backend)
     subagents: list[dict] = [copy.deepcopy(GENERAL_PURPOSE_SUBAGENT)]
     subagents.extend(copy.deepcopy(spec) for spec in DEFAULT_SUBAGENTS)
-
-    for spec in subagents:
-        existing_middleware = list(spec.get("middleware", []))
-        existing_middleware.extend(_build_subagent_compaction_middleware(spec, model, backend))
-        if existing_middleware:
-            spec["middleware"] = existing_middleware
-
     return subagents
 
 
@@ -832,13 +826,6 @@ def create_agent(config, checkpointer):
     else:
         logger.warning("Local context middleware skipped; backend cannot execute commands")
 
-    manual_compaction_tool_middleware = _create_deepclaw_summarization_tool_middleware(
-        agent_model or config.model or DeepClawConfig.model,
-        composite_backend,
-    )
-    if manual_compaction_tool_middleware is not None:
-        middleware.append(manual_compaction_tool_middleware)
-
     # System prompt from SOUL.md, always followed by tool-use enforcement.
     # Add stronger execution guidance for GPT/Codex-family models, which are
     # more likely to narrate plans or declare completion without acting.
@@ -857,16 +844,15 @@ def create_agent(config, checkpointer):
     # Tool plugins
     tools = discover_tools()
 
-    with _patched_deepagents_summarization_factory():
-        return create_deep_agent(
-            model=agent_model,
-            backend=composite_backend,
-            checkpointer=checkpointer,
-            middleware=middleware,
-            system_prompt=system_prompt,
-            tools=tools or None,
-            subagents=_build_deepclaw_subagents(
-                agent_model or config.model or DeepClawConfig.model,
-                composite_backend,
-            ),
-        )
+    return create_deep_agent(
+        model=agent_model,
+        backend=composite_backend,
+        checkpointer=checkpointer,
+        middleware=middleware,
+        system_prompt=system_prompt,
+        tools=tools or None,
+        subagents=_build_deepclaw_subagents(
+            agent_model or config.model or DeepClawConfig.model,
+            composite_backend,
+        ),
+    )

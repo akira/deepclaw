@@ -503,7 +503,7 @@ class TestDeepClawSummarizationFactory:
         assert middleware.name == "deepclaw_summarization_tool"
         assert middleware.summarization.name == "deepclaw_summarization"
 
-    def test_builds_production_subagents_with_manual_compaction(self, monkeypatch):
+    def test_builds_production_subagents_without_manual_compaction(self, monkeypatch):
         monkeypatch.setattr(
             agent_mod,
             "_create_deepclaw_summarization_tool_middleware",
@@ -513,9 +513,9 @@ class TestDeepClawSummarizationFactory:
         subagents = agent_mod._build_deepclaw_subagents("test:model", "backend")
 
         assert subagents[0]["name"] == "general-purpose"
-        assert subagents[0]["middleware"] == ["compact:test:model:backend"]
+        assert "middleware" not in subagents[0]
         assert {spec["name"] for spec in subagents[1:]} == {"researcher", "coder", "sysadmin"}
-        assert all(spec["middleware"] == ["compact:test:model:backend"] for spec in subagents)
+        assert all("middleware" not in spec for spec in subagents)
         assert all(
             spec is not source
             for spec, source in zip(subagents[1:], agent_mod.DEFAULT_SUBAGENTS, strict=False)
@@ -779,7 +779,7 @@ class TestRuntimeContextManagementBehavior:
 
 
 class TestCreateAgent:
-    def test_wires_cli_style_context_backends_and_manual_compaction_tool(
+    def test_wires_cli_style_context_backends_without_custom_compaction_hooks(
         self, tmp_path, monkeypatch
     ):
         captured = {}
@@ -816,17 +816,21 @@ class TestCreateAgent:
         monkeypatch.setattr(
             agent_mod,
             "_create_deepclaw_summarization_tool_middleware",
-            lambda model, backend: ("compact-tool", model, backend),
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("custom manual compaction middleware should not be used")
+            ),
         )
         monkeypatch.setattr(
             agent_mod,
             "_build_deepclaw_subagents",
-            lambda model, backend: [("subagent-compact-tool", model, backend)],
+            lambda model, backend: [("subagents", model, backend)],
         )
         monkeypatch.setattr(
             agent_mod,
             "_patched_deepagents_summarization_factory",
-            lambda: __import__("contextlib").nullcontext(),
+            lambda: (_ for _ in ()).throw(
+                AssertionError("summarization factory monkeypatch should not be used")
+            ),
         )
 
         stale_file = tmp_path / "runtime" / "large_tool_results" / "stale.txt"
@@ -857,14 +861,8 @@ class TestCreateAgent:
             isinstance(middleware, agent_mod.LocalContextMiddleware)
             for middleware in captured["middleware"]
         )
-        assert any(
-            middleware[0] == "compact-tool" and middleware[1] == "test:model"
-            for middleware in captured["middleware"]
-            if isinstance(middleware, tuple)
-        )
-        assert captured["subagents"] == [
-            ("subagent-compact-tool", "test:model", captured["backend"])
-        ]
+        assert not any(isinstance(middleware, tuple) for middleware in captured["middleware"])
+        assert captured["subagents"] == [("subagents", "test:model", captured["backend"])]
 
     def test_includes_openai_execution_guidance_for_gpt_models(self, tmp_path, monkeypatch):
         captured = {}

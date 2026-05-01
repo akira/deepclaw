@@ -117,12 +117,16 @@ class TestCreateAgentDeepInfra:
         monkeypatch.setattr(
             agent_mod,
             "_create_deepclaw_summarization_tool_middleware",
-            lambda *args, **kwargs: None,
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("custom manual compaction middleware should not be used")
+            ),
         )
         monkeypatch.setattr(
             agent_mod,
             "_patched_deepagents_summarization_factory",
-            lambda: __import__("contextlib").nullcontext(),
+            lambda: (_ for _ in ()).throw(
+                AssertionError("summarization factory monkeypatch should not be used")
+            ),
         )
 
         config = DeepClawConfig(
