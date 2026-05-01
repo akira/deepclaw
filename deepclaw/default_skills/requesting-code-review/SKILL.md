@@ -1,6 +1,9 @@
 ---
 name: requesting-code-review
 description: >
+  Pre-commit verification pipeline — static security scan, baseline-aware
+  quality gates, independent reviewer subagent, and auto-fix loop. Use after
+  code changes and before committing, pushing, or opening a PR.
 version: 2.0.0
 ---
 
