@@ -6,6 +6,7 @@ so adding Discord/Slack/etc. requires zero changes here.
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import time
@@ -272,10 +273,31 @@ def _emit_progress_line(
 
 def _extract_message_tool_calls(message_obj: Any) -> list[Mapping[str, Any]]:
     """Return structured tool calls attached to a streamed message object, if any."""
+    resolved: list[Mapping[str, Any]] = []
     tool_calls = getattr(message_obj, "tool_calls", None)
     if isinstance(tool_calls, list):
-        return [tc for tc in tool_calls if isinstance(tc, Mapping)]
-    return []
+        resolved.extend(tc for tc in tool_calls if isinstance(tc, Mapping))
+
+    tool_call_chunks = getattr(message_obj, "tool_call_chunks", None)
+    if isinstance(tool_call_chunks, list):
+        resolved.extend(tc for tc in tool_call_chunks if isinstance(tc, Mapping))
+
+    return resolved
+
+
+def _coerce_tool_args(candidate_args: Any) -> dict[str, Any]:
+    """Best-effort normalization of tool args from mappings or JSON strings."""
+    if isinstance(candidate_args, Mapping) and candidate_args:
+        return dict(candidate_args)
+    if isinstance(candidate_args, str):
+        text = candidate_args.strip()
+        if not text:
+            return {}
+        with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+            parsed = json.loads(text)
+            if isinstance(parsed, Mapping) and parsed:
+                return dict(parsed)
+    return {}
 
 
 def _resolve_tool_args(
@@ -285,8 +307,8 @@ def _resolve_tool_args(
 ) -> dict[str, Any]:
     """Resolve tool args from a stream block, falling back to message-level tool_calls."""
     block_args = block.get("args")
-    if isinstance(block_args, Mapping) and block_args:
-        return dict(block_args)
+    if resolved := _coerce_tool_args(block_args):
+        return resolved
 
     block_id = block.get("id")
     block_index = block.get("index")
@@ -297,16 +319,14 @@ def _resolve_tool_args(
             continue
         if block_index is not None and tool_call.get("index") not in {None, block_index}:
             continue
-        candidate_args = tool_call.get("args")
-        if isinstance(candidate_args, Mapping) and candidate_args:
-            return dict(candidate_args)
+        if resolved := _coerce_tool_args(tool_call.get("args")):
+            return resolved
 
     for tool_call in tool_calls:
         if tool_call.get("name") != tool_name:
             continue
-        candidate_args = tool_call.get("args")
-        if isinstance(candidate_args, Mapping) and candidate_args:
-            return dict(candidate_args)
+        if resolved := _coerce_tool_args(tool_call.get("args")):
+            return resolved
 
     return {}
 
@@ -545,6 +565,7 @@ class Gateway:
         accumulated = ""
         last_edit_time = time.monotonic()
         chars_since_edit = 0
+        last_display = THINKING_MESSAGE
         limit = channel.message_limit
         now_ts = time.time()
         queue_snapshot: dict[str, Any] = {
@@ -562,7 +583,7 @@ class Gateway:
 
         async def _stream_once(payload: dict[str, Any] | Command) -> bool:
             """Stream one graph pass. Returns True if any tool calls were seen."""
-            nonlocal accumulated, last_edit_time, chars_since_edit
+            nonlocal accumulated, last_edit_time, chars_since_edit, last_display
             tool_calls_seen = False
             chunk_progress: dict[str, str] = {}
             last_chunk_line: str | None = None
@@ -781,8 +802,9 @@ class Gateway:
                             or chars_since_edit >= self.streaming_config.buffer_threshold
                         ):
                             display = accumulated + CURSOR_INDICATOR
-                            if len(display) <= limit:
+                            if len(display) <= limit and display != last_display:
                                 await self._edit_redacted_message(channel, chat_id, msg_id, display)
+                                last_display = display
                             last_edit_time = time.monotonic()
                             chars_since_edit = 0
             finally:
@@ -876,7 +898,8 @@ class Gateway:
         queue_snapshot["final_text_preview"] = _safe_preview(response_text, limit=160)
 
         chunks = chunk_message(response_text, limit)
-        await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])
+        if chunks[0] != last_display:
+            await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])
         for extra_chunk in chunks[1:]:
             await self._send_redacted_message(channel, chat_id, extra_chunk)
 

@@ -401,6 +401,21 @@ class TestGatewayProgressFormatting:
             "command": "sudo apt-get install ripgrep"
         }
 
+    def test_resolve_tool_args_parses_json_from_tool_call_chunks(self):
+        block = {"type": "tool_call_chunk", "id": "call-1", "name": "execute", "args": ""}
+        tool_calls = [
+            {
+                "id": "call-1",
+                "name": "execute",
+                "args": '{"command": "sudo apt-get install ripgrep"}',
+                "index": 0,
+            }
+        ]
+
+        assert _resolve_tool_args(block, "execute", tool_calls) == {
+            "command": "sudo apt-get install ripgrep"
+        }
+
 
 class TestGatewayRedaction:
     @pytest.mark.asyncio
@@ -824,6 +839,51 @@ class TestGatewayRedaction:
 
         final_text = channel.edits[-1][2]
         assert "💻 execute\nDone." in final_text
+
+    @pytest.mark.asyncio
+    async def test_streaming_skips_duplicate_edits_for_unchanged_progress_text(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "execute", "args": {}}],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "execute", "args": {}}],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=0.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="run command")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edit_texts = [text for _, _, text in channel.edits]
+        assert edit_texts.count("💻 execute▌") == 1
 
     @pytest.mark.asyncio
     async def test_returns_pending_safety_review_when_graph_interrupts(self):
