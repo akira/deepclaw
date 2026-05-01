@@ -29,9 +29,13 @@ Use this when you want to keep the `deepclaw` regression dataset fresh with real
 - Venv Python: `/home/ubuntu/deepclaw/.venv/bin/python`
 - Env file: `~/.deepclaw/.env`
 - Dataset: `deepclaw`
+- Schema reference: `evals/EXAMPLE_SCHEMA.md` (canonical field list — read this before adding examples)
 - Harness: `evals/langsmith_regression.py`
+- Audit tool: `evals/dataset_audit.py`
+- Filter helpers: `evals/example_filters.py` (`matches_filters`, `filter_examples`)
 - Default baseline worktree: `/tmp/deepclaw-eval-baseline`
 - Default local results path: `/tmp/deepclaw-evals/results.json`
+- Default trace project for inner agent runs: `deepclaw-eval-target` (kept separate from Hermes/`default`)
 
 Load env for ad hoc scripts:
 
@@ -83,6 +87,8 @@ A trace is worth adding if:
 
 ### Dataset Shape
 
+`evals/EXAMPLE_SCHEMA.md` is the source of truth for output and metadata fields. New examples should populate the required fields (`label`, `requires_tool_call`, `category`) plus the strongly recommended ones (`expected_tool_names`, `must_succeed_first_pass`, `eval_mode`, `behavior_tags`, `side_effect_risk`) whenever they are well-defined.
+
 Inputs:
 
 ```json
@@ -97,7 +103,10 @@ Outputs:
   "label": "push-pr-no-tool",
   "expected_tool_names": ["execute"],
   "must_succeed_first_pass": true,
-  "category": "git"
+  "category": "git",
+  "eval_mode": "compliance",
+  "behavior_tags": ["no_tool_conversation"],
+  "side_effect_risk": "low"
 }
 ```
 
@@ -262,7 +271,17 @@ print({
 PY
 ```
 
-## Part 3: Run the Evals
+## Part 3: Audit Dataset Coverage
+
+Before extending the dataset or running a slice, sanity-check field coverage:
+
+```bash
+/home/ubuntu/deepclaw/.venv/bin/python evals/dataset_audit.py --dataset deepclaw
+```
+
+The audit prints a JSON summary of how many examples populate each field (category, eval_mode, behavior_tags, side_effect_risk, must_succeed_first_pass, expected_tool_names) plus value counts. Use it to spot uneven coverage before relying on filters.
+
+## Part 4: Run the Evals
 
 Standard command:
 
@@ -273,13 +292,37 @@ cd /home/ubuntu/deepclaw
   --repo /home/ubuntu/deepclaw \
   --baseline-commit origin/main \
   --baseline-worktree /tmp/deepclaw-eval-baseline \
+  --trace-project deepclaw-eval-target \
   --results-path /tmp/deepclaw-evals/results.json
 ```
 
+`--trace-project` controls where the inner agent target traces land. Default `deepclaw-eval-target` keeps eval traffic out of Hermes/`default`; override only when intentionally redirecting.
+
+### Run a slice
+
+The harness accepts repeatable filter flags backed by `evals/example_filters.py`:
+
+```bash
+/home/ubuntu/deepclaw/.venv/bin/python evals/langsmith_regression.py \
+  --dataset deepclaw \
+  --category memory-and-skills --category git \
+  --eval-mode compliance \
+  --behavior-tag no_tool_conversation \
+  --side-effect-risk low \
+  --example-limit 20
+```
+
+Other slicing flags:
+- `--example-id <id>` (repeatable) — run a specific example or set
+- `--example-limit N` — cap the slice size after filtering
+
+For programmatic use, import `matches_filters` / `filter_examples` from `evals.example_filters` directly.
+
 What the harness does:
 - refreshes or creates the baseline worktree
-- runs the dataset against the baseline checkout
-- runs the same dataset against the current checkout
+- runs the dataset (or filtered slice) against the baseline checkout
+- runs the same slice against the current checkout
+- routes inner target traces to `--trace-project` (separate from outer eval traces)
 - writes a local JSON summary
 - records LangSmith experiment URLs
 

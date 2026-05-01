@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_module():
@@ -162,6 +163,7 @@ def test_run_case_invokes_repo_worker_file(monkeypatch):
         repo_path="/tmp/repo",
         user_text="Install ruff",
         model_name="openai:gpt-5.3-codex",
+        trace_project="deepclaw-eval-target",
     )
 
     assert result == {"tool_calls_seen": True}
@@ -177,6 +179,8 @@ def test_run_case_invokes_repo_worker_file(monkeypatch):
             "openai:gpt-5.3-codex",
             "--workspace-env",
             module.WORKSPACE_ENV,
+            "--trace-project",
+            "deepclaw-eval-target",
         ]
     ]
 
@@ -184,7 +188,8 @@ def test_run_case_invokes_repo_worker_file(monkeypatch):
 def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
     module = _load_module()
 
-    def fake_run_case(*, repo_path, user_text, model_name):
+    def fake_run_case(*, repo_path, user_text, model_name, trace_project):
+        assert trace_project == "deepclaw-eval-target"
         return {
             "tool_calls_seen": True,
             "tool_names": ["execute"],
@@ -253,6 +258,7 @@ def test_run_eval_supports_dict_rows_and_passes_metadata(monkeypatch):
         model_name="openai:gpt-5.3-codex",
         baseline_commit="origin/main",
         run_kind="post",
+        trace_project="deepclaw-eval-target",
     )
 
     assert evaluate_calls == [
@@ -334,3 +340,105 @@ def test_ensure_baseline_worktree_refreshes_existing_path(monkeypatch, tmp_path)
         (("git", "reset", "--hard", "origin/main"), worktree, True),
         (("git", "clean", "-fd"), worktree, True),
     ]
+
+
+def test_resolve_examples_filters_by_category_and_eval_mode():
+    module = _load_module()
+
+    examples = [
+        SimpleNamespace(
+            id="ex-1",
+            outputs={
+                "category": "memory-and-skills",
+                "eval_mode": "compliance",
+                "behavior_tags": ["memory_persistence"],
+                "side_effect_risk": "low",
+            },
+        ),
+        SimpleNamespace(
+            id="ex-2",
+            outputs={
+                "category": "codebase-inspection",
+                "eval_mode": "compliance",
+                "behavior_tags": ["read_only_inspection"],
+                "side_effect_risk": "low",
+            },
+        ),
+        SimpleNamespace(
+            id="ex-3",
+            outputs={
+                "category": "memory-and-skills",
+                "eval_mode": "live",
+                "behavior_tags": ["memory_persistence"],
+                "side_effect_risk": "medium",
+            },
+        ),
+    ]
+
+    client = SimpleNamespace(
+        list_examples=lambda dataset_name, limit: examples,
+    )
+
+    result = module.resolve_examples(
+        client,
+        dataset_name="deepclaw",
+        example_ids=None,
+        example_limit=None,
+        categories=["memory-and-skills"],
+        eval_modes=["compliance"],
+        behavior_tags=None,
+        side_effect_risks=None,
+    )
+
+    assert [example.id for example in result] == ["ex-1"]
+
+
+def test_resolve_examples_filters_by_behavior_tag_and_side_effect_risk_before_limit():
+    module = _load_module()
+
+    examples = [
+        SimpleNamespace(
+            id="ex-1",
+            outputs={
+                "category": "memory-and-skills",
+                "eval_mode": "compliance",
+                "behavior_tags": ["memory_persistence"],
+                "side_effect_risk": "low",
+            },
+        ),
+        SimpleNamespace(
+            id="ex-2",
+            outputs={
+                "category": "memory-and-skills",
+                "eval_mode": "compliance",
+                "behavior_tags": ["memory_persistence", "user_preference"],
+                "side_effect_risk": "low",
+            },
+        ),
+        SimpleNamespace(
+            id="ex-3",
+            outputs={
+                "category": "memory-and-skills",
+                "eval_mode": "compliance",
+                "behavior_tags": ["memory_persistence"],
+                "side_effect_risk": "high",
+            },
+        ),
+    ]
+
+    client = SimpleNamespace(
+        list_examples=lambda dataset_name, limit: examples,
+    )
+
+    result = module.resolve_examples(
+        client,
+        dataset_name="deepclaw",
+        example_ids=None,
+        example_limit=1,
+        categories=None,
+        eval_modes=None,
+        behavior_tags=["memory_persistence"],
+        side_effect_risks=["low"],
+    )
+
+    assert [example.id for example in result] == ["ex-1"]
