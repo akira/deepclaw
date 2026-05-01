@@ -460,20 +460,19 @@ class TestSafetyMiddlewareIntegration:
     async def test_session_approved_warning_is_not_reprompted_for_same_thread(
         self, mock_interrupt, middleware
     ):
-        from deepclaw import middleware as middleware_mod
-
-        middleware_mod._THREAD_APPROVALS.clear()
         mock_interrupt.return_value = {"type": "approve", "scope": "session"}
 
         first_request = self._make_request(
             "execute",
             {"command": "python3 - <<'PY'\nprint('one')\nPY"},
+            state={"approval_state": {"approved_keys": []}},
             thread_id="thread-session",
         )
         second_request = self._make_request(
             "execute",
             {"command": "python3 - <<'PY'\nprint('two')\nPY"},
             call_id="call_2",
+            state={"approval_state": {"approved_keys": ["dangerous:code_injection"]}},
             thread_id="thread-session",
         )
         first_expected = ToolMessage(content="ok-1", name="execute", tool_call_id="call_1")
@@ -481,11 +480,8 @@ class TestSafetyMiddlewareIntegration:
         first_handler = AsyncMock(return_value=first_expected)
         second_handler = AsyncMock(return_value=second_expected)
 
-        try:
-            first_result = await middleware.awrap_tool_call(first_request, first_handler)
-            second_result = await middleware.awrap_tool_call(second_request, second_handler)
-        finally:
-            middleware_mod._THREAD_APPROVALS.clear()
+        first_result = await middleware.awrap_tool_call(first_request, first_handler)
+        second_result = await middleware.awrap_tool_call(second_request, second_handler)
 
         assert first_result == first_expected
         assert second_result == second_expected

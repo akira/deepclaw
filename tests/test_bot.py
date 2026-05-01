@@ -851,6 +851,7 @@ class TestGatewayRedaction:
             "type": "safety_review",
             "tool": "execute",
             "command": "python -c 'print(1)'",
+            "approval_keys": [],
             "warning": "Inline Python execution",
             "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
         }
@@ -1997,18 +1998,23 @@ class TestSafetyApprovalCommands:
                 "thread_id": "thread-1",
                 "type": "safety_review",
                 "message": "Approve or deny?",
+                "approval_keys": ["dangerous:code_injection"],
             }
         }
         gateway = MagicMock()
         gateway.resume_interrupt = AsyncMock(return_value=None)
         ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
 
-        await cmd_approve(update, ctx)
+        with patch(
+            "deepclaw.channels.telegram.aadd_thread_approved_keys", new=AsyncMock()
+        ) as mock_store:
+            await cmd_approve(update, ctx)
 
         gateway.resume_interrupt.assert_awaited_once()
         _, kwargs = gateway.resume_interrupt.await_args
         assert kwargs["thread_id"] == "thread-1"
         assert kwargs["decision"] == {"type": "approve", "scope": "once"}
+        mock_store.assert_not_awaited()
         assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
         update.message.reply_text.assert_not_called()
 
@@ -2021,16 +2027,22 @@ class TestSafetyApprovalCommands:
                 "thread_id": "thread-1",
                 "type": "safety_review",
                 "message": "Approve or deny?",
+                "approval_keys": ["dangerous:code_injection"],
             }
         }
         gateway = MagicMock()
         gateway.resume_interrupt = AsyncMock(return_value=None)
         ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
 
-        await cmd_approve(update, ctx)
+        with patch(
+            "deepclaw.channels.telegram.aadd_thread_approved_keys",
+            new=AsyncMock(return_value=True),
+        ) as mock_store:
+            await cmd_approve(update, ctx)
 
         _, kwargs = gateway.resume_interrupt.await_args
         assert kwargs["decision"] == {"type": "approve", "scope": "session"}
+        mock_store.assert_awaited_once_with("thread-1", ["dangerous:code_injection"])
 
     @pytest.mark.asyncio
     async def test_approve_surfaces_follow_up_pending_review_with_buttons(self):

@@ -15,6 +15,7 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command, interrupt
 
+from deepclaw.approval_state import APPROVAL_STATE_KEY
 from deepclaw.config import load_config
 from deepclaw.safety import (
     check_command,
@@ -25,8 +26,6 @@ from deepclaw.safety import (
 )
 
 logger = logging.getLogger(__name__)
-
-_THREAD_APPROVALS: dict[str, set[str]] = {}
 
 _USER_INTENT_BASH_RE = re.compile(
     r"\b(run|execute|command|cmd)\b.*\bbash\b|\bbash\b.*\b(run|execute|command|cmd)\b",
@@ -150,19 +149,25 @@ def _warning_keys(
     return list(dict.fromkeys(keys))
 
 
-def _is_thread_approved(thread_id: str | None, warning_keys: list[str]) -> bool:
+def _approved_warning_keys_from_state(state: Mapping[str, Any] | None) -> set[str]:
+    """Return session-approved warning keys persisted in LangGraph thread state."""
+    if not state:
+        return set()
+    approval_state = state.get(APPROVAL_STATE_KEY)
+    if not isinstance(approval_state, Mapping):
+        return set()
+    approved_keys = approval_state.get("approved_keys")
+    if not isinstance(approved_keys, list):
+        return set()
+    return {str(key) for key in approved_keys if str(key)}
+
+
+def _is_thread_approved(state: Mapping[str, Any] | None, warning_keys: list[str]) -> bool:
     """Return True when all warning keys were previously approved for this thread."""
-    if not thread_id or not warning_keys:
+    if not warning_keys:
         return False
-    approved = _THREAD_APPROVALS.get(thread_id, set())
+    approved = _approved_warning_keys_from_state(state)
     return all(key in approved for key in warning_keys)
-
-
-def _approve_thread_warning_keys(thread_id: str | None, warning_keys: list[str]) -> None:
-    """Persist warning approvals for the current thread/session."""
-    if not thread_id or not warning_keys:
-        return
-    _THREAD_APPROVALS.setdefault(thread_id, set()).update(warning_keys)
 
 
 def _extract_thread_id(request: Any) -> str | None:
@@ -221,9 +226,9 @@ def _check_execute(
     if not warnings:
         return None
 
-    if _is_thread_approved(thread_id, warning_keys):
+    if _is_thread_approved(state, warning_keys):
         logger.info(
-            "Skipping approval for thread %s; warnings already approved: %s",
+            "Skipping approval for thread %s; warnings already approved in checkpoint state: %s",
             thread_id,
             warning_keys,
         )
@@ -259,8 +264,6 @@ def _check_execute(
     )
 
     if isinstance(decision, dict) and decision.get("type") == "approve":
-        if decision.get("scope") == "session":
-            _approve_thread_warning_keys(thread_id, warning_keys)
         return None  # Proceed with execution
 
     reason = "Command rejected by user"

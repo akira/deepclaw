@@ -29,6 +29,7 @@ from telegram.ext import (
 
 from deepclaw import agent as agent_module
 from deepclaw.agent import create_agent, create_checkpointer
+from deepclaw.approval_state import aadd_thread_approved_keys
 from deepclaw.auth import (
     REJECTION_MESSAGE,
     is_user_allowed,
@@ -1102,6 +1103,11 @@ async def _resume_pending_interrupt(
     channel = TelegramChannel(update, context)
     gateway: Gateway = context.bot_data[GATEWAY_KEY]
     try:
+        if decision.get("type") == "approve" and decision.get("scope") == "session":
+            await aadd_thread_approved_keys(
+                pending["thread_id"],
+                pending.get("approval_keys", []),
+            )
         next_pending = await gateway.resume_interrupt(
             channel,
             chat_id=chat_id,

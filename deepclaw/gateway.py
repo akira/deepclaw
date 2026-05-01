@@ -148,12 +148,14 @@ def _extract_pending_interrupt(state: Any, thread_id: str) -> dict[str, Any] | N
             continue
         if value.get("type") != "safety_review":
             continue
+        approval_keys = value.get("approval_keys")
         return {
             "id": getattr(interrupt, "id", None),
             "thread_id": thread_id,
             "type": value.get("type"),
             "tool": value.get("tool"),
             "command": value.get("command"),
+            "approval_keys": list(approval_keys) if isinstance(approval_keys, list) else [],
             "warning": value.get("warning"),
             "message": value.get("message") or "Safety review required.",
         }
