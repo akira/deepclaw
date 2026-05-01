@@ -138,7 +138,7 @@ class TestCreateAgentBaseten:
             captured.update(kwargs)
             return "agent"
 
-        monkeypatch.setattr(agent_mod, "_setup_auth", lambda: None)
+
         monkeypatch.setattr(agent_mod, "_load_soul", lambda: "soul")
         monkeypatch.setattr(agent_mod, "_setup_memory", lambda: ["/memory/AGENTS.md"])
         monkeypatch.setattr(agent_mod, "_setup_skills", lambda: ["/skills"])
