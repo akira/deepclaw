@@ -851,6 +851,7 @@ class TestGatewayRedaction:
             "type": "safety_review",
             "tool": "execute",
             "command": "python -c 'print(1)'",
+            "approval_keys": [],
             "warning": "Inline Python execution",
             "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
         }
@@ -867,7 +868,7 @@ class TestGatewayRedaction:
         assert state_config["metadata"]["channel"] == "telegram"
         assert "updated_at" in state_config["metadata"]
         assert channel.edits[-1][2].endswith(
-            "Use /approve to continue or /deny <reason> to reject."
+            "Use /approve, /approve session, or /deny <reason> to respond."
         )
 
     @pytest.mark.asyncio
@@ -1893,7 +1894,7 @@ class TestCmdRetry:
         await cmd_retry(update, ctx)
 
         update.message.reply_text.assert_called_once_with(
-            "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
+            "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
         )
 
     @pytest.mark.asyncio
@@ -1953,16 +1954,18 @@ class TestCmdStop:
 
 
 class TestSafetyApprovalCommands:
-    def test_pending_approval_markup_has_approve_and_deny_buttons(self):
+    def test_pending_approval_markup_has_once_session_and_deny_buttons(self):
         markup = _pending_approval_markup("interrupt-1")
 
         assert isinstance(markup, InlineKeyboardMarkup)
         rows = markup.inline_keyboard
         assert len(rows) == 1
-        assert rows[0][0].text == "Approve"
-        assert rows[0][0].callback_data == "safety:approve:interrupt-1"
-        assert rows[0][1].text == "Deny"
-        assert rows[0][1].callback_data == "safety:deny:interrupt-1"
+        assert rows[0][0].text == "Approve once"
+        assert rows[0][0].callback_data == "safety:approve_once:interrupt-1"
+        assert rows[0][1].text == "Approve session"
+        assert rows[0][1].callback_data == "safety:approve_session:interrupt-1"
+        assert rows[0][2].text == "Deny"
+        assert rows[0][2].callback_data == "safety:deny:interrupt-1"
 
     @pytest.mark.asyncio
     async def test_approve_without_pending_request(self):
@@ -1995,20 +1998,89 @@ class TestSafetyApprovalCommands:
                 "thread_id": "thread-1",
                 "type": "safety_review",
                 "message": "Approve or deny?",
+                "approval_keys": ["dangerous:code_injection"],
             }
         }
         gateway = MagicMock()
         gateway.resume_interrupt = AsyncMock(return_value=None)
         ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
 
-        await cmd_approve(update, ctx)
+        with patch(
+            "deepclaw.channels.telegram.aadd_thread_approved_keys", new=AsyncMock()
+        ) as mock_store:
+            await cmd_approve(update, ctx)
 
         gateway.resume_interrupt.assert_awaited_once()
         _, kwargs = gateway.resume_interrupt.await_args
         assert kwargs["thread_id"] == "thread-1"
-        assert kwargs["decision"] == {"type": "approve"}
+        assert kwargs["decision"] == {"type": "approve", "scope": "once"}
+        mock_store.assert_not_awaited()
         assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
         update.message.reply_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_approve_session_resumes_pending_interrupt_with_session_scope(self):
+        update = _make_slash_update(text="/approve session")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+                "approval_keys": ["dangerous:code_injection"],
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        with patch(
+            "deepclaw.channels.telegram.aadd_thread_approved_keys",
+            new=AsyncMock(return_value=True),
+        ) as mock_store:
+            await cmd_approve(update, ctx)
+
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["decision"] == {"type": "approve", "scope": "session"}
+        mock_store.assert_awaited_once_with("thread-1", ["dangerous:code_injection"])
+
+    @pytest.mark.asyncio
+    async def test_approve_surfaces_follow_up_pending_review_with_buttons(self):
+        update = _make_slash_update(text="/approve")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        next_pending = {
+            "id": "interrupt-2",
+            "thread_id": "thread-1",
+            "type": "safety_review",
+            "message": "Need another approval",
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=next_pending)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approve(update, ctx)
+
+        assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"]["id"] == "interrupt-2"
+        update.message.reply_text.assert_awaited_once()
+        _, kwargs = update.message.reply_text.await_args
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][1].callback_data
+            == "safety:approve_session:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
+        )
 
     @pytest.mark.asyncio
     async def test_approve_run_can_be_stopped_while_resume_interrupt_is_in_flight(self):
@@ -2068,7 +2140,7 @@ class TestSafetyApprovalCommands:
 
     @pytest.mark.asyncio
     async def test_callback_approve_resumes_pending_interrupt_and_clears_buttons(self):
-        update = _make_callback_update(data="safety:approve:interrupt-1")
+        update = _make_callback_update(data="safety:approve_once:interrupt-1")
         pending = {
             "1": {
                 "id": "interrupt-1",
@@ -2086,9 +2158,67 @@ class TestSafetyApprovalCommands:
         update.callback_query.answer.assert_awaited_once()
         gateway.resume_interrupt.assert_awaited_once()
         _, kwargs = gateway.resume_interrupt.await_args
-        assert kwargs["decision"] == {"type": "approve"}
+        assert kwargs["decision"] == {"type": "approve", "scope": "once"}
         update.callback_query.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
         assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+
+    @pytest.mark.asyncio
+    async def test_callback_approve_session_resumes_pending_interrupt_with_session_scope(self):
+        update = _make_callback_update(data="safety:approve_session:interrupt-1")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approval_callback(update, ctx)
+
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["decision"] == {"type": "approve", "scope": "session"}
+
+    @pytest.mark.asyncio
+    async def test_callback_approve_surfaces_follow_up_pending_review_with_buttons(self):
+        update = _make_callback_update(data="safety:approve_once:interrupt-1")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        next_pending = {
+            "id": "interrupt-2",
+            "thread_id": "thread-1",
+            "type": "safety_review",
+            "message": "Need another approval",
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=next_pending)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_approval_callback(update, ctx)
+
+        assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"]["id"] == "interrupt-2"
+        update.callback_query.message.reply_text.assert_awaited_once()
+        _, kwargs = update.callback_query.message.reply_text.await_args
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][1].callback_data
+            == "safety:approve_session:interrupt-2"
+        )
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
+        )
 
     @pytest.mark.asyncio
     async def test_callback_deny_rejects_pending_interrupt(self):
@@ -2115,7 +2245,7 @@ class TestSafetyApprovalCommands:
 
     @pytest.mark.asyncio
     async def test_callback_stale_button_does_not_resume_newer_pending_interrupt(self):
-        update = _make_callback_update(data="safety:approve:old-interrupt")
+        update = _make_callback_update(data="safety:approve_once:old-interrupt")
         pending = {
             "1": {
                 "id": "interrupt-1",
@@ -2137,7 +2267,7 @@ class TestSafetyApprovalCommands:
 
     @pytest.mark.asyncio
     async def test_callback_keeps_buttons_when_another_active_run_blocks_resume(self):
-        update = _make_callback_update(data="safety:approve:interrupt-1")
+        update = _make_callback_update(data="safety:approve_once:interrupt-1")
         pending = {
             "1": {
                 "id": "interrupt-1",
@@ -2192,7 +2322,7 @@ class TestSafetyApprovalCommands:
         _, kwargs = update.message.reply_text.await_args
         assert (
             kwargs["reply_markup"].inline_keyboard[0][0].callback_data
-            == "safety:approve:interrupt-1"
+            == "safety:approve_once:interrupt-1"
         )
 
     @pytest.mark.asyncio
@@ -2218,7 +2348,7 @@ class TestSafetyApprovalCommands:
 
         gateway.handle_message.assert_not_awaited()
         update.message.reply_text.assert_called_once_with(
-            "A safety approval is pending. Use /approve to continue or /deny <reason> to reject it."
+            "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
         )
 
 
