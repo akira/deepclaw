@@ -362,9 +362,21 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "discover_tools", list)
         monkeypatch.setattr(agent_mod, "DeepClawLocalShellBackend", FakeShellBackend)
         monkeypatch.setattr(agent_mod, "FilesystemBackend", FakeFilesystemBackend)
+        compact_tool_calls = []
+
+        def fake_create_summarization_tool_middleware(model, backend):
+            compact_tool_calls.append((model, backend))
+            return ("compact-tool", model, backend)
+
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(
+            agent_mod,
+            "create_summarization_tool_middleware",
+            fake_create_summarization_tool_middleware,
+            raising=False,
+        )
         monkeypatch.setattr(
             agent_mod,
             "_build_deepclaw_subagents",
@@ -399,7 +411,12 @@ class TestCreateAgent:
             isinstance(middleware, agent_mod.LocalContextMiddleware)
             for middleware in captured["middleware"]
         )
-        assert not any(isinstance(middleware, tuple) for middleware in captured["middleware"])
+        assert compact_tool_calls == [("test:model", captured["backend"])]
+        assert ("compact-tool", "test:model", captured["backend"]) in captured["middleware"]
+        assert not any(
+            isinstance(middleware, tuple) and middleware[:1] != ("compact-tool",)
+            for middleware in captured["middleware"]
+        )
         assert captured["subagents"] == [("subagents", "test:model", captured["backend"])]
 
     def test_includes_openai_execution_guidance_for_gpt_models(self, tmp_path, monkeypatch):
@@ -434,6 +451,12 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(
+            agent_mod,
+            "create_summarization_tool_middleware",
+            lambda model, backend: ("compact-tool", model, backend),
+            raising=False,
+        )
         monkeypatch.setattr(agent_mod, "_build_deepclaw_subagents", lambda *args, **kwargs: [])
 
         config = DeepClawConfig(model="openai:gpt-5.3-codex", workspace_root=str(tmp_path))
@@ -475,6 +498,12 @@ class TestCreateAgent:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(
+            agent_mod,
+            "create_summarization_tool_middleware",
+            lambda model, backend: ("compact-tool", model, backend),
+            raising=False,
+        )
         monkeypatch.setattr(agent_mod, "_build_deepclaw_subagents", lambda *args, **kwargs: [])
 
         config = DeepClawConfig(model="anthropic:claude-sonnet-4-6", workspace_root=str(tmp_path))

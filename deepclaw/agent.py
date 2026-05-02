@@ -16,6 +16,7 @@ from deepagents.backends.protocol import ExecuteResponse
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+from deepagents.middleware.summarization import create_summarization_tool_middleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
@@ -493,6 +494,11 @@ def create_agent(config, checkpointer):
         middleware.append(LocalContextMiddleware(backend=backend))
     else:
         logger.warning("Local context middleware skipped; backend cannot execute commands")
+
+    # Match deepagents CLI manual compaction behavior by exposing the upstream
+    # compact_conversation tool in addition to DeepAgents' default auto
+    # summarization middleware.
+    middleware.append(create_summarization_tool_middleware(agent_model, composite_backend))
 
     # System prompt from SOUL.md, always followed by tool-use enforcement.
     # Add stronger execution guidance for GPT/Codex-family models, which are

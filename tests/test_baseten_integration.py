@@ -147,6 +147,12 @@ class TestCreateAgentBaseten:
         monkeypatch.setattr(agent_mod, "CompositeBackend", FakeCompositeBackend)
         monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
         monkeypatch.setattr(agent_mod, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(
+            agent_mod,
+            "create_summarization_tool_middleware",
+            lambda model, backend: ("compact-tool", model, backend),
+            raising=False,
+        )
         monkeypatch.setattr(agent_mod, "resolve_provider_model", lambda config: fake_model)
 
         config = DeepClawConfig(
