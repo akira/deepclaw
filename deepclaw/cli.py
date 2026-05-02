@@ -54,37 +54,6 @@ def _handle_service_command(args: list[str]) -> None:
         raise SystemExit(1)
 
 
-def _handle_login_command() -> None:
-    """Handle 'deepclaw login' — OAuth PKCE flow for Claude Pro/Max."""
-    from deepclaw.oauth import login, resolve_token
-
-    # Check if already authenticated
-    token, is_oauth = resolve_token()
-    if token and is_oauth:
-        print("Already authenticated with OAuth credentials.")  # noqa: T201
-        answer = input("Re-authenticate? [y/N] ").strip().lower()
-        if answer != "y":
-            return
-
-    result = login()
-    if result:
-        print("Login successful. DeepClaw will use your Claude subscription.")  # noqa: T201
-    else:
-        print("Login failed.")  # noqa: T201
-        raise SystemExit(1)
-
-
-def _handle_logout_command() -> None:
-    """Handle 'deepclaw logout' — remove saved OAuth credentials."""
-    from deepclaw.oauth import _OAUTH_FILE
-
-    if _OAUTH_FILE.is_file():
-        _OAUTH_FILE.unlink()
-        print("OAuth credentials removed.")  # noqa: T201
-    else:
-        print("No OAuth credentials found.")  # noqa: T201
-
-
 def main() -> None:
     """Entry point: start the Telegram bot with long-polling."""
     args = sys.argv[1:]
@@ -93,12 +62,6 @@ def main() -> None:
         return
     if args and args[0] == "doctor":
         _handle_doctor_command()
-        return
-    if args and args[0] == "login":
-        _handle_login_command()
-        return
-    if args and args[0] == "logout":
-        _handle_logout_command()
         return
 
     config = load_config()

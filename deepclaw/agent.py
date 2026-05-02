@@ -29,7 +29,6 @@ from deepclaw.local_context import (
     LocalContextMiddleware,
 )
 from deepclaw.middleware import SafetyMiddleware
-from deepclaw.oauth import resolve_token
 from deepclaw.safety import sanitize_child_command_env
 from deepclaw.subagents import DEFAULT_SUBAGENTS
 from deepclaw.tools import discover_tools
@@ -587,19 +586,6 @@ def create_checkpointer():
     return AsyncSqliteSaver.from_conn_string(str(CHECKPOINTER_DB_PATH))
 
 
-def _setup_auth() -> None:
-    """Resolve OAuth/API credentials and set ANTHROPIC_API_KEY for the SDK."""
-    token, is_oauth = resolve_token()
-    if not token:
-        return
-
-    os.environ["ANTHROPIC_API_KEY"] = token
-    if is_oauth:
-        logger.info("Using OAuth token for authentication")
-    else:
-        logger.info("Using API key for authentication")
-
-
 def _filesystem_backend(root_dir: Path | None = None, *, virtual_mode: bool = False):
     """Create a filesystem backend while tolerating SDK constructor drift."""
     kwargs = {}
@@ -813,7 +799,6 @@ def _patched_deepagents_summarization_factory():
 
 def create_agent(config, checkpointer):
     """Create a DeepAgents agent with the given config and checkpointer."""
-    _setup_auth()
     backend = _shell_backend(config)
     composite_backend = _composite_backend(backend)
     agent_model = resolve_provider_model(config)
