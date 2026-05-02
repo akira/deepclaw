@@ -446,7 +446,7 @@ class TestGatewayProgressFormatting:
             {
                 "id": "call-1",
                 "name": "read_file",
-                "args": "{\"path\": \"/home/ubuntu/deepclaw/README.md\"}",
+                "args": '{"path": "/home/ubuntu/deepclaw/README.md"}',
             }
         ]
 
