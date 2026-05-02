@@ -165,6 +165,21 @@ You should see `Terminal compression: rtk is available`.
 
 If you run DeepClaw as a systemd user service, make sure the service `PATH` includes the RTK install location (commonly `~/.local/bin`), or `/doctor` will report that RTK is not installed even if it works in your interactive shell.
 
+## Running the Compaction Regression Eval
+
+The compaction regression harness lives at `evals/compaction_regression.py`. It lets you seed the LangSmith dataset used for compaction handoff cases and rerun the regression suite against the current branch.
+
+```bash
+# Create or update the dataset
+/home/ubuntu/deepclaw/.venv/bin/python evals/compaction_regression.py create-dataset
+
+# Run the eval (loads ~/.deepclaw/.env for LangSmith credentials)
+/home/ubuntu/deepclaw/.venv/bin/python evals/compaction_regression.py run \
+  --dataset deepclaw-compaction-regressions \
+  --experiment-prefix deepclaw-compaction \
+  --ensure-dataset
+```
+
 ## Running as a Daemon
 
 For long-running deployment on macOS (launchd) or Linux (systemd):

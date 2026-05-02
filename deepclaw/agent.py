@@ -454,6 +454,8 @@ def _composite_backend(default_backend):
 
 def _build_deepclaw_subagents(model: str, backend) -> list[dict]:
     """Build production subagent specs without DeepClaw-specific compaction hooks."""
+    # Preserve the upstream-style signature for future parity hooks even though
+    # the current implementation does not need these values directly.
     _ = (model, backend)
     subagents: list[dict] = [copy.deepcopy(GENERAL_PURPOSE_SUBAGENT)]
     subagents.extend(copy.deepcopy(spec) for spec in DEFAULT_SUBAGENTS)
