@@ -57,6 +57,7 @@ from deepclaw.gateway import (
     Gateway,
     _append_progress_history,
     _append_progress_line,
+    _extract_message_tool_calls,
     _format_tool_progress_line,
     _looks_like_false_completion,
     _looks_like_memory_request,
@@ -399,6 +400,58 @@ class TestGatewayProgressFormatting:
 
         assert _resolve_tool_args(block, "execute", tool_calls) == {
             "command": "sudo apt-get install ripgrep"
+        }
+
+    def test_resolve_tool_args_parses_json_from_tool_call_chunks(self):
+        block = {"type": "tool_call_chunk", "id": "call-1", "name": "execute", "args": ""}
+        tool_calls = [
+            {
+                "id": "call-1",
+                "name": "execute",
+                "args": '{"command": "sudo apt-get install ripgrep"}',
+                "index": 0,
+            }
+        ]
+
+        assert _resolve_tool_args(block, "execute", tool_calls) == {
+            "command": "sudo apt-get install ripgrep"
+        }
+
+    def test_extract_message_tool_calls_includes_tool_call_chunks(self):
+        message = SimpleNamespace(
+            tool_calls=[{"id": "call-1", "name": "read_file", "args": {}}],
+            tool_call_chunks=[
+                SimpleNamespace(
+                    id="call-1",
+                    name="read_file",
+                    args='{"path": "/home/ubuntu/deepclaw/README.md"}',
+                    index=0,
+                )
+            ],
+        )
+
+        assert _extract_message_tool_calls(message) == [
+            {"id": "call-1", "name": "read_file", "args": {}},
+            {
+                "id": "call-1",
+                "name": "read_file",
+                "args": '{"path": "/home/ubuntu/deepclaw/README.md"}',
+                "index": 0,
+            },
+        ]
+
+    def test_resolve_tool_args_parses_json_string_from_tool_call_chunks(self):
+        block = {"type": "tool_call_chunk", "id": "call-1", "name": "read_file", "args": ""}
+        tool_calls = [
+            {
+                "id": "call-1",
+                "name": "read_file",
+                "args": '{"path": "/home/ubuntu/deepclaw/README.md"}',
+            }
+        ]
+
+        assert _resolve_tool_args(block, "read_file", tool_calls) == {
+            "path": "/home/ubuntu/deepclaw/README.md"
         }
 
 
@@ -795,6 +848,46 @@ class TestGatewayRedaction:
         assert snapshot["progress_lines"] == ["💻 execute"]
 
     @pytest.mark.asyncio
+    async def test_streaming_does_not_warn_for_empty_tool_call_chunks(self, monkeypatch):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "read_file", "args": {}}],
+                        tool_call_chunks=[
+                            SimpleNamespace(id="call-1", name="read_file", args="", index=0)
+                        ],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "read_file",
+                                "args": "",
+                                "index": 0,
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="read file")
+        warnings: list[str] = []
+
+        def _capture_warning(msg, *args, **_kwargs):
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr("deepclaw.gateway.logger.warning", _capture_warning)
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert warnings == []
+
+    @pytest.mark.asyncio
     async def test_streaming_inserts_newline_between_tool_progress_and_text(self):
         agent = _FakeStreamingAgent(
             [
@@ -824,6 +917,51 @@ class TestGatewayRedaction:
 
         final_text = channel.edits[-1][2]
         assert "💻 execute\nDone." in final_text
+
+    @pytest.mark.asyncio
+    async def test_streaming_skips_duplicate_edits_for_unchanged_progress_text(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "execute", "args": {}}],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+                (
+                    SimpleNamespace(
+                        tool_calls=[{"id": "call-1", "name": "execute", "args": {}}],
+                        content_blocks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": "",
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=0.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="run command")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edit_texts = [text for _, _, text in channel.edits]
+        assert edit_texts.count("💻 execute▌") == 1
 
     @pytest.mark.asyncio
     async def test_returns_pending_safety_review_when_graph_interrupts(self):
