@@ -271,6 +271,21 @@ def _emit_progress_line(
     return accumulated, delta
 
 
+def _coerce_tool_args(candidate_args: Any) -> dict[str, Any]:
+    """Normalize streamed tool args from mappings or JSON strings."""
+    if isinstance(candidate_args, Mapping) and candidate_args:
+        return dict(candidate_args)
+    if isinstance(candidate_args, str):
+        text = candidate_args.strip()
+        if not text:
+            return {}
+        with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+            parsed = json.loads(text)
+            if isinstance(parsed, Mapping) and parsed:
+                return dict(parsed)
+    return {}
+
+
 def _extract_message_tool_calls(message_obj: Any) -> list[Mapping[str, Any]]:
     """Return structured tool calls attached to a streamed message object, if any."""
     resolved: list[Mapping[str, Any]] = []
@@ -280,7 +295,17 @@ def _extract_message_tool_calls(message_obj: Any) -> list[Mapping[str, Any]]:
 
     tool_call_chunks = getattr(message_obj, "tool_call_chunks", None)
     if isinstance(tool_call_chunks, list):
-        resolved.extend(tc for tc in tool_call_chunks if isinstance(tc, Mapping))
+        for chunk in tool_call_chunks:
+            if isinstance(chunk, Mapping):
+                resolved.append(chunk)
+                continue
+            chunk_data = {
+                key: getattr(chunk, key)
+                for key in ("id", "name", "args", "index")
+                if hasattr(chunk, key)
+            }
+            if chunk_data:
+                resolved.append(chunk_data)
 
     return resolved
 
@@ -306,8 +331,7 @@ def _resolve_tool_args(
     tool_calls: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Resolve tool args from a stream block, falling back to message-level tool_calls."""
-    block_args = block.get("args")
-    if resolved := _coerce_tool_args(block_args):
+    if resolved := _coerce_tool_args(block.get("args")):
         return resolved
 
     block_id = block.get("id")
@@ -689,7 +713,7 @@ class Gateway:
                                     redact_secrets(str(tool_args)[:200]) if tool_args else ""
                                 )
                                 logger.info("Tool call [%s]: %s", tool_name, args_preview)
-                                if not tool_args:
+                                if not tool_args and block_type != "tool_call_chunk":
                                     block_preview = redact_secrets(str(dict(block))[:300])
                                     tool_calls_preview = redact_secrets(
                                         str(message_tool_calls)[:500]
