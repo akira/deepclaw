@@ -1625,6 +1625,8 @@ async def post_init(application: Application) -> None:
             agent=agent,
             checkpointer=application.bot_data["checkpointer_resolved"],
             channels={"telegram": bot_channel},
+            max_turns=config.max_turns,
+            run_timeout=config.gateway_timeout,
         )
         application.bot_data[SCHEDULER_KEY] = scheduler
         await scheduler.start()

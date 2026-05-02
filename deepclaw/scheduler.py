@@ -135,12 +135,21 @@ class Scheduler:
     """
 
     def __init__(
-        self, jobs_path: Path, agent, checkpointer=None, channels: dict | None = None
+        self,
+        jobs_path: Path,
+        agent,
+        checkpointer=None,
+        channels: dict | None = None,
+        *,
+        max_turns: int = 200,
+        run_timeout: float = 900,
     ) -> None:
         self._jobs_path = jobs_path
         self._agent = agent
         self._channels: dict = channels or {}  # name -> Channel instance
         self._task: asyncio.Task | None = None
+        self._max_turns = max(0, int(max_turns))
+        self._run_timeout = None if run_timeout <= 0 else float(run_timeout)
 
     def update_agent(self, agent) -> None:
         """Swap the agent used for cron job invocations (e.g. after a /model switch)."""
@@ -208,9 +217,11 @@ class Scheduler:
         """Invoke the agent with the job's prompt and deliver the result."""
         thread_id = f"cron-{job.id}-{uuid.uuid4()}"
         config = {"configurable": {"thread_id": thread_id}}
+        if self._max_turns > 0:
+            config["recursion_limit"] = self._max_turns
 
         try:
-            result = await self._agent.ainvoke(
+            invoke_coro = self._agent.ainvoke(
                 {
                     "messages": [
                         {"role": "system", "content": CRON_SYSTEM_PROMPT},
@@ -219,6 +230,10 @@ class Scheduler:
                 },
                 config=config,
             )
+            if self._run_timeout is None:
+                result = await invoke_coro
+            else:
+                result = await asyncio.wait_for(invoke_coro, timeout=self._run_timeout)
             messages = result.get("messages", [])
             content = messages[-1].content if messages else "(no response)"
             if isinstance(content, list):
@@ -227,6 +242,9 @@ class Scheduler:
                 )
             else:
                 response = str(content)
+        except TimeoutError:
+            logger.exception("Cron job %s (%s) timed out", job.name, job.id)
+            response = f"Cron job '{job.name}' timed out after {int(self._run_timeout)} seconds."
         except Exception:
             logger.exception("Cron job %s (%s) agent invocation failed", job.name, job.id)
             response = f"Cron job '{job.name}' failed to execute."

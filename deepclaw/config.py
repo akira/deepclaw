@@ -95,9 +95,9 @@ class DeepClawConfig:
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     workspace_root: str = "~/.deepclaw/workspace"
     command_timeout: int = 300  # seconds, default 5 minutes
-    max_turns: int = 500
-    gateway_timeout: int = 1800
-    gateway_timeout_warning: int = 900
+    max_turns: int = 200
+    gateway_timeout: int = 900
+    gateway_timeout_warning: int = 450
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -237,14 +237,14 @@ DEFAULT_CONFIG_YAML = """\
 # Shell command timeout in seconds (default: 300 = 5 minutes)
 # command_timeout: 300
 
-# Hard cap on agent/tool turns before LangGraph aborts the run (default: 500)
-# max_turns: 500
+# Hard cap on agent/tool turns before LangGraph aborts the run (default: 200)
+# max_turns: 200
 
-# Gateway inactivity timeout in seconds (default: 1800 = 30 minutes idle)
-# gateway_timeout: 1800
+# Gateway inactivity timeout in seconds (default: 900 = 15 minutes idle)
+# gateway_timeout: 900
 
-# Warn before inactivity timeout (default: 900 = 15 minutes idle, 0 disables warning)
-# gateway_timeout_warning: 900
+# Gateway warning before inactivity timeout in seconds (default: 450 = 7.5 minutes)
+# gateway_timeout_warning: 450
 
 # LangSmith tracing — add these to ~/.deepclaw/.env (not this file):
 #   LANGSMITH_API_KEY=lsv2_...

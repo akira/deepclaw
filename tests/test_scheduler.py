@@ -1,5 +1,6 @@
 """Tests for deepclaw.scheduler module."""
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -343,16 +344,23 @@ class TestSchedulerTick:
         channel.name = "telegram"
 
         scheduler = Scheduler(
-            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+            jobs_path=f,
+            agent=agent,
+            checkpointer=None,
+            channels={"telegram": channel},
+            max_turns=200,
+            run_timeout=900,
         )
 
         await scheduler.run_job(job)
 
         payload = agent.ainvoke.await_args.args[0]
+        config = agent.ainvoke.await_args.kwargs["config"]
         assert payload["messages"] == [
             {"role": "system", "content": CRON_SYSTEM_PROMPT},
             {"role": "user", "content": job.prompt},
         ]
+        assert config["recursion_limit"] == 200
 
     @pytest.mark.asyncio
     async def test_run_job_silent_sentinel_skips_delivery(self, tmp_path):
@@ -399,6 +407,34 @@ class TestSchedulerTick:
         assert first_thread_id.startswith(f"cron-{job.id}-")
         assert second_thread_id.startswith(f"cron-{job.id}-")
         assert first_thread_id != second_thread_id
+
+    @pytest.mark.asyncio
+    async def test_run_job_times_out_after_run_timeout(self, tmp_path):
+        f = tmp_path / "jobs.json"
+        job = _make_job()
+
+        async def _slow_ainvoke(*_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            return {"messages": [MagicMock(content="ok")]}
+
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(side_effect=_slow_ainvoke)
+        channel = AsyncMock()
+        channel.name = "telegram"
+
+        scheduler = Scheduler(
+            jobs_path=f,
+            agent=agent,
+            checkpointer=None,
+            channels={"telegram": channel},
+            run_timeout=0.01,
+        )
+
+        await scheduler.run_job(job)
+
+        channel.send.assert_called_once()
+        delivered = channel.send.call_args.args[1]
+        assert "timed out" in delivered.lower()
 
 
 # ---------------------------------------------------------------------------
