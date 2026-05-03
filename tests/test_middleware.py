@@ -547,3 +547,238 @@ class TestSafetyMiddlewareIntegration:
         assert result == expected
         handler.assert_awaited_once_with(request)
         mock_interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repeated_identical_failing_tool_call_is_blocked_after_two_failures(
+        self, middleware
+    ):
+        request1 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_1",
+            thread_id="thread-loop",
+        )
+        request2 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_2",
+            thread_id="thread-loop",
+        )
+        request3 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_3",
+            thread_id="thread-loop",
+        )
+        failing_result_1 = ToolMessage(
+            content='{"error": "Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR"}',
+            name="browser_navigate",
+            tool_call_id="call_1",
+        )
+        failing_result_2 = ToolMessage(
+            content='{"error": "Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR"}',
+            name="browser_navigate",
+            tool_call_id="call_2",
+        )
+        handler = AsyncMock(side_effect=[failing_result_1, failing_result_2])
+
+        result1 = await middleware.awrap_tool_call(request1, handler)
+        result2 = await middleware.awrap_tool_call(request2, handler)
+        result3 = await middleware.awrap_tool_call(request3, handler)
+
+        assert result1 == failing_result_1
+        assert result2 == failing_result_2
+        assert isinstance(result3, ToolMessage)
+        assert result3.status == "error"
+        assert "Repeated identical failing tool call blocked" in result3.content
+        assert "browser_navigate" in result3.content
+        assert handler.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_structured_error_false_is_not_treated_as_failure(self, middleware):
+        request1 = self._make_request(
+            "browser_navigate",
+            {"url": "https://example.com"},
+            call_id="call_1",
+            thread_id="thread-error-false",
+        )
+        request2 = self._make_request(
+            "browser_navigate",
+            {"url": "https://example.com"},
+            call_id="call_2",
+            thread_id="thread-error-false",
+        )
+        request3 = self._make_request(
+            "browser_navigate",
+            {"url": "https://example.com"},
+            call_id="call_3",
+            thread_id="thread-error-false",
+        )
+        success1 = ToolMessage(
+            content='{"error": false, "url": "https://example.com"}',
+            name="browser_navigate",
+            tool_call_id="call_1",
+        )
+        success2 = ToolMessage(
+            content='{"error": false, "url": "https://example.com"}',
+            name="browser_navigate",
+            tool_call_id="call_2",
+        )
+        success3 = ToolMessage(
+            content='{"error": false, "url": "https://example.com"}',
+            name="browser_navigate",
+            tool_call_id="call_3",
+        )
+        handler = AsyncMock(side_effect=[success1, success2, success3])
+
+        result1 = await middleware.awrap_tool_call(request1, handler)
+        result2 = await middleware.awrap_tool_call(request2, handler)
+        result3 = await middleware.awrap_tool_call(request3, handler)
+
+        assert result1 == success1
+        assert result2 == success2
+        assert result3 == success3
+        assert handler.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_structured_error_null_is_not_treated_as_failure(self, middleware):
+        request1 = self._make_request(
+            "browser_navigate",
+            {"url": "https://example.com"},
+            call_id="call_1",
+            thread_id="thread-error-null",
+        )
+        request2 = self._make_request(
+            "browser_navigate",
+            {"url": "https://example.com"},
+            call_id="call_2",
+            thread_id="thread-error-null",
+        )
+        request3 = self._make_request(
+            "browser_navigate",
+            {"url": "https://example.com"},
+            call_id="call_3",
+            thread_id="thread-error-null",
+        )
+        success1 = ToolMessage(
+            content='{"error": null, "url": "https://example.com"}',
+            name="browser_navigate",
+            tool_call_id="call_1",
+        )
+        success2 = ToolMessage(
+            content='{"error": null, "url": "https://example.com"}',
+            name="browser_navigate",
+            tool_call_id="call_2",
+        )
+        success3 = ToolMessage(
+            content='{"error": null, "url": "https://example.com"}',
+            name="browser_navigate",
+            tool_call_id="call_3",
+        )
+        handler = AsyncMock(side_effect=[success1, success2, success3])
+
+        result1 = await middleware.awrap_tool_call(request1, handler)
+        result2 = await middleware.awrap_tool_call(request2, handler)
+        result3 = await middleware.awrap_tool_call(request3, handler)
+
+        assert result1 == success1
+        assert result2 == success2
+        assert result3 == success3
+        assert handler.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_varying_error_text_still_counts_as_repeated_failure(self, middleware):
+        request1 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_1",
+            thread_id="thread-varying-error",
+        )
+        request2 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_2",
+            thread_id="thread-varying-error",
+        )
+        request3 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_3",
+            thread_id="thread-varying-error",
+        )
+        failing_result_1 = ToolMessage(
+            content='{"error": "Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR #1"}',
+            name="browser_navigate",
+            tool_call_id="call_1",
+        )
+        failing_result_2 = ToolMessage(
+            content='{"error": "Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR #2"}',
+            name="browser_navigate",
+            tool_call_id="call_2",
+        )
+        handler = AsyncMock(side_effect=[failing_result_1, failing_result_2])
+
+        result1 = await middleware.awrap_tool_call(request1, handler)
+        result2 = await middleware.awrap_tool_call(request2, handler)
+        result3 = await middleware.awrap_tool_call(request3, handler)
+
+        assert result1 == failing_result_1
+        assert result2 == failing_result_2
+        assert isinstance(result3, ToolMessage)
+        assert result3.status == "error"
+        assert "Repeated identical failing tool call blocked" in result3.content
+        assert handler.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_different_tool_call_resets_repeated_failure_guard(self, middleware):
+        failing_request_1 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_1",
+            thread_id="thread-reset",
+        )
+        failing_request_2 = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_2",
+            thread_id="thread-reset",
+        )
+        different_request = self._make_request(
+            "browser_navigate",
+            {"url": "https://resy.com"},
+            call_id="call_3",
+            thread_id="thread-reset",
+        )
+        retry_original_request = self._make_request(
+            "browser_navigate",
+            {"url": "https://www.opentable.com"},
+            call_id="call_4",
+            thread_id="thread-reset",
+        )
+        failing_result = ToolMessage(
+            content='{"error": "Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR"}',
+            name="browser_navigate",
+            tool_call_id="call_1",
+        )
+        different_result = ToolMessage(
+            content='{"success": true, "url": "https://resy.com"}',
+            name="browser_navigate",
+            tool_call_id="call_3",
+        )
+        retry_result = ToolMessage(
+            content='{"error": "Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR"}',
+            name="browser_navigate",
+            tool_call_id="call_4",
+        )
+        handler = AsyncMock(
+            side_effect=[failing_result, failing_result, different_result, retry_result]
+        )
+
+        await middleware.awrap_tool_call(failing_request_1, handler)
+        await middleware.awrap_tool_call(failing_request_2, handler)
+        different = await middleware.awrap_tool_call(different_request, handler)
+        retried = await middleware.awrap_tool_call(retry_original_request, handler)
+
+        assert different == different_result
+        assert retried == retry_result
+        assert handler.await_count == 4
