@@ -57,6 +57,7 @@ from deepclaw.gateway import (
     Gateway,
     _append_progress_history,
     _append_progress_line,
+    _extract_media_directives,
     _extract_message_tool_calls,
     _format_tool_progress_line,
     _looks_like_false_completion,
@@ -262,6 +263,7 @@ class _FakeStreamingChannel:
     def __init__(self):
         self.sent: list[tuple[str, str]] = []
         self.edits: list[tuple[str, str, str]] = []
+        self.media_sent: list[tuple[str, str, str | None]] = []
 
     @property
     def name(self) -> str:
@@ -277,6 +279,10 @@ class _FakeStreamingChannel:
     async def send(self, chat_id: str, text: str) -> str:
         self.sent.append((chat_id, text))
         return "msg-1"
+
+    async def send_media(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        self.media_sent.append((chat_id, path, caption))
+        return "media-1"
 
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         self.edits.append((chat_id, message_id, text))
@@ -317,6 +323,24 @@ class TestTelegramBotChannel:
         ]
         assert message_id == "101"
 
+    @pytest.mark.asyncio
+    async def test_send_media_photo_path_uses_send_photo(self, tmp_path):
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+        bot = MagicMock()
+        bot.send_photo = AsyncMock(return_value=SimpleNamespace(message_id=103))
+
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send_media("123", str(image_path))
+
+        bot.send_photo.assert_awaited_once()
+        kwargs = bot.send_photo.await_args.kwargs
+        assert kwargs["chat_id"] == 123
+        assert kwargs["caption"] is None
+        assert kwargs["photo"].name == str(image_path)
+        assert message_id == "103"
+
 
 class TestTelegramChannel:
     @pytest.mark.asyncio
@@ -340,6 +364,23 @@ class TestTelegramChannel:
 
         update.callback_query.message.reply_text.assert_awaited_once_with("Thinking...")
         assert message_id == "201"
+
+    @pytest.mark.asyncio
+    async def test_send_media_photo_path_uses_reply_photo(self, tmp_path):
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+        update = _make_slash_update(text="hello")
+        update.message.reply_photo = AsyncMock(return_value=SimpleNamespace(message_id=202))
+        ctx = _make_slash_context()
+        channel = TelegramChannel(update, ctx)
+
+        message_id = await channel.send_media("1", str(image_path))
+
+        update.message.reply_photo.assert_awaited_once()
+        kwargs = update.message.reply_photo.await_args.kwargs
+        assert kwargs["caption"] is None
+        assert kwargs["photo"].name == str(image_path)
+        assert message_id == "202"
 
 
 class _FakeStreamingAgent:
@@ -458,7 +499,7 @@ class TestGatewayProgressFormatting:
 class TestGatewayRedaction:
     @pytest.mark.asyncio
     async def test_streaming_redacts_before_edit_and_final_send(self):
-        secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        secret = "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"
         agent = _FakeStreamingAgent(
             [
                 (SimpleNamespace(content_blocks=[{"type": "text", "text": secret}]), {}),
@@ -475,6 +516,117 @@ class TestGatewayRedaction:
         assert channel.edits
         assert all(secret not in text for _, _, text in channel.edits)
         assert any("[REDACTED]" in text for _, _, text in channel.edits)
+
+    @pytest.mark.asyncio
+    async def test_gateway_sends_native_media_for_media_directives(self):
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {"type": "text", "text": "Here you go.\nMEDIA:/tmp/example.png"}
+                        ]
+                    ),
+                    {},
+                ),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999.0)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="send image")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert channel.sent == [("123", "Thinking...")]
+        assert channel.edits[-1][2] == "Here you go."
+        assert channel.media_sent == [("123", "/tmp/example.png", None)]
+
+    def test_extract_media_directives_parses_local_markdown_images(self, tmp_path):
+        image_path = tmp_path / "openai_home.png"
+        image_path.write_bytes(b"png")
+
+        text, media_paths = _extract_media_directives(
+            f"Here is the screenshot.\n![OpenAI Homepage]({image_path})"
+        )
+
+        assert text == "Here is the screenshot."
+        assert media_paths == [str(image_path)]
+
+    def test_extract_media_directives_parses_file_scheme_markdown_images(self, tmp_path):
+        image_path = tmp_path / "openai_home.png"
+        image_path.write_bytes(b"png")
+
+        text, media_paths = _extract_media_directives(
+            f"Attached:\n![OpenAI Homepage](file://{image_path})"
+        )
+
+        assert text == "Attached:"
+        assert media_paths == [str(image_path)]
+
+    def test_extract_media_directives_keeps_remote_or_missing_markdown_images_as_text(
+        self, tmp_path
+    ):
+        missing_path = tmp_path / "missing.png"
+
+        text, media_paths = _extract_media_directives(
+            f"Remote image\n![Hosted](https://example.com/image.png)\n![Missing]({missing_path})"
+        )
+
+        assert text == (
+            f"Remote image\n![Hosted](https://example.com/image.png)\n![Missing]({missing_path})"
+        )
+        assert media_paths == []
+
+    @pytest.mark.asyncio
+    async def test_gateway_final_message_drops_progress_lines_and_sends_local_markdown_image(
+        self, tmp_path
+    ):
+        image_path = tmp_path / "openai_home.png"
+        image_path.write_bytes(b"png")
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "tool_call",
+                                "name": "read_file",
+                                "args": {"path": str(image_path)},
+                            }
+                        ]
+                    ),
+                    {},
+                ),
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Here is the screenshot of the OpenAI homepage taken with Camoufox:\n\n"
+                                    f"![OpenAI Homepage]({image_path})"
+                                ),
+                            }
+                        ]
+                    ),
+                    {},
+                ),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="send screenshot")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert (
+            channel.edits[-1][2]
+            == "Here is the screenshot of the OpenAI homepage taken with Camoufox:"
+        )
+        assert "📖 read_file" not in channel.edits[-1][2]
+        assert channel.media_sent == [("123", str(image_path), None)]
 
     @pytest.mark.asyncio
     async def test_gateway_passes_recursion_limit_from_max_turns(self):
@@ -962,7 +1114,7 @@ class TestGatewayRedaction:
         await gateway.handle_message(channel, incoming, "thread-1")
 
         final_text = channel.edits[-1][2]
-        assert "💻 execute\nDone." in final_text
+        assert final_text == "Done."
 
     @pytest.mark.asyncio
     async def test_streaming_skips_duplicate_edits_for_unchanged_progress_text(self):
@@ -2129,6 +2281,58 @@ class TestCmdStop:
 
         assert task.cancelled()
         assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
+        update.message.reply_text.assert_called_once_with("Stopped the current task.")
+
+    @pytest.mark.asyncio
+    async def test_stop_rejects_pending_approval_without_active_task(self):
+        update = _make_slash_update(text="/stop")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_stop(update, ctx)
+
+        gateway.resume_interrupt.assert_awaited_once()
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["thread_id"] == "thread-1"
+        assert kwargs["decision"] == {"type": "reject", "message": "Stopped by user."}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+        update.message.reply_text.assert_called_once_with("Stopped the current task.")
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_pending_approval_after_cancelling_active_task(self):
+        update = _make_slash_update(text="/stop")
+        blocker = asyncio.Event()
+
+        async def _run_forever():
+            await blocker.wait()
+
+        task = asyncio.create_task(_run_forever())
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        ctx = _make_slash_context(
+            extra={ACTIVE_RUNS_KEY: {"1": task}, PENDING_APPROVALS_KEY: pending}
+        )
+
+        await cmd_stop(update, ctx)
+
+        assert task.cancelled()
+        assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
         update.message.reply_text.assert_called_once_with("Stopped the current task.")
 
 

@@ -2,6 +2,8 @@
 
 from importlib import import_module
 
+from langchain_core.messages import ToolMessage
+
 from deepclaw.config import DeepClawConfig
 
 BASETEN_PROVIDER = "baseten"
@@ -19,6 +21,40 @@ def load_chat_baseten_class():
     return module.ChatBaseten
 
 
+def _sanitize_tool_message_content(content):
+    """Convert OpenAI-incompatible structured tool output into plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                text_parts.append(block["text"])
+                continue
+            if block.get("type") == "image":
+                mime_type = block.get("mime_type") or "image"
+                text_parts.append(f"[image omitted: {mime_type}]")
+        return "\n".join(part for part in text_parts if part)
+    return str(content)
+
+
+def _sanitize_tool_messages(messages):
+    """Normalize ToolMessage content to plain strings for OpenAI-compatible providers."""
+    sanitized_messages = []
+    for message in messages:
+        if isinstance(message, ToolMessage) and not isinstance(message.content, str):
+            sanitized_messages.append(
+                message.model_copy(
+                    update={"content": _sanitize_tool_message_content(message.content)}
+                )
+            )
+        else:
+            sanitized_messages.append(message)
+    return sanitized_messages
+
+
 def resolve_baseten_model(config: DeepClawConfig):
     """Resolve a baseten:* model spec into a wrapped ChatBaseten model."""
     model_spec = (config.model or "").strip()
@@ -30,6 +66,13 @@ def resolve_baseten_model(config: DeepClawConfig):
         raise ValueError(msg)
 
     chat_cls = load_chat_baseten_class()
+
+    class WrappedChatBaseten(chat_cls):
+        def _get_request_payload(self, input_, *, stop=None, **kwargs):
+            messages = self._convert_input(input_).to_messages()
+            sanitized_messages = _sanitize_tool_messages(messages)
+            return super()._get_request_payload(sanitized_messages, stop=stop, **kwargs)
+
     generation = config.generation
     kwargs = {
         "streaming": True,
@@ -53,4 +96,4 @@ def resolve_baseten_model(config: DeepClawConfig):
     if model_kwargs:
         kwargs["model_kwargs"] = model_kwargs
 
-    return chat_cls(**kwargs)
+    return WrappedChatBaseten(**kwargs)

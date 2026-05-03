@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from deepclaw import agent as agent_mod
 from deepclaw.config import DeepClawConfig
@@ -36,7 +37,7 @@ class TestResolveBasetenModel:
 
         resolved = resolve_baseten_model(config)
 
-        assert type(resolved).__name__ == "FakeChatBaseten"
+        assert type(resolved).__name__ == "WrappedChatBaseten"
         assert captured == {
             "model": "moonshotai/Kimi-K2-Instruct-0905",
             "streaming": True,
@@ -64,7 +65,7 @@ class TestResolveBasetenModel:
 
         resolved = resolve_baseten_model(config)
 
-        assert type(resolved).__name__ == "FakeChatBaseten"
+        assert type(resolved).__name__ == "WrappedChatBaseten"
         assert captured["model_url"] == (
             "https://model-123.api.baseten.co/environments/production/sync/v1"
         )
@@ -102,6 +103,51 @@ class TestResolveBasetenModel:
 
         with pytest.raises(ValueError, match="Baseten model name cannot be empty"):
             resolve_baseten_model(config)
+
+    def test_baseten_sanitizes_non_string_tool_message_content(self, monkeypatch):
+        class FakeChatBaseten:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def _convert_input(self, input_):
+                class _Input:
+                    def __init__(self, messages):
+                        self._messages = messages
+
+                    def to_messages(self):
+                        return self._messages
+
+                return _Input(input_)
+
+            def _get_request_payload(self, input_, *, stop=None, **kwargs):
+                messages = self._convert_input(input_).to_messages()
+                return {
+                    "messages": [{"content": msg.content} for msg in messages],
+                    "stop": stop,
+                }
+
+        monkeypatch.setattr(
+            "deepclaw.integrations.baseten.load_chat_baseten_class", lambda: FakeChatBaseten
+        )
+        model = resolve_baseten_model(DeepClawConfig(model="baseten:moonshotai/Kimi-K2.6"))
+
+        messages = [
+            HumanMessage(content="hello"),
+            ToolMessage(
+                content=[
+                    {"type": "image", "base64": "abc", "mime_type": "image/png"},
+                    {"type": "text", "text": "caption text"},
+                ],
+                name="browser_screenshot",
+                tool_call_id="call-1",
+            ),
+        ]
+
+        payload = model._get_request_payload(messages, stop=None)
+
+        assert payload["messages"][0]["content"] == "hello"
+        assert payload["messages"][1]["content"] == "[image omitted: image/png]\ncaption text"
+        assert "abc" not in payload["messages"][1]["content"]
 
     def test_baseten_raises_helpful_error_when_dependency_missing(self, monkeypatch):
         monkeypatch.setattr(

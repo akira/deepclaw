@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import ToolMessage
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 CURSOR_INDICATOR = "\u258c"
 THINKING_MESSAGE = "Thinking..."
+_MEDIA_LINE_RE = re.compile(r"^MEDIA:(?P<path>.+)$", re.MULTILINE)
+_MARKDOWN_LOCAL_IMAGE_RE = re.compile(
+    r"!\[(?P<alt>[^\]]*)\]\((?P<path>(?:file://)?/(?:[^)\s]|\s(?!\)))+)\)"
+)
 _QUEUE_PROGRESS_LIMIT = 8
 _TOOL_ICONS = {
     "skill_view": "📚",
@@ -187,6 +192,31 @@ def _truncate_preview(text: str, limit: int = 48) -> str:
 def _safe_preview(text: Any, limit: int = 48) -> str:
     """Redact secrets first, then produce a short single-line preview."""
     return _truncate_preview(redact_secrets(str(text)), limit=limit)
+
+
+def _extract_media_directives(text: str) -> tuple[str, list[str]]:
+    """Extract local media references from text while preserving non-media text."""
+    media_paths: list[str] = []
+    kept_lines: list[str] = []
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        match = _MEDIA_LINE_RE.match(stripped)
+        if match:
+            media_paths.append(match.group("path").strip())
+            continue
+
+        cleaned_line = raw_line
+        for image_match in _MARKDOWN_LOCAL_IMAGE_RE.finditer(raw_line):
+            candidate = image_match.group("path").strip()
+            if candidate.startswith("file://"):
+                candidate = candidate[len("file://") :]
+            candidate_path = Path(candidate)
+            if candidate_path.is_absolute() and candidate_path.exists():
+                media_paths.append(str(candidate_path))
+                cleaned_line = cleaned_line.replace(image_match.group(0), "").strip()
+        if cleaned_line:
+            kept_lines.append(cleaned_line)
+    return "\n".join(kept_lines).strip(), media_paths
 
 
 def _format_tool_summary(tool_name: str, tool_args: Any) -> str | None:
@@ -593,6 +623,7 @@ class Gateway:
         typing_task = asyncio.create_task(_typing_heartbeat())
 
         accumulated = ""
+        assistant_text = ""
         last_edit_time = time.monotonic()
         chars_since_edit = 0
         last_display = THINKING_MESSAGE
@@ -613,7 +644,7 @@ class Gateway:
 
         async def _stream_once(payload: dict[str, Any] | Command) -> bool:
             """Stream one graph pass. Returns True if any tool calls were seen."""
-            nonlocal accumulated, last_edit_time, chars_since_edit, last_display
+            nonlocal accumulated, assistant_text, last_edit_time, chars_since_edit, last_display
             tool_calls_seen = False
             chunk_progress: dict[str, str] = {}
             last_chunk_line: str | None = None
@@ -815,14 +846,17 @@ class Gateway:
                             text = block.get("text", "")
                             if not text:
                                 continue
+                            display_prefix = accumulated
                             if (
                                 last_render_was_tool
-                                and accumulated
-                                and not accumulated.endswith("\n")
+                                and display_prefix
+                                and not display_prefix.endswith("\n")
                             ):
-                                accumulated += "\n"
-                                chars_since_edit += 1
-                            accumulated += text
+                                display_prefix += "\n"
+                            assistant_text += text
+                            accumulated = (
+                                display_prefix + text if display_prefix else assistant_text
+                            )
                             queue_snapshot["updated_at"] = time.time()
                             chars_since_edit += len(text)
                             last_render_was_tool = False
@@ -864,14 +898,15 @@ class Gateway:
                 and not tool_calls_seen
                 and (
                     _looks_like_narration(accumulated)
-                    or _looks_like_false_completion(original_user_text, accumulated)
-                    or _looks_like_memory_request(original_user_text, accumulated)
+                    or _looks_like_false_completion(original_user_text, assistant_text)
+                    or _looks_like_memory_request(original_user_text, assistant_text)
                 )
             ):
                 logger.info(
                     "Narration/false-completion/memory-ack without tool-call detected — sending nudge"
                 )
                 accumulated = ""
+                assistant_text = ""
                 last_edit_time = time.monotonic()
                 chars_since_edit = 0
                 await _stream_once({"messages": [{"role": "user", "content": _NUDGE_MESSAGE}]})
@@ -923,19 +958,34 @@ class Gateway:
             queue_snapshot["status"] = "awaiting_approval"
             queue_snapshot["pending_approval"] = _redacted_pending_approval(pending)
         else:
-            response_text = accumulated if accumulated else "(no response)"
+            response_text = (
+                assistant_text
+                if assistant_text
+                else accumulated
+                if accumulated
+                else "(no response)"
+            )
             if queue_snapshot.get("status") != "error":
                 queue_snapshot["status"] = "completed"
             queue_snapshot["pending_approval"] = None
         response_text = redact_secrets(response_text)
+        text_response, media_paths = _extract_media_directives(response_text)
         queue_snapshot["updated_at"] = time.time()
-        queue_snapshot["final_text_preview"] = _safe_preview(response_text, limit=160)
+        queue_snapshot["final_text_preview"] = _safe_preview(
+            text_response or response_text, limit=160
+        )
 
-        chunks = chunk_message(response_text, limit)
+        final_text = text_response
+        if not final_text and media_paths:
+            final_text = "Attached media."
+
+        chunks = chunk_message(final_text, limit)
         if chunks[0] != last_display:
             await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])
         for extra_chunk in chunks[1:]:
             await self._send_redacted_message(channel, chat_id, extra_chunk)
+        for media_path in media_paths:
+            await channel.send_media(chat_id, media_path)
 
         return pending
 
