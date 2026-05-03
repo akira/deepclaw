@@ -101,12 +101,12 @@ def _tool_result_error_text(result: Any) -> str | None:
         parsed = None
 
     if isinstance(parsed, Mapping):
-        error = parsed.get("error")
-        if isinstance(error, str) and error.strip():
-            return error.strip()
+        if "error" in parsed:
+            error = parsed.get("error")
+            if isinstance(error, str) and error.strip():
+                return error.strip()
+            return None
 
-    if '"error"' in content_text or content_text.startswith("{error"):
-        return content_text
     if content_text.startswith(("Error:", "BLOCKED:")):
         return content_text
     return None
@@ -415,12 +415,9 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
                 return
 
             record = self._recent_failures.get(thread_id)
-            if (
-                record
-                and record.get("fingerprint") == fingerprint
-                and record.get("error") == error_text
-            ):
+            if record and record.get("fingerprint") == fingerprint:
                 record["count"] = int(record.get("count", 0)) + 1
+                record["error"] = error_text
                 return
 
             self._recent_failures[thread_id] = {
