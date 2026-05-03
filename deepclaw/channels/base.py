@@ -39,6 +39,11 @@ class Channel(ABC):
         """Send a text message. Returns a message_id for later editing."""
         ...
 
+    async def send_media(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        """Send a local media file when the channel supports native attachments."""
+        fallback = caption or f"MEDIA:{path}"
+        return await self.send(chat_id, fallback)
+
     @abstractmethod
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         """Edit a previously sent message. Silently ignore if unsupported."""

@@ -98,6 +98,59 @@ _WORKSPACE_ROOT = Path("~/.deepclaw/workspace").expanduser()
 _STREAM_MESSAGES: dict[str, dict[str, object]] = {}
 
 
+def _telegram_media_kind(path: str) -> str:
+    """Return the Telegram send_* method kind for a local media path."""
+    suffix = Path(path).suffix.lower()
+    mime_type, _ = mimetypes.guess_type(path)
+    mime_type = (mime_type or "").lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"} or mime_type.startswith("image/"):
+        return "photo"
+    if suffix in {".mp4", ".mov", ".webm", ".mkv"} or mime_type.startswith("video/"):
+        return "video"
+    if suffix in {".ogg"}:
+        return "voice"
+    if suffix in {".mp3", ".wav", ".m4a", ".flac"} or mime_type.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
+@contextlib.contextmanager
+def _open_media_file(path: str):
+    """Open a media file in binary mode for Telegram upload."""
+    with Path(path).open("rb") as handle:
+        yield handle
+
+
+async def _telegram_send_media_via_bot(bot, chat_id: int, path: str, caption: str | None = None):
+    """Send a local file through the Telegram Bot API using the right media method."""
+    kind = _telegram_media_kind(path)
+    with _open_media_file(path) as handle:
+        if kind == "photo":
+            return await bot.send_photo(chat_id=chat_id, photo=handle, caption=caption)
+        if kind == "video":
+            return await bot.send_video(chat_id=chat_id, video=handle, caption=caption)
+        if kind == "voice":
+            return await bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
+        if kind == "audio":
+            return await bot.send_audio(chat_id=chat_id, audio=handle, caption=caption)
+        return await bot.send_document(chat_id=chat_id, document=handle, caption=caption)
+
+
+async def _telegram_send_media_via_message(message, path: str, caption: str | None = None):
+    """Send a local file via a Telegram message reply using the right media method."""
+    kind = _telegram_media_kind(path)
+    with _open_media_file(path) as handle:
+        if kind == "photo":
+            return await message.reply_photo(photo=handle, caption=caption)
+        if kind == "video":
+            return await message.reply_video(video=handle, caption=caption)
+        if kind == "voice":
+            return await message.reply_voice(voice=handle, caption=caption)
+        if kind == "audio":
+            return await message.reply_audio(audio=handle, caption=caption)
+        return await message.reply_document(document=handle, caption=caption)
+
+
 def _looks_like_supported_image(document) -> bool:
     """Return True if a Telegram document looks like a supported image."""
     mime_type = (getattr(document, "mime_type", "") or "").lower()
@@ -1076,8 +1129,29 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
+    approvals = _pending_approvals(context)
+    pending = approvals.get(chat_id)
     stopped = await _cancel_active_run(context, chat_id)
     _STREAM_MESSAGES.pop(chat_id, None)
+
+    if pending is not None and not stopped:
+        gateway: Gateway = context.bot_data[GATEWAY_KEY]
+        channel = TelegramChannel(update, context)
+        try:
+            await gateway.resume_interrupt(
+                channel,
+                chat_id=chat_id,
+                thread_id=pending["thread_id"],
+                decision={"type": "reject", "message": "Stopped by user."},
+            )
+        finally:
+            approvals.pop(chat_id, None)
+        await update.message.reply_text("Stopped the current task.")
+        return
+
+    if pending is not None:
+        approvals.pop(chat_id, None)
+
     if not stopped:
         await update.message.reply_text("No active task to stop.")
         return
@@ -1411,6 +1485,13 @@ class TelegramBotChannel(Channel):
             _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return first_msg_id or ""
 
+    async def send_media(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        """Send native Telegram media to a chat."""
+        msg = await _telegram_send_media_via_bot(self._bot, int(chat_id), path, caption)
+        msg_id = str(msg.message_id)
+        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return msg_id
+
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         """Edit a previously sent message."""
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
@@ -1482,6 +1563,23 @@ class TelegramChannel(Channel):
             msg = await self._update.callback_query.message.reply_text(text)
         else:
             raise RuntimeError("No Telegram message context available for send()")
+        msg_id = str(msg.message_id)
+        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return msg_id
+
+    async def send_media(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        """Send native Telegram media as a reply in the current context."""
+        if self._update.message is not None:
+            msg = await _telegram_send_media_via_message(self._update.message, path, caption)
+        elif (
+            self._update.callback_query is not None
+            and self._update.callback_query.message is not None
+        ):
+            msg = await _telegram_send_media_via_message(
+                self._update.callback_query.message, path, caption
+            )
+        else:
+            raise RuntimeError("No Telegram message context available for send_media()")
         msg_id = str(msg.message_id)
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
