@@ -848,6 +848,52 @@ class TestGatewayRedaction:
         assert snapshot["progress_lines"] == ["💻 execute"]
 
     @pytest.mark.asyncio
+    async def test_streaming_surfaces_child_subgraph_tool_progress(self):
+        child_message = SimpleNamespace(
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "name": "web_search",
+                    "args": {"query": "site:sf.eater.com best restaurants"},
+                }
+            ],
+            content_blocks=[
+                {
+                    "type": "tool_call_chunk",
+                    "id": "call-1",
+                    "name": "web_search",
+                    "args": {},
+                },
+                {
+                    "type": "text",
+                    "text": "Let me search the web for the list.",
+                },
+            ],
+        )
+        agent = _FakeStreamingAgent(
+            [
+                (("task:child-1",), (child_message, {})),
+                (SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {}),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="find restaurants")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        edits_text = "\n".join(text for _, _, text in channel.edits)
+        assert "🔧 task" not in edits_text
+        assert '🔎 web_search: "site:sf.eater.com best restaurants"' in edits_text
+        assert "Let me search the web for the list." not in edits_text
+        assert agent.astream_calls[0][1]["subgraphs"] is True
+
+        snapshot = gateway.get_queue_snapshot("123")
+        assert snapshot is not None
+        assert snapshot["progress_lines"] == ['🔎 web_search: "site:sf.eater.com best restaurants"']
+
+    @pytest.mark.asyncio
     async def test_streaming_does_not_warn_for_empty_tool_call_chunks(self, monkeypatch):
         agent = _FakeStreamingAgent(
             [

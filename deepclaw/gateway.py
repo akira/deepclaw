@@ -33,6 +33,8 @@ _TOOL_ICONS = {
     "terminal": "💻",
     "execute": "💻",
     "search_files": "🔎",
+    "web_search": "🔎",
+    "web_extract": "🌐",
     "read_file": "📖",
     "patch": "🔧",
     "write_file": "📝",
@@ -229,7 +231,7 @@ def _format_tool_summary(tool_name: str, tool_args: Any) -> str | None:
         url = tool_args.get("url")
         return f'"{_safe_preview(url)}"' if url else None
 
-    for key in ("file_path", "name", "question", "expression", "url", "text"):
+    for key in ("file_path", "name", "question", "expression", "query", "url", "text"):
         value = tool_args.get(key)
         if value:
             return f'"{_safe_preview(value)}"'
@@ -310,19 +312,23 @@ def _extract_message_tool_calls(message_obj: Any) -> list[Mapping[str, Any]]:
     return resolved
 
 
-def _coerce_tool_args(candidate_args: Any) -> dict[str, Any]:
-    """Best-effort normalization of tool args from mappings or JSON strings."""
-    if isinstance(candidate_args, Mapping) and candidate_args:
-        return dict(candidate_args)
-    if isinstance(candidate_args, str):
-        text = candidate_args.strip()
-        if not text:
-            return {}
-        with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
-            parsed = json.loads(text)
-            if isinstance(parsed, Mapping) and parsed:
-                return dict(parsed)
-    return {}
+def _unpack_stream_chunk(chunk: Any) -> tuple[tuple[str, ...], Any, Any] | None:
+    """Normalize top-level and subgraph message-stream chunks.
+
+    Standard message streaming yields `(message, metadata)`.
+    With `subgraphs=True`, LangGraph yields `(namespace, (message, metadata))`.
+    """
+    if not isinstance(chunk, tuple) or len(chunk) != 2:
+        return None
+
+    first, second = chunk
+    if isinstance(first, tuple) and isinstance(second, tuple) and len(second) == 2:
+        namespace = tuple(str(part) for part in first)
+        message_obj, metadata = second
+        return namespace, message_obj, metadata
+
+    message_obj, metadata = chunk
+    return (), message_obj, metadata
 
 
 def _resolve_tool_args(
@@ -623,6 +629,7 @@ class Gateway:
                 payload,
                 config=run_config,
                 stream_mode="messages",
+                subgraphs=True,
             )
             stream_iter = stream.__aiter__()
             pending_chunk: asyncio.Task[Any] | None = None
@@ -682,9 +689,10 @@ class Gateway:
 
                     last_activity = time.monotonic()
 
-                    if not isinstance(chunk, tuple) or len(chunk) != 2:
+                    normalized_chunk = _unpack_stream_chunk(chunk)
+                    if normalized_chunk is None:
                         continue
-                    message_obj, _metadata = chunk
+                    namespace, message_obj, _metadata = normalized_chunk
 
                     if isinstance(message_obj, ToolMessage):
                         tool_name = getattr(message_obj, "name", "unknown")
@@ -802,6 +810,8 @@ class Gateway:
                                     if progress_key is None:
                                         last_chunk_line = None
                         elif block_type == "text":
+                            if namespace:
+                                continue
                             text = block.get("text", "")
                             if not text:
                                 continue
