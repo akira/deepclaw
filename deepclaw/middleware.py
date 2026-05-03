@@ -7,6 +7,7 @@ Intercepts tool calls to enforce safety policies:
 - Tool output scanned and redacted for credential leaks
 """
 
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -61,6 +62,54 @@ def _blocked_tool_message(tool_call: dict, reason: str) -> ToolMessage:
         tool_call_id=tool_call["id"],
         status="error",
     )
+
+
+def _normalize_tool_args(args: Any) -> str:
+    """Return a stable JSON fingerprint fragment for tool arguments."""
+    try:
+        return json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+    except TypeError:
+        return repr(args)
+
+
+def _tool_call_fingerprint(tool_call: Mapping[str, Any]) -> str:
+    """Return a stable fingerprint for a tool call name + arguments."""
+    return f"{tool_call.get('name', '')}:{_normalize_tool_args(tool_call.get('args', {}))}"
+
+
+def _tool_result_error_text(result: Any) -> str | None:
+    """Extract a structured error string from a tool result when present."""
+    if not isinstance(result, ToolMessage):
+        return None
+
+    content = result.content
+    if isinstance(content, list):
+        content_text = " ".join(str(part) for part in content)
+    else:
+        content_text = str(content or "")
+    content_text = content_text.strip()
+
+    if result.status == "error":
+        return content_text or "tool returned error status"
+
+    if not content_text:
+        return None
+
+    try:
+        parsed = json.loads(content_text)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, Mapping):
+        error = parsed.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+
+    if '"error"' in content_text or content_text.startswith("{error"):
+        return content_text
+    if content_text.startswith("Error:") or content_text.startswith("BLOCKED:"):
+        return content_text
+    return None
 
 
 def _extract_last_user_text(state: Mapping[str, Any] | None) -> str:
@@ -315,7 +364,66 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
         - File writes: denied paths blocked outright
         - URL fetches: SSRF-unsafe URLs blocked
         - All tool output: credential patterns redacted
+        - Repeated identical failing tool calls: blocked after two consecutive failures
         """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._recent_failures: dict[str, dict[str, Any]] = {}
+
+        def _check_repeated_failure(self, thread_id: str | None, tool_call: Mapping[str, Any]) -> ToolMessage | None:
+            """Block a third consecutive identical failing tool call in the same thread."""
+            if not thread_id:
+                return None
+
+            record = self._recent_failures.get(thread_id)
+            fingerprint = _tool_call_fingerprint(tool_call)
+            if not record or record.get("fingerprint") != fingerprint:
+                return None
+            if int(record.get("count", 0)) < 2:
+                return None
+
+            error_preview = str(record.get("error") or "previous tool failure").strip()
+            tool_name = str(tool_call.get("name") or "tool")
+            reason = (
+                "Repeated identical failing tool call blocked after "
+                f"{record['count']} consecutive failures. "
+                f"`{tool_name}` with the same arguments already failed repeatedly. "
+                f"Last error: {error_preview}"
+            )
+            logger.warning("Blocked repeated identical failing tool call on thread %s: %s", thread_id, reason)
+            return _blocked_tool_message(dict(tool_call), reason)
+
+        def _record_tool_result(
+            self,
+            thread_id: str | None,
+            tool_call: Mapping[str, Any],
+            result: ToolMessage | Command[Any],
+        ) -> None:
+            """Track consecutive identical failures per thread and reset on success/change."""
+            if not thread_id:
+                return
+
+            fingerprint = _tool_call_fingerprint(tool_call)
+            error_text = _tool_result_error_text(result)
+            if error_text is None:
+                self._recent_failures.pop(thread_id, None)
+                return
+
+            record = self._recent_failures.get(thread_id)
+            if (
+                record
+                and record.get("fingerprint") == fingerprint
+                and record.get("error") == error_text
+            ):
+                record["count"] = int(record.get("count", 0)) + 1
+                return
+
+            self._recent_failures[thread_id] = {
+                "fingerprint": fingerprint,
+                "error": error_text,
+                "count": 1,
+            }
 
         async def awrap_tool_call(
             self,
@@ -326,11 +434,15 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             tool_call = request.tool_call
             tool_name = tool_call["name"]
             request_state = getattr(request, "state", None)
+            thread_id = _extract_thread_id(request)
+
+            repeated_failure = self._check_repeated_failure(thread_id, tool_call)
+            if repeated_failure is not None:
+                return repeated_failure
 
             # --- Pre-execution safety gates ---
 
             if tool_name == _EXECUTE_TOOL:
-                thread_id = _extract_thread_id(request)
                 approved_keys = await aget_thread_approved_keys(thread_id) if thread_id else set()
                 blocked = _check_execute(
                     tool_call,
@@ -368,6 +480,7 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
                             status=result.status,
                         )
 
+            self._record_tool_result(thread_id, tool_call, result)
             return result
 else:
     SafetyMiddleware = None  # type: ignore[assignment, misc]
