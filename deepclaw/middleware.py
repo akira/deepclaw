@@ -100,12 +100,11 @@ def _tool_result_error_text(result: Any) -> str | None:
     except json.JSONDecodeError:
         parsed = None
 
-    if isinstance(parsed, Mapping):
-        if "error" in parsed:
-            error = parsed.get("error")
-            if isinstance(error, str) and error.strip():
-                return error.strip()
-            return None
+    if isinstance(parsed, Mapping) and "error" in parsed:
+        error = parsed.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        return None
 
     if content_text.startswith(("Error:", "BLOCKED:")):
         return content_text
