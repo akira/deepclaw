@@ -2131,6 +2131,58 @@ class TestCmdStop:
         assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
         update.message.reply_text.assert_called_once_with("Stopped the current task.")
 
+    @pytest.mark.asyncio
+    async def test_stop_rejects_pending_approval_without_active_task(self):
+        update = _make_slash_update(text="/stop")
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=None)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+
+        await cmd_stop(update, ctx)
+
+        gateway.resume_interrupt.assert_awaited_once()
+        _, kwargs = gateway.resume_interrupt.await_args
+        assert kwargs["thread_id"] == "thread-1"
+        assert kwargs["decision"] == {"type": "reject", "message": "Stopped by user."}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+        update.message.reply_text.assert_called_once_with("Stopped the current task.")
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_pending_approval_after_cancelling_active_task(self):
+        update = _make_slash_update(text="/stop")
+        blocker = asyncio.Event()
+
+        async def _run_forever():
+            await blocker.wait()
+
+        task = asyncio.create_task(_run_forever())
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        ctx = _make_slash_context(
+            extra={ACTIVE_RUNS_KEY: {"1": task}, PENDING_APPROVALS_KEY: pending}
+        )
+
+        await cmd_stop(update, ctx)
+
+        assert task.cancelled()
+        assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
+        assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+        update.message.reply_text.assert_called_once_with("Stopped the current task.")
+
 
 # ---------------------------------------------------------------------------
 # /approve and /deny

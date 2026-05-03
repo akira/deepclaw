@@ -1076,8 +1076,29 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(REJECTION_MESSAGE)
         return
     chat_id = str(update.effective_chat.id)
+    approvals = _pending_approvals(context)
+    pending = approvals.get(chat_id)
     stopped = await _cancel_active_run(context, chat_id)
     _STREAM_MESSAGES.pop(chat_id, None)
+
+    if pending is not None and not stopped:
+        gateway: Gateway = context.bot_data[GATEWAY_KEY]
+        channel = TelegramChannel(update, context)
+        try:
+            await gateway.resume_interrupt(
+                channel,
+                chat_id=chat_id,
+                thread_id=pending["thread_id"],
+                decision={"type": "reject", "message": "Stopped by user."},
+            )
+        finally:
+            approvals.pop(chat_id, None)
+        await update.message.reply_text("Stopped the current task.")
+        return
+
+    if pending is not None:
+        approvals.pop(chat_id, None)
+
     if not stopped:
         await update.message.reply_text("No active task to stop.")
         return
