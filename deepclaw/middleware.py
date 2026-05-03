@@ -39,6 +39,7 @@ _EXECUTE_TOOL = "execute"
 _WRITE_FILE_TOOL = "write_file"
 _EDIT_FILE_TOOL = "edit_file"
 _WEB_FETCH_TOOLS = frozenset({"web_fetch", "http_request", "fetch_url"})
+_BROWSER_INTERACTIVE_TOOLS = frozenset({"browserbase_interactive_task"})
 
 # Tools whose output should be scanned for credential leaks
 _REDACT_OUTPUT_TOOLS = frozenset(
@@ -339,6 +340,42 @@ def _check_url(tool_call: dict) -> ToolMessage | None:
     return _blocked_tool_message(tool_call, reason)
 
 
+def _check_browser_interactive(tool_call: dict) -> ToolMessage | None:
+    """Require approval before running multi-step interactive Browserbase tasks."""
+    args = tool_call.get("args", {})
+    start_url = str(args.get("start_url", "")).strip()
+    task = str(args.get("task", "")).strip()
+    if not start_url and not task:
+        return None
+
+    summary = task or "Interactive browser task"
+    logger.info("Requesting approval for Browserbase interactive task: %s", summary)
+    decision = interrupt(
+        {
+            "type": "safety_review",
+            "tool": tool_call["name"],
+            "command": task,
+            "scope": "once",
+            "approval_keys": ["browserbase:interactive_task"],
+            "warning": "Interactive browser tasks can click, type, log in, and submit forms.",
+            "message": (
+                "⚠️ Interactive browser task requires approval:\n\n"
+                f"URL: {start_url or '(not provided)'}\n"
+                f"Task: {task or '(not provided)'}\n\n"
+                "Approve or deny?"
+            ),
+        }
+    )
+
+    if isinstance(decision, dict) and decision.get("type") == "approve":
+        return None
+
+    reason = "Interactive browser task rejected by user"
+    if isinstance(decision, dict) and decision.get("message"):
+        reason = decision["message"]
+    return _blocked_tool_message(tool_call, reason)
+
+
 try:
     from langchain.agents.middleware.types import (  # type: ignore[import-untyped]
         AgentMiddleware,
@@ -460,6 +497,11 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
 
             elif tool_name in _WEB_FETCH_TOOLS:
                 blocked = _check_url(tool_call)
+                if blocked is not None:
+                    return blocked
+
+            elif tool_name in _BROWSER_INTERACTIVE_TOOLS:
+                blocked = _check_browser_interactive(tool_call)
                 if blocked is not None:
                     return blocked
 
