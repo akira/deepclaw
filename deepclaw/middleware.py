@@ -107,7 +107,7 @@ def _tool_result_error_text(result: Any) -> str | None:
 
     if '"error"' in content_text or content_text.startswith("{error"):
         return content_text
-    if content_text.startswith("Error:") or content_text.startswith("BLOCKED:"):
+    if content_text.startswith(("Error:", "BLOCKED:")):
         return content_text
     return None
 
