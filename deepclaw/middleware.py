@@ -371,7 +371,9 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
             super().__init__()
             self._recent_failures: dict[str, dict[str, Any]] = {}
 
-        def _check_repeated_failure(self, thread_id: str | None, tool_call: Mapping[str, Any]) -> ToolMessage | None:
+        def _check_repeated_failure(
+            self, thread_id: str | None, tool_call: Mapping[str, Any]
+        ) -> ToolMessage | None:
             """Block a third consecutive identical failing tool call in the same thread."""
             if not thread_id:
                 return None
@@ -391,7 +393,9 @@ if AgentMiddleware is not None and ToolCallRequest is not None:
                 f"`{tool_name}` with the same arguments already failed repeatedly. "
                 f"Last error: {error_preview}"
             )
-            logger.warning("Blocked repeated identical failing tool call on thread %s: %s", thread_id, reason)
+            logger.warning(
+                "Blocked repeated identical failing tool call on thread %s: %s", thread_id, reason
+            )
             return _blocked_tool_message(dict(tool_call), reason)
 
         def _record_tool_result(
