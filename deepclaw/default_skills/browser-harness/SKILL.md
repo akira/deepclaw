@@ -12,13 +12,14 @@ metadata:
 
 # browser-harness
 
-Local checkout:
-- `/home/ubuntu/Developer/browser-harness`
+If you have a local checkout of the upstream repo, set a shell variable first:
+- `BH_DIR=/path/to/browser-harness`
+- example on this machine: `/home/ubuntu/Developer/browser-harness`
 
-Read these first:
-1. `/home/ubuntu/Developer/browser-harness/SKILL.md`
-2. `/home/ubuntu/Developer/browser-harness/helpers.py`
-3. `/home/ubuntu/Developer/browser-harness/install.md` for first-time setup or reconnects
+Read these first when a local checkout is available:
+1. `$BH_DIR/SKILL.md`
+2. `$BH_DIR/helpers.py`
+3. `$BH_DIR/install.md` for first-time setup or reconnects
 
 ## Invocation
 
@@ -36,8 +37,8 @@ PY
 
 - Prefer `new_tab(url)` for first navigation instead of `goto(url)` so you do not clobber the active user tab.
 - After every meaningful action, verify with `screenshot()` or `page_info()`.
-- Search `/home/ubuntu/Developer/browser-harness/domain-skills/` before inventing a site-specific approach.
-- Check `/home/ubuntu/Developer/browser-harness/interaction-skills/` if you hit tabs, uploads, dialogs, iframes, dropdowns, screenshots, or scrolling issues.
+- Search `$BH_DIR/domain-skills/` before inventing a site-specific approach.
+- Check `$BH_DIR/interaction-skills/` if you hit tabs, uploads, dialogs, iframes, dropdowns, screenshots, or scrolling issues.
 
 ## Remote browser pattern
 
@@ -46,7 +47,8 @@ If `BROWSER_USE_API_KEY` is set, prefer remote browsers when no local Chrome is 
 Important bootstrap gotcha: on a fresh headless machine, do **not** make `start_remote_daemon()` the first stdin lines of `browser-harness`, because the wrapper calls `ensure_daemon()` before it executes stdin. Bootstrap the remote daemon from Python first, then use `browser-harness` with the matching `BU_NAME`.
 
 ```bash
-cd /home/ubuntu/Developer/browser-harness
+BH_DIR=/path/to/browser-harness
+cd "$BH_DIR"
 uv run python - <<'PY'
 from admin import start_remote_daemon
 start_remote_daemon("work")
@@ -62,7 +64,7 @@ PY
 When finished, stop the remote daemon so the cloud browser is shut down cleanly:
 
 ```bash
-cd /home/ubuntu/Developer/browser-harness
+cd "$BH_DIR"
 uv run python - <<'PY'
 from admin import stop_remote_daemon
 stop_remote_daemon("work")
