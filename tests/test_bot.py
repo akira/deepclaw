@@ -1615,9 +1615,11 @@ class TestTelegramMediaHandleMessage:
         entered = asyncio.Event()
         release = asyncio.Event()
         calls: list[str] = []
+        observed_active_slot: list[bool] = []
 
         async def _fake_handle_message(_channel, incoming, _thread_id):
             calls.append(incoming.text)
+            observed_active_slot.append(bool(ctx.bot_data[ACTIVE_RUNS_KEY].get("1")))
             if incoming.text == "first":
                 entered.set()
                 await release.wait()
@@ -1646,6 +1648,7 @@ class TestTelegramMediaHandleMessage:
 
         assert gateway.handle_message.await_count == 3
         assert calls == ["first", "second", "third"]
+        assert observed_active_slot == [True, True, True]
 
     @pytest.mark.asyncio
     async def test_handle_message_appends_to_existing_queue(self):
@@ -2368,6 +2371,41 @@ class TestCmdRetry:
         assert observed_active_slot == [True, True]
         assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
         assert ctx.bot_data.get("queued_runs", {}) == {}
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_approval_keeps_remaining_queue(self):
+        update = _make_slash_update(text="/retry")
+        pending = {
+            "id": "approval-1",
+            "thread_id": "thread-1",
+            "message": "Need approval",
+            "tool": "execute",
+        }
+
+        async def _fake_handle_message(_channel, incoming, _thread_id):
+            if incoming.text == "retry this":
+                return None
+            if incoming.text == "needs approval":
+                return pending
+            raise AssertionError(f"unexpected text: {incoming.text}")
+
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(side_effect=_fake_handle_message)
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                LAST_MESSAGE_KEY: {"1": "retry this"},
+                "queued_runs": {"1": [{"text": "needs approval"}, {"text": "after approval"}]},
+            }
+        )
+        ctx.bot.send_message = AsyncMock()
+
+        await cmd_retry(update, ctx)
+
+        assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"] == pending
+        assert ctx.bot_data["queued_runs"]["1"] == [{"text": "after approval"}]
+        ctx.bot.send_message.assert_awaited_once()
+        assert gateway.handle_message.await_count == 2
 
     @pytest.mark.asyncio
     async def test_retry_blocked_while_approval_pending(self):

@@ -350,34 +350,40 @@ async def _drain_queued_run(
     thread_id: str,
 ) -> dict[str, Any] | None:
     """Run queued requests for a chat after the active request completes."""
-    queued_runs = _queued_runs(context)
-    while queued_runs.get(chat_id):
-        queued = queued_runs[chat_id].pop(0)
-        if not queued_runs[chat_id]:
-            queued_runs.pop(chat_id, None)
+    if not _begin_active_run(context, chat_id):
+        return None
 
-        incoming = IncomingMessage(
-            text=queued["text"],
-            chat_id=chat_id,
-            user_id=queued.get("user_id", ""),
-            username=queued.get("username"),
-            source=queued.get("source", "telegram"),
-        )
-        channel = TelegramBotChannel(context.bot)
-        gateway: Gateway = context.bot_data[GATEWAY_KEY]
-        pending = await gateway.handle_message(channel, incoming, thread_id)
-        if pending:
-            _pending_approvals(context)[chat_id] = pending
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=pending.get("message") or "Safety review required.",
-                reply_markup=_pending_approval_markup(pending["id"]),
+    queued_runs = _queued_runs(context)
+    try:
+        while queued_runs.get(chat_id):
+            queued = queued_runs[chat_id].pop(0)
+            if not queued_runs[chat_id]:
+                queued_runs.pop(chat_id, None)
+
+            incoming = IncomingMessage(
+                text=queued["text"],
+                chat_id=chat_id,
+                user_id=queued.get("user_id", ""),
+                username=queued.get("username"),
+                source=queued.get("source", "telegram"),
             )
+            channel = TelegramBotChannel(context.bot)
+            gateway: Gateway = context.bot_data[GATEWAY_KEY]
+            pending = await gateway.handle_message(channel, incoming, thread_id)
+            if pending:
+                _pending_approvals(context)[chat_id] = pending
+                await context.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=pending.get("message") or "Safety review required.",
+                    reply_markup=_pending_approval_markup(pending["id"]),
+                )
+                _STREAM_MESSAGES.pop(chat_id, None)
+                return pending
+            _pending_approvals(context).pop(chat_id, None)
             _STREAM_MESSAGES.pop(chat_id, None)
-            return pending
-        _pending_approvals(context).pop(chat_id, None)
-        _STREAM_MESSAGES.pop(chat_id, None)
-    return None
+        return None
+    finally:
+        _finish_active_run(context, chat_id)
 
 
 def _pending_approval_markup(pending_id: str) -> InlineKeyboardMarkup:
