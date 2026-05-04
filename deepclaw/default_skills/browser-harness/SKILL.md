@@ -2,7 +2,7 @@
 name: browser-harness
 description: Use browser-use/browser-harness for direct CDP browser control, local Chrome attachment, or remote Browser Use cloud browsers. Read the local checkout docs first.
 version: 1.0.0
-author: browser-use + Hermes Agent
+author: browser-use
 license: MIT
 metadata:
   hermes:
