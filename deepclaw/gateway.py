@@ -47,6 +47,10 @@ _TOOL_ICONS = {
     "browser_click": "🖱️",
     "browser_snapshot": "🌐",
     "browser_vision": "🖼️",
+    "browserbase_search": "🔎",
+    "browserbase_fetch": "🌐",
+    "browserbase_rendered_extract": "🖼️",
+    "browserbase_interactive_task": "🖱️",
     "vision_analyze": "🖼️",
 }
 
@@ -261,7 +265,18 @@ def _format_tool_summary(tool_name: str, tool_args: Any) -> str | None:
         url = tool_args.get("url")
         return f'"{_safe_preview(url)}"' if url else None
 
-    for key in ("file_path", "name", "question", "expression", "query", "url", "text"):
+    for key in (
+        "file_path",
+        "name",
+        "question",
+        "expression",
+        "query",
+        "url",
+        "start_url",
+        "instruction",
+        "task",
+        "text",
+    ):
         value = tool_args.get(key)
         if value:
             return f'"{_safe_preview(value)}"'

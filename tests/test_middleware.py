@@ -8,6 +8,7 @@ from langchain_core.messages import ToolMessage
 
 from deepclaw.middleware import (
     _blocked_tool_message,
+    _check_browser_interactive,
     _check_execute,
     _check_url,
     _check_write_path,
@@ -244,6 +245,48 @@ class TestCheckExecute:
         result = _check_execute(tc)
         assert result is not None
         assert "rejected" in result.content.lower()
+
+
+# ---------------------------------------------------------------------------
+# _check_browser_interactive — Browserbase HITL approval
+# ---------------------------------------------------------------------------
+
+
+class TestCheckBrowserInteractive:
+    def test_missing_args_returns_none(self):
+        tc = _make_tool_call("browserbase_interactive_task", {})
+        assert _check_browser_interactive(tc) is None
+
+    @patch("deepclaw.middleware.interrupt")
+    def test_interactive_task_triggers_interrupt_and_can_be_approved(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "approve"}
+        tc = _make_tool_call(
+            "browserbase_interactive_task",
+            {"start_url": "https://example.com", "task": "Log in and click submit"},
+        )
+
+        result = _check_browser_interactive(tc)
+
+        assert result is None
+        mock_interrupt.assert_called_once()
+        payload = mock_interrupt.call_args[0][0]
+        assert payload["tool"] == "browserbase_interactive_task"
+        assert "https://example.com" in payload["message"]
+        assert "Log in and click submit" in payload["message"]
+
+    @patch("deepclaw.middleware.interrupt")
+    def test_interactive_task_rejects_with_user_message(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "reject", "message": "Do not submit forms"}
+        tc = _make_tool_call(
+            "browserbase_interactive_task",
+            {"start_url": "https://example.com", "task": "Submit the checkout form"},
+        )
+
+        result = _check_browser_interactive(tc)
+
+        assert result is not None
+        assert result.status == "error"
+        assert "Do not submit forms" in result.content
 
 
 # ---------------------------------------------------------------------------

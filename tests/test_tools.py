@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
@@ -31,6 +32,10 @@ class TestDiscoverTools:
         tool_names = [getattr(t, "__name__", "") for t in tools]
         assert "web_search" in tool_names
         assert "web_extract" in tool_names
+        assert "browserbase_search" in tool_names
+        assert "browserbase_fetch" in tool_names
+        assert "browserbase_rendered_extract" in tool_names
+        assert "browserbase_interactive_task" in tool_names
         assert "vision_analyze" in tool_names
         assert "skills_list" in tool_names
         assert "skills_search_remote" in tool_names
@@ -228,6 +233,105 @@ class TestBrowserPluginSessionPersistence:
                 thread.join()
 
         assert len(starts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Browserbase plugin
+# ---------------------------------------------------------------------------
+
+
+class TestBrowserbasePlugin:
+    def test_available(self):
+        from deepclaw.tools import browserbase as browserbase_mod
+
+        assert browserbase_mod.available() is True
+
+    def test_get_tools(self):
+        from deepclaw.tools import browserbase as browserbase_mod
+
+        tools = browserbase_mod.get_tools()
+        assert [tool.__name__ for tool in tools] == [
+            "browserbase_search",
+            "browserbase_fetch",
+            "browserbase_rendered_extract",
+            "browserbase_interactive_task",
+        ]
+
+    def test_search_returns_error_without_api_key(self):
+        from deepclaw.tools.browserbase import browserbase_search
+
+        with patch("deepclaw.tools.browserbase._get_env", return_value=""):
+            result = browserbase_search("browserbase")
+
+        assert "error" in result
+        assert "BROWSERBASE_API_KEY" in result["error"]
+
+    def test_fetch_returns_error_without_api_key(self):
+        from deepclaw.tools.browserbase import browserbase_fetch
+
+        with patch("deepclaw.tools.browserbase._get_env", return_value=""):
+            result = browserbase_fetch("https://example.com")
+
+        assert "error" in result
+        assert "BROWSERBASE_API_KEY" in result["error"]
+
+    def test_rendered_extract_requires_stagehand(self):
+        from deepclaw.tools import browserbase as browserbase_mod
+
+        real_import_module = __import__("importlib").import_module
+
+        def fake_import_module(name):
+            if name == "stagehand":
+                raise ImportError("stagehand")
+            return real_import_module(name)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BROWSERBASE_API_KEY": "test-key",
+                    "BROWSERBASE_PROJECT_ID": "project-id",
+                },
+                clear=True,
+            ),
+            patch("deepclaw.tools.browserbase.import_module", side_effect=fake_import_module),
+        ):
+            result = browserbase_mod.browserbase_rendered_extract(
+                "https://example.com", "Extract the main headline"
+            )
+
+        assert "error" in result
+        assert "stagehand" in result["error"]
+
+    def test_search_success_uses_browserbase_sdk(self):
+        from deepclaw.tools import browserbase as browserbase_mod
+
+        class FakeBrowserbase:
+            def __init__(self, api_key):
+                self.api_key = api_key
+                self.search = MagicMock()
+                self.search.web.return_value = SimpleNamespace(
+                    results=[
+                        SimpleNamespace(title="Example", url="https://example.com", snippet="Hi")
+                    ]
+                )
+
+        fake_module = SimpleNamespace(Browserbase=FakeBrowserbase)
+        real_import_module = __import__("importlib").import_module
+
+        def fake_import_module(name):
+            if name == "browserbase":
+                return fake_module
+            return real_import_module(name)
+
+        with (
+            patch.dict(os.environ, {"BROWSERBASE_API_KEY": "test-key"}, clear=True),
+            patch("deepclaw.tools.browserbase.import_module", side_effect=fake_import_module),
+        ):
+            result = browserbase_mod.browserbase_search("browserbase", num_results=20)
+
+        assert result["query"] == "browserbase"
+        assert result["results"][0]["title"] == "Example"
 
 
 # ---------------------------------------------------------------------------
