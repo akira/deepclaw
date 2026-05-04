@@ -260,7 +260,7 @@ class TestBrowserbasePlugin:
     def test_search_returns_error_without_api_key(self):
         from deepclaw.tools.browserbase import browserbase_search
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch("deepclaw.tools.browserbase._get_env", return_value=""):
             result = browserbase_search("browserbase")
 
         assert "error" in result
@@ -269,7 +269,7 @@ class TestBrowserbasePlugin:
     def test_fetch_returns_error_without_api_key(self):
         from deepclaw.tools.browserbase import browserbase_fetch
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch("deepclaw.tools.browserbase._get_env", return_value=""):
             result = browserbase_fetch("https://example.com")
 
         assert "error" in result
