@@ -13,6 +13,7 @@ from telegram import InlineKeyboardMarkup
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.telegram import (
+    _MAX_QUEUED_RUNS_PER_CHAT,
     ACTIVE_RUNS_KEY,
     ALLOWED_USERS_KEY,
     CONFIG_KEY,
@@ -39,6 +40,7 @@ from deepclaw.channels.telegram import (
     cmd_deny,
     cmd_memory,
     cmd_model,
+    cmd_new,
     cmd_queue,
     cmd_resume,
     cmd_retry,
@@ -1606,12 +1608,58 @@ class TestTelegramMediaHelpers:
 
 class TestTelegramMediaHandleMessage:
     @pytest.mark.asyncio
-    async def test_handle_message_blocks_while_task_running(self):
-        update = _make_slash_update(text="hello")
+    async def test_handle_message_queues_multiple_requests_fifo_and_runs_after_completion(self):
+        first_update = _make_slash_update(text="first")
+        second_update = _make_slash_update(text="second")
+        third_update = _make_slash_update(text="third")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls: list[str] = []
+
+        async def _fake_handle_message(_channel, incoming, _thread_id):
+            calls.append(incoming.text)
+            if incoming.text == "first":
+                entered.set()
+                await release.wait()
+
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(side_effect=_fake_handle_message)
+        gateway.get_queue_snapshot = MagicMock(return_value=None)
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        first_task = asyncio.create_task(handle_message(first_update, ctx))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+
+        await handle_message(second_update, ctx)
+        await handle_message(third_update, ctx)
+
+        second_update.message.reply_text.assert_awaited_once_with(
+            'Queued request #1 to run after the current task finishes: "second"'
+        )
+        third_update.message.reply_text.assert_awaited_once_with(
+            'Queued request #2 to run after the current task finishes: "third"'
+        )
+        assert ctx.bot_data[LAST_MESSAGE_KEY]["1"] == "third"
+
+        release.set()
+        await asyncio.wait_for(first_task, timeout=2)
+
+        assert gateway.handle_message.await_count == 3
+        assert calls == ["first", "second", "third"]
+
+    @pytest.mark.asyncio
+    async def test_handle_message_appends_to_existing_queue(self):
+        update = _make_slash_update(text="third")
         task = asyncio.create_task(asyncio.sleep(60))
         gateway = MagicMock()
         gateway.handle_message = AsyncMock()
-        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway, ACTIVE_RUNS_KEY: {"1": task}})
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                ACTIVE_RUNS_KEY: {"1": task},
+                "queued_runs": {"1": [{"text": "second"}]},
+            }
+        )
 
         try:
             await handle_message(update, ctx)
@@ -1621,8 +1669,38 @@ class TestTelegramMediaHandleMessage:
                 await task
 
         update.message.reply_text.assert_awaited_once_with(
-            "A task is already running. Use /stop to interrupt it before sending something new."
+            'Queued request #2 to run after the current task finishes: "third"'
         )
+        assert [item["text"] for item in ctx.bot_data["queued_runs"]["1"]] == ["second", "third"]
+        gateway.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_rejects_when_queue_is_full(self):
+        update = _make_slash_update(text="overflow")
+        task = asyncio.create_task(asyncio.sleep(60))
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock()
+        existing_queue = [{"text": f"queued-{i}"} for i in range(_MAX_QUEUED_RUNS_PER_CHAT)]
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                ACTIVE_RUNS_KEY: {"1": task},
+                "queued_runs": {"1": existing_queue.copy()},
+            }
+        )
+
+        try:
+            await handle_message(update, ctx)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        update.message.reply_text.assert_awaited_once_with(
+            f"Queue is full ({_MAX_QUEUED_RUNS_PER_CHAT} pending requests). "
+            "Use /stop or wait for the current task to finish before adding more."
+        )
+        assert ctx.bot_data["queued_runs"]["1"] == existing_queue
         gateway.handle_message.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1734,6 +1812,25 @@ def _make_slash_context(
 
 
 # ---------------------------------------------------------------------------
+# /new
+# ---------------------------------------------------------------------------
+
+
+class TestCmdNew:
+    @pytest.mark.asyncio
+    async def test_new_creates_new_thread_and_clears_queued_requests(self):
+        update = _make_slash_update(text="/new")
+        ctx = _make_slash_context(extra={"queued_runs": {"1": [{"text": "then run tests"}]}})
+
+        await cmd_new(update, ctx)
+
+        assert "1" in ctx.bot_data[THREAD_IDS_KEY]
+        assert ctx.bot_data.get("queued_runs", {}) == {}
+        update.message.reply_text.assert_called_once()
+        assert "Started a new conversation thread." in update.message.reply_text.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
 # /clear
 # ---------------------------------------------------------------------------
 
@@ -1753,6 +1850,13 @@ class TestCmdClear:
         ctx = _make_slash_context(extra={LAST_MESSAGE_KEY: {"1": "hello"}})
         await cmd_clear(update, ctx)
         assert ctx.bot_data.get(LAST_MESSAGE_KEY, {}).get("1") is None
+
+    @pytest.mark.asyncio
+    async def test_clear_clears_queued_requests(self):
+        update = _make_slash_update()
+        ctx = _make_slash_context(extra={"queued_runs": {"1": [{"text": "then run tests"}]}})
+        await cmd_clear(update, ctx)
+        assert ctx.bot_data.get("queued_runs", {}) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1991,6 +2095,7 @@ class TestCmdResume:
                 THREAD_IDS_KEY: {"1": "thread-current"},
                 LAST_MESSAGE_KEY: {"1": "hello"},
                 PENDING_APPROVALS_KEY: {"1": {"id": "pending-1"}},
+                "queued_runs": {"1": [{"text": "then run tests"}]},
             }
         )
 
@@ -2003,6 +2108,7 @@ class TestCmdResume:
         assert ctx.bot_data[THREAD_IDS_KEY]["1"] == "thread-older"
         assert ctx.bot_data[LAST_MESSAGE_KEY] == {}
         assert ctx.bot_data[PENDING_APPROVALS_KEY] == {}
+        assert ctx.bot_data.get("queued_runs", {}) == {}
         save_thread_ids.assert_called_once_with({"1": "thread-older"})
         update.message.reply_text.assert_called_once()
         assert "Resumed session thread-older" in update.message.reply_text.call_args[0][0]
@@ -2150,6 +2256,7 @@ class TestCmdQueue:
                         "command": "sudo apt-get install ripgrep",
                     }
                 },
+                "queued_runs": {"1": [{"text": "then run tests"}, {"text": "check weather"}]},
             },
         )
 
@@ -2165,6 +2272,8 @@ class TestCmdQueue:
         assert '💻 terminal: "sudo apt-get install ripgrep"' in text
         assert "Pending approval:" in text
         assert "sudo requires approval" in text
+        assert "Queued requests: 2" in text
+        assert "Next queued request: then run tests" in text
         assert "/approve to continue" in text
 
     @pytest.mark.asyncio
@@ -2180,6 +2289,22 @@ class TestCmdQueue:
         assert "📋 Queue" in text
         assert "State: idle" in text
         assert "No active task or recent tool activity" in text
+
+    @pytest.mark.asyncio
+    async def test_queue_reports_queued_state_without_active_run(self):
+        update = _make_slash_update(text="/queue")
+        gateway = MagicMock()
+        gateway.get_queue_snapshot.return_value = None
+        ctx = _make_slash_context(
+            extra={GATEWAY_KEY: gateway, "queued_runs": {"1": [{"text": "then run tests"}]}}
+        )
+
+        await cmd_queue(update, ctx)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "State: queued" in text
+        assert "Queued requests: 1" in text
+        assert "Next queued request: then run tests" in text
 
 
 # ---------------------------------------------------------------------------
@@ -2216,6 +2341,33 @@ class TestCmdRetry:
         ctx = _make_slash_context()
         await cmd_retry(update, ctx)
         update.message.reply_text.assert_called_once_with("No previous message to retry.")
+
+    @pytest.mark.asyncio
+    async def test_retry_drains_queued_requests_while_holding_active_run(self):
+        update = _make_slash_update(text="/retry")
+        calls: list[str] = []
+        observed_active_slot: list[bool] = []
+
+        async def _fake_handle_message(_channel, incoming, _thread_id):
+            calls.append(incoming.text)
+            observed_active_slot.append(bool(ctx.bot_data[ACTIVE_RUNS_KEY].get("1")))
+
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(side_effect=_fake_handle_message)
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                LAST_MESSAGE_KEY: {"1": "retry this"},
+                "queued_runs": {"1": [{"text": "then this"}]},
+            }
+        )
+
+        await cmd_retry(update, ctx)
+
+        assert calls == ["retry this", "then this"]
+        assert observed_active_slot == [True, True]
+        assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
+        assert ctx.bot_data.get("queued_runs", {}) == {}
 
     @pytest.mark.asyncio
     async def test_retry_blocked_while_approval_pending(self):
