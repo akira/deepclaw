@@ -398,6 +398,7 @@ DeepClaw auto-discovers tool plugins from `deepclaw/tools/` at startup.
 | Plugin | Install | Env Var | Tools |
 |---|---|---|---|
 | `browser` | none | none | `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_screenshot`, `browser_close` |
+| `browserbase` | `browserbase`, `beautifulsoup4`, `stagehand` | `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID` (+ optional `STAGEHAND_MODEL`, `STAGEHAND_AGENT_MODEL`) | `browserbase_search`, `browserbase_fetch`, `browserbase_rendered_extract`, `browserbase_interactive_task` |
 | `cron` | none | none | `schedule`, `list_jobs`, `remove_job` |
 | `skills` | none | none | `skills_list`, `skills_search_remote`, `skill_view`, `skill_create`, `skill_update`, `skill_install`, `skill_delete` |
 | `vision` | none | `OPENAI_API_KEY` | `vision_analyze` |
@@ -412,6 +413,33 @@ The vision tool accepts either a local image path or a public image URL. It is d
 ```
 
 In Telegram, you can also send a photo or an image file directly. DeepClaw downloads it to a local path and can then call `vision_analyze` on that saved file.
+
+### Browserbase integration
+
+DeepClaw also supports the Browserbase tool split recommended in the LangChain docs:
+
+1. `browserbase_search` — discovery first
+2. `browserbase_fetch` — fast stateless fetch for static pages
+3. `browserbase_rendered_extract` — rendered, read-only extraction for JS-heavy pages
+4. `browserbase_interactive_task` — multi-step interactive tasks (approval-gated)
+
+Use this decision tree:
+- no URL yet -> `browserbase_search`
+- known URL + no JS needed -> `browserbase_fetch`
+- known URL + rendered page + read-only task -> `browserbase_rendered_extract`
+- clicking, typing, logging in, or submitting -> `browserbase_interactive_task`
+
+The existing `browser_*` Playwright tools remain available for local browser workflows and screenshots.
+
+Required environment variables for Browserbase-hosted use:
+- `BROWSERBASE_API_KEY` — Browserbase API credential
+- `BROWSERBASE_PROJECT_ID` — Browserbase project to create sessions in
+
+Optional environment variables:
+- `STAGEHAND_MODEL` — model override for `browserbase_rendered_extract`
+- `STAGEHAND_AGENT_MODEL` — model override for `browserbase_interactive_task`
+
+If those Browserbase credentials are absent, the Browserbase tools stay visible but return a clear error at call time instead of silently disappearing.
 
 To add a new tool plugin, create a module in `deepclaw/tools/` that exports:
 - `available() -> bool` — checks if deps are installed (prefer returning useful credential errors at call time)
