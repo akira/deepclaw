@@ -46,12 +46,28 @@ CATEGORY_CODE_INJECTION = "code_injection"
 CATEGORY_DESTRUCTIVE_FIND = "destructive_find"
 CATEGORY_DESTRUCTIVE_GIT = "destructive_git"
 CATEGORY_DEVICE_WRITE = "device_write"
+CATEGORY_SECRET_FILE_READ = "secret_file_read"
 
 # ---------------------------------------------------------------------------
 # Pattern library
 # ---------------------------------------------------------------------------
 
 DANGEROUS_PATTERNS: list[DangerousPattern] = [
+    # Reads from environment or credential files
+    DangerousPattern(
+        pattern=re.compile(
+            r"\b(?:cat|grep|sed|awk|less|more)\b.*"
+            r"(?:^|[\s\"'=])(?:\S*/)?"
+            r"(?:\.env(?:\.[A-Za-z0-9_-]+)?|\.npmrc|\.pypirc|\.netrc|\.pgpass|"
+            r"id_rsa|id_ed25519|"
+            r"[^/\s\"']*(?:secrets?|credentials?|passwords?)[^/\s\"']*\."
+            r"(?:env|json|ya?ml|toml|ini|conf|txt))\b",
+            re.IGNORECASE,
+        ),
+        category=CATEGORY_SECRET_FILE_READ,
+        description="Reading environment or credential files",
+        severity="warning",
+    ),
     # Recursive deletion
     DangerousPattern(
         pattern=re.compile(r"\brm\s+.*-\w*r\w*f", re.IGNORECASE),
@@ -363,6 +379,8 @@ def check_write_path(path: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 SECRET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(?i)api\.telegram\.org/bot\d{6,}:[A-Za-z0-9_-]{20,}"),  # Telegram Bot API URL
+    re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"),  # Telegram bot token
     re.compile(r"ghp_[A-Za-z0-9_]{36,}"),  # GitHub PAT
     re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),  # GitHub fine-grained PAT
     re.compile(r"gho_[A-Za-z0-9_]{36,}"),  # GitHub OAuth token
@@ -373,7 +391,7 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"xoxp-[A-Za-z0-9\-]{20,}"),  # Slack user token
     re.compile(r"glpat-[A-Za-z0-9\-_]{20,}"),  # GitLab PAT
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}=*"),  # Bearer token
-    re.compile(r"(?i)(?:api[_-]?key|secret|token|password)\s*[=:]\s*['\"]?[A-Za-z0-9\-._~+/]{16,}"),
+    re.compile(r"(?i)(?:api[_-]?key|secret|token|password)\s*[=:]\s*['\"]?[A-Za-z0-9\-._~+/:=]{12,}"),
 ]
 
 _REDACTED = "[REDACTED]"

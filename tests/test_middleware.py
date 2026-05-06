@@ -230,6 +230,25 @@ class TestCheckExecute:
         mock_interrupt.assert_called_once()
 
     @patch("deepclaw.middleware.interrupt")
+    def test_secret_file_read_triggers_interrupt_before_execute(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "reject", "message": "Do not expose env files"}
+        tc = _make_tool_call("execute", {"command": "cat .env"})
+        result = _check_execute(tc)
+        assert result is not None
+        assert result.status == "error"
+        assert "Do not expose env files" in result.content
+        warning = mock_interrupt.call_args[0][0]["warning"]
+        assert "secret_file_read" in warning
+        assert "Reading environment or credential files" in warning
+
+    @patch("deepclaw.middleware.interrupt")
+    def test_secret_file_read_can_be_approved(self, mock_interrupt):
+        mock_interrupt.return_value = {"type": "approve"}
+        tc = _make_tool_call("execute", {"command": "grep TELEGRAM_BOT_TOKEN .env.local"})
+        assert _check_execute(tc) is None
+        mock_interrupt.assert_called_once()
+
+    @patch("deepclaw.middleware.interrupt")
     def test_warning_command_triggers_interrupt_reject(self, mock_interrupt):
         mock_interrupt.return_value = {"type": "reject", "message": "No force push!"}
         tc = _make_tool_call("execute", {"command": "git push --force origin main"})
@@ -492,7 +511,7 @@ class TestSafetyMiddlewareIntegration:
 
     @pytest.mark.asyncio
     async def test_output_redaction(self, middleware):
-        request = self._make_request("execute", {"command": "cat .env"})
+        request = self._make_request("execute", {"command": "echo token"})
         leaked_output = ToolMessage(
             content="API_KEY=ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
             name="execute",

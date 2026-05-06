@@ -20,6 +20,7 @@ from deepclaw.safety import (
     CATEGORY_PRIVILEGE_ESCALATION,
     CATEGORY_RECURSIVE_DELETE,
     CATEGORY_SERVICE_MANAGEMENT,
+    CATEGORY_SECRET_FILE_READ,
     CATEGORY_SQL_DESTRUCTION,
     CATEGORY_SYSTEM_CONFIG_WRITE,
     SAFE_ENV_VARS,
@@ -109,6 +110,11 @@ def _fake_addrinfo(ip: str) -> list[tuple]:
         # Device writes
         ("echo garbage > /dev/sda", CATEGORY_DEVICE_WRITE),
         ("dd of=/dev/sdb bs=512 count=1", CATEGORY_DEVICE_WRITE),
+        # Secret file reads
+        ("cat .env", CATEGORY_SECRET_FILE_READ),
+        ("grep TELEGRAM_BOT_TOKEN /srv/app/.env.production", CATEGORY_SECRET_FILE_READ),
+        ("awk '{print}' secrets.yml", CATEGORY_SECRET_FILE_READ),
+        ("less ~/.netrc", CATEGORY_SECRET_FILE_READ),
     ],
 )
 def test_dangerous_command_detected(command: str, expected_category: str):
@@ -570,6 +576,25 @@ class TestRedactSecrets:
         text = "secret: my_very_long_secret_value_here"
         result = redact_secrets(text)
         assert "my_very_long" not in result
+
+    def test_generic_token_value_with_colon_and_underscore(self):
+        text = "TELEGRAM_BOT_TOKEN=123456789:ABC_def-ghi_JKLmnopqrstu"
+        result = redact_secrets(text)
+        assert "123456789" not in result
+        assert "ABC_def" not in result
+
+    def test_telegram_bot_token(self):
+        text = "Telegram token 123456789:ABCdefGHIjklMNOpqrs_TUVwxyz12345 leaked"
+        result = redact_secrets(text)
+        assert "123456789" not in result
+        assert "ABCdef" not in result
+
+    def test_telegram_bot_api_url(self):
+        text = "GET https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrs_TUVwxyz12345/sendMessage"
+        result = redact_secrets(text)
+        assert "api.telegram.org/bot123456789" not in result
+        assert "ABCdef" not in result
+        assert "sendMessage" in result
 
     def test_safe_text_unchanged(self):
         text = "Hello world, this is a normal log message with no secrets."
