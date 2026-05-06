@@ -284,6 +284,10 @@ class _FakeStreamingChannel:
         self.media_sent.append((chat_id, path, caption))
         return "media-1"
 
+    async def send_voice(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        self.media_sent.append((chat_id, path, caption))
+        return "voice-1"
+
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         self.edits.append((chat_id, message_id, text))
 
@@ -518,13 +522,15 @@ class TestGatewayRedaction:
         assert any("[REDACTED]" in text for _, _, text in channel.edits)
 
     @pytest.mark.asyncio
-    async def test_gateway_sends_native_media_for_media_directives(self):
+    async def test_gateway_sends_native_media_for_media_directives(self, tmp_path):
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
         agent = _FakeStreamingAgent(
             [
                 (
                     SimpleNamespace(
                         content_blocks=[
-                            {"type": "text", "text": "Here you go.\nMEDIA:/tmp/example.png"}
+                            {"type": "text", "text": f"Here you go.\nMEDIA:{image_path}"}
                         ]
                     ),
                     {},
@@ -540,7 +546,37 @@ class TestGatewayRedaction:
 
         assert channel.sent == [("123", "Thinking...")]
         assert channel.edits[-1][2] == "Here you go."
-        assert channel.media_sent == [("123", "/tmp/example.png", None)]
+        assert channel.media_sent == [("123", str(image_path), None)]
+
+    @pytest.mark.asyncio
+    async def test_gateway_sends_voice_for_audio_as_voice_directive(self, tmp_path):
+        audio_path = tmp_path / "speech.ogg"
+        audio_path.write_bytes(b"fake ogg")
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "text",
+                                "text": f"Here you go.\n[[audio_as_voice]]\nMEDIA:{audio_path}",
+                            }
+                        ]
+                    ),
+                    {},
+                ),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999.0)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="send voice")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert channel.edits[-1][2] == "Here you go."
+        # Should use send_voice, not send_media
+        assert channel.media_sent == [("123", str(audio_path), None)]
 
     def test_extract_media_directives_parses_local_markdown_images(self, tmp_path):
         image_path = tmp_path / "openai_home.png"
@@ -551,7 +587,7 @@ class TestGatewayRedaction:
         )
 
         assert text == "Here is the screenshot."
-        assert media_paths == [str(image_path)]
+        assert media_paths == [(str(image_path), False)]
 
     def test_extract_media_directives_parses_file_scheme_markdown_images(self, tmp_path):
         image_path = tmp_path / "openai_home.png"
@@ -562,7 +598,7 @@ class TestGatewayRedaction:
         )
 
         assert text == "Attached:"
-        assert media_paths == [str(image_path)]
+        assert media_paths == [(str(image_path), False)]
 
     def test_extract_media_directives_keeps_remote_or_missing_markdown_images_as_text(
         self, tmp_path
