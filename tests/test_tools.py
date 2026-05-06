@@ -275,6 +275,41 @@ class TestBrowserbasePlugin:
         assert "error" in result
         assert "BROWSERBASE_API_KEY" in result["error"]
 
+    def test_fetch_returns_structured_error_for_oversized_response(self):
+        from deepclaw.tools import browserbase as browserbase_mod
+
+        class FakeFetchAPI:
+            def create(self, url, proxies):
+                raise RuntimeError("Response body exceeded Browserbase maximum allowed size of 1MB")
+
+        class FakeBrowserbase:
+            def __init__(self, api_key):
+                self.api_key = api_key
+                self.fetch_api = FakeFetchAPI()
+
+        fake_module = SimpleNamespace(Browserbase=FakeBrowserbase)
+        real_import_module = __import__("importlib").import_module
+
+        def fake_import_module(name):
+            if name == "browserbase":
+                return fake_module
+            return real_import_module(name)
+
+        with (
+            patch.dict(os.environ, {"BROWSERBASE_API_KEY": "test-key"}, clear=True),
+            patch("deepclaw.tools.browserbase.import_module", side_effect=fake_import_module),
+            patch("deepclaw.tools.browserbase.check_url_safety_sync", return_value=(True, "")),
+        ):
+            result = browserbase_mod.browserbase_fetch("https://example.com/large", max_chars=100)
+
+        assert result == {
+            "error": "Browserbase fetch failed: oversized_response",
+            "error_type": "oversized_response",
+            "retryable_with_same_tool": False,
+            "recommended_tool": "browserbase_rendered_extract",
+            "url": "https://example.com/large",
+        }
+
     def test_rendered_extract_requires_stagehand(self):
         from deepclaw.tools import browserbase as browserbase_mod
 

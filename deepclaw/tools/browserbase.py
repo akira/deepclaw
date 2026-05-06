@@ -96,6 +96,19 @@ def _serialize(value: Any) -> Any:
     return str(value)
 
 
+def _is_oversized_fetch_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    oversized_markers = (
+        "response body exceeded",
+        "maximum allowed size",
+        "exceeded the maximum",
+        "exceeds the maximum",
+        "1mb limit",
+        "too large",
+    )
+    return any(marker in message for marker in oversized_markers)
+
+
 def browserbase_search(query: str, num_results: int = 5) -> dict[str, Any]:
     """Search the web with Browserbase.
 
@@ -136,11 +149,15 @@ def browserbase_fetch(
     """Fetch page content without a full browser session.
 
     Best for static pages and quick reads when no JS-heavy interaction is needed.
+    max_chars only truncates text after a successful Browserbase raw fetch; it
+    does not avoid Browserbase's raw 1MB response limit. If Browserbase reports
+    an oversized raw response, use browserbase_rendered_extract or browser
+    navigation instead of retrying browserbase_fetch with a different max_chars.
 
     Args:
         url: Public URL to fetch.
         use_proxy: Whether Browserbase proxies should be enabled.
-        max_chars: Maximum extracted text length.
+        max_chars: Maximum extracted text length after a successful raw fetch.
 
     Returns:
         Dict with URL, status_code, and cleaned text, or an error.
@@ -160,7 +177,18 @@ def browserbase_fetch(
     BeautifulSoup = import_module("bs4").BeautifulSoup
 
     client = Browserbase(api_key=api_key)
-    response = client.fetch_api.create(url=url, proxies=use_proxy)
+    try:
+        response = client.fetch_api.create(url=url, proxies=use_proxy)
+    except Exception as exc:  # noqa: BLE001 - Browserbase SDK raises provider-specific exceptions.
+        if _is_oversized_fetch_error(exc):
+            return {
+                "error": "Browserbase fetch failed: oversized_response",
+                "error_type": "oversized_response",
+                "retryable_with_same_tool": False,
+                "recommended_tool": "browserbase_rendered_extract",
+                "url": url,
+            }
+        raise
     html = str(getattr(response, "content", "") or "")
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style"]):
