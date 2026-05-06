@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,11 +85,13 @@ LAST_MESSAGE_KEY = "last_user_message"
 MODEL_OVERRIDE_KEY = "model_override"
 PENDING_APPROVALS_KEY = "pending_approvals"
 ACTIVE_RUNS_KEY = "active_runs"
+QUEUED_RUNS_KEY = "queued_runs"
 
 # Bot start time for /uptime
 _BOT_START_TIME: float = time.time()
 _UPLOADS_DIR = Path("~/.deepclaw/uploads").expanduser()
 _SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_MAX_QUEUED_RUNS_PER_CHAT = 5
 
 # Workspace root for /memory and /soul
 _WORKSPACE_ROOT = Path("~/.deepclaw/workspace").expanduser()
@@ -262,6 +265,11 @@ def _active_runs(context: ContextTypes.DEFAULT_TYPE) -> dict[str, asyncio.Task]:
     return context.bot_data.setdefault(ACTIVE_RUNS_KEY, {})
 
 
+def _queued_runs(context: ContextTypes.DEFAULT_TYPE) -> dict[str, list[dict[str, Any]]]:
+    """Return the mutable per-chat queued-run map stored in bot_data."""
+    return context.bot_data.setdefault(QUEUED_RUNS_KEY, {})
+
+
 def _get_active_run(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> asyncio.Task | None:
     """Return the active task for a chat, pruning finished tasks."""
     task = _active_runs(context).get(chat_id)
@@ -311,6 +319,71 @@ def _active_run_text() -> str:
 def _pending_approval_text() -> str:
     """Return the user-visible message for an unresolved safety review."""
     return "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
+
+
+def _truncate_queued_text(text: str, limit: int = 80) -> str:
+    """Return a compact preview for queued requests."""
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _queue_run_message(text: str, *, queue_length: int) -> str:
+    """Return the user-visible message when a request is queued."""
+    preview = _truncate_queued_text(text)
+    return f'Queued request #{queue_length} to run after the current task finishes: "{preview}"'
+
+
+def _queue_full_text(limit: int) -> str:
+    """Return the user-visible message when a chat queue is full."""
+    return (
+        f"Queue is full ({limit} pending requests). "
+        "Use /stop or wait for the current task to finish before adding more."
+    )
+
+
+async def _drain_queued_run(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: str,
+    thread_id: str,
+) -> dict[str, Any] | None:
+    """Run queued requests for a chat after the active request completes."""
+    if not _begin_active_run(context, chat_id):
+        return None
+
+    queued_runs = _queued_runs(context)
+    try:
+        while queued_runs.get(chat_id):
+            queued = queued_runs[chat_id].pop(0)
+            if not queued_runs[chat_id]:
+                queued_runs.pop(chat_id, None)
+
+            incoming = IncomingMessage(
+                text=queued["text"],
+                chat_id=chat_id,
+                user_id=queued.get("user_id", ""),
+                username=queued.get("username"),
+                source=queued.get("source", "telegram"),
+            )
+            channel = TelegramBotChannel(context.bot)
+            gateway: Gateway = context.bot_data[GATEWAY_KEY]
+            pending = await gateway.handle_message(channel, incoming, thread_id)
+            if pending:
+                _pending_approvals(context)[chat_id] = pending
+                await context.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=pending.get("message") or "Safety review required.",
+                    reply_markup=_pending_approval_markup(pending["id"]),
+                )
+                _STREAM_MESSAGES.pop(chat_id, None)
+                return pending
+            _pending_approvals(context).pop(chat_id, None)
+            _STREAM_MESSAGES.pop(chat_id, None)
+        return None
+    finally:
+        _finish_active_run(context, chat_id)
 
 
 def _pending_approval_markup(pending_id: str) -> InlineKeyboardMarkup:
@@ -554,6 +627,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     thread_ids[chat_id] = new_thread
     save_thread_ids(thread_ids)
     _pending_approvals(context).pop(chat_id, None)
+    _queued_runs(context).pop(chat_id, None)
     logger.info("New thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text(f"Started a new conversation thread.\nThread ID: {new_thread}")
 
@@ -633,23 +707,32 @@ def _build_queue_report(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gatewa
     """Build a user-facing /queue report for the current chat."""
     active_run = _get_active_run(context, chat_id)
     pending = _pending_approvals(context).get(chat_id)
+    queued = _queued_runs(context).get(chat_id)
     snapshot = (
         gateway.get_queue_snapshot(chat_id) if hasattr(gateway, "get_queue_snapshot") else None
     )
     lines = ["📋 Queue"]
 
-    if snapshot is None and active_run is None and pending is None:
+    if snapshot is None and active_run is None and pending is None and queued is None:
         lines.append("- State: idle")
         lines.append("- No active task or recent tool activity for this chat.")
         return "\n".join(lines)
 
     status = "running" if active_run is not None else "idle"
+    if queued and active_run is None and pending is None:
+        status = "queued"
     if pending:
         status = "awaiting_approval"
     if snapshot and snapshot.get("status"):
         status = str(snapshot["status"])
     lines.append(f"- State: {status}")
     lines.append(f"- Active run: {'yes' if active_run is not None else 'no'}")
+
+    if queued:
+        lines.append(f"- Queued requests: {len(queued)}")
+        next_queued = queued[0].get("text") if isinstance(queued[0], Mapping) else None
+        if next_queued:
+            lines.append(f"- Next queued request: {_truncate_queued_text(str(next_queued))}")
 
     if snapshot:
         request_preview = snapshot.get("user_text_preview")
@@ -824,6 +907,7 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     save_thread_ids(thread_ids)
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
     _pending_approvals(context).pop(chat_id, None)
+    _queued_runs(context).pop(chat_id, None)
     logger.info("Resumed thread for chat %s: %s", chat_id, target_thread)
     await update.message.reply_text(
         f"Resumed session {target_thread}. Send a message to continue it."
@@ -945,6 +1029,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     save_thread_ids(thread_ids)
     context.bot_data.setdefault(LAST_MESSAGE_KEY, {}).pop(chat_id, None)
     _pending_approvals(context).pop(chat_id, None)
+    _queued_runs(context).pop(chat_id, None)
     logger.info("Cleared thread for chat %s: %s", chat_id, new_thread)
     await update.message.reply_text("Conversation cleared.")
 
@@ -1109,16 +1194,17 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     gateway: Gateway = context.bot_data[GATEWAY_KEY]
     try:
         pending = await gateway.handle_message(channel, incoming, thread_id)
+        if pending:
+            _pending_approvals(context)[chat_id] = pending
+        else:
+            _pending_approvals(context).pop(chat_id, None)
+            await _drain_queued_run(context, chat_id=chat_id, thread_id=thread_id)
     except asyncio.CancelledError:
         logger.info("Cancelled active retry for chat %s", chat_id)
         return
     finally:
         _finish_active_run(context, chat_id)
         _STREAM_MESSAGES.pop(chat_id, None)
-    if pending:
-        _pending_approvals(context)[chat_id] = pending
-    else:
-        _pending_approvals(context).pop(chat_id, None)
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1131,6 +1217,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     approvals = _pending_approvals(context)
     pending = approvals.get(chat_id)
+    queued = _queued_runs(context)
     stopped = await _cancel_active_run(context, chat_id)
     _STREAM_MESSAGES.pop(chat_id, None)
 
@@ -1146,11 +1233,13 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         finally:
             approvals.pop(chat_id, None)
+            queued.pop(chat_id, None)
         await update.message.reply_text("Stopped the current task.")
         return
 
     if pending is not None:
         approvals.pop(chat_id, None)
+    queued.pop(chat_id, None)
 
     if not stopped:
         await update.message.reply_text("No active task to stop.")
@@ -1199,6 +1288,7 @@ async def _resume_pending_interrupt(
                 await update.callback_query.message.reply_text(pending_text, **reply_kwargs)
         else:
             approvals.pop(chat_id, None)
+            await _drain_queued_run(context, chat_id=chat_id, thread_id=pending["thread_id"])
     except asyncio.CancelledError:
         logger.info("Cancelled resumed interrupt for chat %s", chat_id)
         return False
@@ -1622,21 +1712,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
+    user_text, media_error = await _build_incoming_text(update)
+    if media_error:
+        await update.message.reply_text(media_error)
+        return
+    if not user_text:
+        return
+
+    active_run = _get_active_run(context, chat_id)
+    if active_run is not None:
+        queued = _queued_runs(context)
+        queue_for_chat = queued.setdefault(chat_id, [])
+        if len(queue_for_chat) >= _MAX_QUEUED_RUNS_PER_CHAT:
+            await update.message.reply_text(_queue_full_text(_MAX_QUEUED_RUNS_PER_CHAT))
+            return
+        queue_for_chat.append(
+            {
+                "text": user_text,
+                "user_id": str(user.id) if user else "",
+                "username": user.username if user else None,
+                "source": "telegram",
+                "queued_at": time.time(),
+            }
+        )
+        context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
+        await update.message.reply_text(
+            _queue_run_message(user_text, queue_length=len(queue_for_chat))
+        )
+        return
+
+    if _pending_approvals(context).get(chat_id):
+        await update.message.reply_text(_pending_approval_text())
+        return
+
     if not _begin_active_run(context, chat_id):
         await update.message.reply_text(_active_run_text())
         return
     try:
         thread_id = get_thread_id(context, chat_id)
-        user_text, media_error = await _build_incoming_text(update)
-        if media_error:
-            await update.message.reply_text(media_error)
-            return
-        if not user_text:
-            return
-
-        if _pending_approvals(context).get(chat_id):
-            await update.message.reply_text(_pending_approval_text())
-            return
 
         # Track last message per chat for /retry
         context.bot_data.setdefault(LAST_MESSAGE_KEY, {})[chat_id] = user_text
@@ -1661,6 +1774,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         else:
             _pending_approvals(context).pop(chat_id, None)
+            await _drain_queued_run(context, chat_id=chat_id, thread_id=thread_id)
     except asyncio.CancelledError:
         logger.info("Cancelled active message run for chat %s", chat_id)
         return
