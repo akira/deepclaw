@@ -206,7 +206,14 @@ def _extract_media_directives(text: str) -> tuple[str, list[str]]:
         stripped = raw_line.strip()
         match = _MEDIA_LINE_RE.match(stripped)
         if match:
-            media_paths.append(match.group("path").strip())
+            candidate = match.group("path").strip()
+            candidate_path = Path(candidate)
+            if "..." in candidate or not candidate_path.is_absolute() or not candidate_path.exists():
+                kept_lines.append(
+                    f"Invalid media attachment path omitted: {_safe_preview(candidate, limit=160)}"
+                )
+                continue
+            media_paths.append(str(candidate_path))
             continue
 
         cleaned_line = raw_line

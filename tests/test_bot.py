@@ -520,13 +520,15 @@ class TestGatewayRedaction:
         assert any("[REDACTED]" in text for _, _, text in channel.edits)
 
     @pytest.mark.asyncio
-    async def test_gateway_sends_native_media_for_media_directives(self):
+    async def test_gateway_sends_native_media_for_media_directives(self, tmp_path):
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
         agent = _FakeStreamingAgent(
             [
                 (
                     SimpleNamespace(
                         content_blocks=[
-                            {"type": "text", "text": "Here you go.\nMEDIA:/tmp/example.png"}
+                            {"type": "text", "text": f"Here you go.\nMEDIA:{image_path}"}
                         ]
                     ),
                     {},
@@ -542,7 +544,71 @@ class TestGatewayRedaction:
 
         assert channel.sent == [("123", "Thinking...")]
         assert channel.edits[-1][2] == "Here you go."
-        assert channel.media_sent == [("123", "/tmp/example.png", None)]
+        assert channel.media_sent == [("123", str(image_path), None)]
+
+    @pytest.mark.asyncio
+    async def test_gateway_rejects_invalid_media_directives(self, tmp_path):
+        missing_path = tmp_path / "missing.png"
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Here you go.\n"
+                                    "MEDIA:/tmp/.../voice.mp3\n"
+                                    "MEDIA:relative/voice.mp3\n"
+                                    f"MEDIA:{missing_path}"
+                                ),
+                            }
+                        ]
+                    ),
+                    {},
+                ),
+            ]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999.0)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="send voice")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert channel.sent == [("123", "Thinking...")]
+        assert channel.edits[-1][2] == (
+            "Here you go.\n"
+            "Invalid media attachment path omitted: /tmp/.../voice.mp3\n"
+            "Invalid media attachment path omitted: relative/voice.mp3\n"
+            f"Invalid media attachment path omitted: {missing_path}"
+        )
+        assert channel.media_sent == []
+
+    def test_extract_media_directives_parses_valid_media_line(self, tmp_path):
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+
+        text, media_paths = _extract_media_directives(f"Here you go.\nMEDIA:{image_path}")
+
+        assert text == "Here you go."
+        assert media_paths == [str(image_path)]
+
+    def test_extract_media_directives_keeps_invalid_media_lines_as_warnings(self, tmp_path):
+        missing_path = tmp_path / "missing.png"
+
+        text, media_paths = _extract_media_directives(
+            "MEDIA:/tmp/.../voice.mp3\n"
+            "MEDIA:relative/voice.mp3\n"
+            f"MEDIA:{missing_path}"
+        )
+
+        assert text == (
+            "Invalid media attachment path omitted: /tmp/.../voice.mp3\n"
+            "Invalid media attachment path omitted: relative/voice.mp3\n"
+            f"Invalid media attachment path omitted: {missing_path}"
+        )
+        assert media_paths == []
 
     def test_extract_media_directives_parses_local_markdown_images(self, tmp_path):
         image_path = tmp_path / "openai_home.png"
