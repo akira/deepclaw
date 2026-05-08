@@ -305,6 +305,24 @@ class TestDeepClawLocalShellBackend:
         assert compressed.output == "hello-from-backend"
 
 
+class TestMediaCompletionGuidance:
+    def test_voice_request_guidance_rejects_diagnosis_only_completion(self):
+        voice_request = "Please send that as a Telegram voice message."
+        diagnosis_only_final_response = (
+            "The model is not using TTS yet, so I'll generate and send the audio next."
+        )
+        guidance = agent_mod.MEDIA_COMPLETION_GUIDANCE
+
+        assert "voice" in voice_request
+        assert "the model is not using TTS" in diagnosis_only_final_response
+        assert "diagnosing the tool path is not completion" in guidance
+        assert "Generate or obtain the real media file" in guidance
+        assert "MEDIA:/absolute/path" in guidance
+        assert "Verify the send/delivery result" in guidance
+        assert "Do not end with" in guidance
+        assert "concrete blocker" in guidance
+
+
 class TestCompactionHelpersRemoved:
     def test_custom_compaction_normalization_helpers_are_removed(self):
         assert not hasattr(agent_mod, "_normalize_compaction_summary")
@@ -464,6 +482,7 @@ class TestCreateAgent:
 
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
+        assert agent_mod.MEDIA_COMPLETION_GUIDANCE in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE in captured["system_prompt"]
 
     def test_skips_openai_execution_guidance_for_non_gpt_models(self, tmp_path, monkeypatch):
@@ -511,4 +530,5 @@ class TestCreateAgent:
 
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
+        assert agent_mod.MEDIA_COMPLETION_GUIDANCE in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE not in captured["system_prompt"]

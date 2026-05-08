@@ -269,6 +269,18 @@ Responses that only describe intentions without acting are not acceptable.
 """
 
 
+MEDIA_COMPLETION_GUIDANCE = """\
+## Media Delivery Completion
+
+For Telegram voice, audio, image, video, or other media requests, diagnosing the tool path is not completion. You must:
+- Generate or obtain the real media file requested by the user.
+- Deliver it through the available Telegram/media mechanism, such as a local media directive (`MEDIA:/absolute/path`) that the gateway can send natively.
+- Verify the send/delivery result before claiming success.
+
+Do not end with "I'll generate/send it next", "the model is not using TTS", or similar tool-path diagnosis. If you cannot deliver the media after attempting the right path, state the concrete blocker and what was attempted.
+"""
+
+
 OPENAI_MODEL_EXECUTION_GUIDANCE = """\
 ## Execution Discipline
 
@@ -510,6 +522,7 @@ def create_agent(config, checkpointer):
     if soul:
         system_prompt_parts.append(soul)
     system_prompt_parts.append(TOOL_USE_ENFORCEMENT)
+    system_prompt_parts.append(MEDIA_COMPLETION_GUIDANCE)
 
     model_name = (config.model or "").lower()
     if any(token in model_name for token in OPENAI_MODEL_GUIDANCE_MODELS):
