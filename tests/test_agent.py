@@ -419,6 +419,21 @@ class TestCreateAgent:
         )
         assert captured["subagents"] == [("subagents", "test:model", captured["backend"])]
 
+    def test_guidance_treats_skipped_notification_warnings_as_partial_failure(self):
+        assert "warning output, skipped side effects" in agent_mod.DEFAULT_SOUL
+        assert "even when the shell exit code is 0" in agent_mod.DEFAULT_SOUL
+        assert "capture and report the newly produced results before rerunning" in agent_mod.DEFAULT_SOUL
+        assert "Do not claim notification, delivery, or persistence success" in (
+            agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE
+        )
+        assert "missing notification credential; notification skipped" in (
+            agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE
+        )
+        assert "preserve/report the found results" in agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE
+        assert "delivery/notification was not completed" in (
+            agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE
+        )
+
     def test_includes_openai_execution_guidance_for_gpt_models(self, tmp_path, monkeypatch):
         captured = {}
 
