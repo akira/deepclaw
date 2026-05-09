@@ -52,6 +52,7 @@ _TOOL_ICONS = {
     "browserbase_rendered_extract": "🖼️",
     "browserbase_interactive_task": "🖱️",
     "vision_analyze": "🖼️",
+    "text_to_speech": "🔊",
 }
 
 # Phrases that suggest the model is describing a future action instead of calling a tool
@@ -198,15 +199,27 @@ def _safe_preview(text: Any, limit: int = 48) -> str:
     return _truncate_preview(redact_secrets(str(text)), limit=limit)
 
 
-def _extract_media_directives(text: str) -> tuple[str, list[str]]:
-    """Extract local media references from text while preserving non-media text."""
-    media_paths: list[str] = []
+def _extract_media_directives(text: str) -> tuple[str, list[tuple[str, bool]]]:
+    """Extract local media references from text while preserving non-media text.
+
+    Returns cleaned text and a list of (path, is_voice) tuples.
+    is_voice is True when [[audio_as_voice]] directive precedes the MEDIA: tag.
+    """
+    media_paths: list[tuple[str, bool]] = []
     kept_lines: list[str] = []
+    voice_mode = False
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
+
+        # Voice bubble directive (Hermes-compatible)
+        if stripped == "[[audio_as_voice]]":
+            voice_mode = True
+            continue
+
         match = _MEDIA_LINE_RE.match(stripped)
         if match:
-            media_paths.append(match.group("path").strip())
+            media_paths.append((match.group("path").strip(), voice_mode))
+            voice_mode = False  # reset after consuming
             continue
 
         cleaned_line = raw_line
@@ -216,7 +229,7 @@ def _extract_media_directives(text: str) -> tuple[str, list[str]]:
                 candidate = candidate[len("file://") :]
             candidate_path = Path(candidate)
             if candidate_path.is_absolute() and candidate_path.exists():
-                media_paths.append(str(candidate_path))
+                media_paths.append((str(candidate_path), False))
                 cleaned_line = cleaned_line.replace(image_match.group(0), "").strip()
         if cleaned_line:
             kept_lines.append(cleaned_line)
@@ -999,8 +1012,19 @@ class Gateway:
             await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])
         for extra_chunk in chunks[1:]:
             await self._send_redacted_message(channel, chat_id, extra_chunk)
-        for media_path in media_paths:
-            await channel.send_media(chat_id, media_path)
+        for media_path, is_voice in media_paths:
+            try:
+                if not Path(media_path).exists():
+                    logger.warning("Media file not found: %s", media_path)
+                    continue
+                if is_voice and hasattr(channel, "send_voice"):
+                    await channel.send_voice(chat_id, media_path)
+                elif hasattr(channel, "send_media"):
+                    await channel.send_media(chat_id, media_path)
+                else:
+                    logger.warning("Channel %s does not support media delivery", channel.name)
+            except Exception:
+                logger.exception("Failed to send media %s", media_path)
 
         return pending
 

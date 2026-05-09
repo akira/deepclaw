@@ -1582,6 +1582,14 @@ class TelegramBotChannel(Channel):
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
 
+    async def send_voice(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        """Send audio as a Telegram voice message (round bubble)."""
+        with _open_media_file(path) as handle:
+            msg = await self._bot.send_voice(chat_id=int(chat_id), voice=handle, caption=caption)
+        msg_id = str(msg.message_id)
+        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return msg_id
+
     async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
         """Edit a previously sent message."""
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
@@ -1670,6 +1678,19 @@ class TelegramChannel(Channel):
             )
         else:
             raise RuntimeError("No Telegram message context available for send_media()")
+        msg_id = str(msg.message_id)
+        _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+        return msg_id
+
+    async def send_voice(self, chat_id: str, path: str, caption: str | None = None) -> str:
+        """Send audio as a Telegram voice message (round bubble)."""
+        message = self._update.message
+        if message is None and self._update.callback_query is not None:
+            message = self._update.callback_query.message
+        if message is None:
+            raise RuntimeError("No Telegram message context available for send_voice()")
+        with _open_media_file(path) as handle:
+            msg = await message.reply_voice(voice=handle, caption=caption)
         msg_id = str(msg.message_id)
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
