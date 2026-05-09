@@ -330,6 +330,23 @@ class TestCompactionHelpersRemoved:
         )
 
 
+class TestPromptGuidance:
+    def test_stateful_script_followups_preserve_new_results(self):
+        soul = agent_mod.DEFAULT_SOUL
+        openai_guidance = agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE
+
+        assert "scraper, notification, and dedupe scripts" in soul
+        assert "preserve their previous output" in soul
+        assert "read-only/dry-run modes" in soul
+        assert "newly discovered items are not marked seen" in soul
+
+        assert "first run reports new items" in openai_guidance
+        assert "seen-state file" in openai_guidance
+        assert "prior output or safely inspected state" in openai_guidance
+        assert "do not rerun just to reconstruct the list" in openai_guidance
+        assert "lose the newness signal" in openai_guidance
+
+
 class TestCreateAgent:
     def test_wires_cli_style_context_backends_without_custom_compaction_hooks(
         self, tmp_path, monkeypatch
