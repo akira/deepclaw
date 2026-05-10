@@ -330,6 +330,28 @@ class TestCompactionHelpersRemoved:
         )
 
 
+class TestSpecializedToolRouting:
+    def test_tts_routing_guidance_prefers_registered_tool_over_execute(self):
+        prompt = agent_mod.SPECIALIZED_TOOL_ROUTING
+        direct_request = "Please say 'deploy complete' as a Telegram voice note."
+
+        assert "say" in direct_request
+        assert "Telegram voice" in direct_request
+        assert "`text_to_speech` tool as the first relevant tool call" in prompt
+        assert "Do not route these" in prompt
+        assert "requests through `execute`" in prompt
+        assert "do not invoke `text_to_speech` as a shell command" in prompt
+        assert "do not write raw OpenAI/API/CLI TTS scripts" in prompt
+
+    def test_tts_routing_guidance_requires_successful_tool_output_for_media_paths(self):
+        prompt = agent_mod.SPECIALIZED_TOOL_ROUTING
+
+        assert "Only include a final MEDIA/audio path" in prompt
+        assert "successful `text_to_speech` output" in prompt
+        assert "real `audio_path`" in prompt
+        assert "If the tool fails, report the blocker" in prompt
+
+
 class TestCreateAgent:
     def test_wires_cli_style_context_backends_without_custom_compaction_hooks(
         self, tmp_path, monkeypatch
@@ -464,7 +486,11 @@ class TestCreateAgent:
 
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
+        assert agent_mod.SPECIALIZED_TOOL_ROUTING in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE in captured["system_prompt"]
+        assert captured["system_prompt"].index(agent_mod.TOOL_USE_ENFORCEMENT) < captured[
+            "system_prompt"
+        ].index(agent_mod.SPECIALIZED_TOOL_ROUTING)
 
     def test_skips_openai_execution_guidance_for_non_gpt_models(self, tmp_path, monkeypatch):
         captured = {}
@@ -511,4 +537,5 @@ class TestCreateAgent:
 
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
+        assert agent_mod.SPECIALIZED_TOOL_ROUTING in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE not in captured["system_prompt"]

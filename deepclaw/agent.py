@@ -269,6 +269,21 @@ Responses that only describe intentions without acting are not acceptable.
 """
 
 
+SPECIALIZED_TOOL_ROUTING = """\
+## Specialized Tool Routing
+
+For text-to-speech, voice, spoken-audio, narration, or Telegram voice requests, call the
+registered `text_to_speech` tool as the first relevant tool call. Do not route these
+requests through `execute`, do not invoke `text_to_speech` as a shell command, and do
+not write raw OpenAI/API/CLI TTS scripts unless the registered tool is unavailable or
+returns a concrete error.
+
+Only include a final MEDIA/audio path after successful `text_to_speech` output provides
+a real `audio_path`. If the tool fails, report the blocker instead of claiming an audio
+file was created.
+"""
+
+
 OPENAI_MODEL_EXECUTION_GUIDANCE = """\
 ## Execution Discipline
 
@@ -502,14 +517,14 @@ def create_agent(config, checkpointer):
     # summarization middleware.
     middleware.append(create_summarization_tool_middleware(agent_model, composite_backend))
 
-    # System prompt from SOUL.md, always followed by tool-use enforcement.
-    # Add stronger execution guidance for GPT/Codex-family models, which are
-    # more likely to narrate plans or declare completion without acting.
+    # System prompt from SOUL.md, always followed by tool-use enforcement and
+    # specialized routing for direct media/tool requests before model-specific guidance.
     soul = _load_soul()
     system_prompt_parts = []
     if soul:
         system_prompt_parts.append(soul)
     system_prompt_parts.append(TOOL_USE_ENFORCEMENT)
+    system_prompt_parts.append(SPECIALIZED_TOOL_ROUTING)
 
     model_name = (config.model or "").lower()
     if any(token in model_name for token in OPENAI_MODEL_GUIDANCE_MODELS):
