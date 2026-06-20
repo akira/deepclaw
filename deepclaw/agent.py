@@ -3,6 +3,7 @@
 import copy
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -55,6 +56,158 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             extra_env=self._deepclaw_env_overrides,
             keep_sensitive=self._allowed_sensitive,
         )
+
+    @staticmethod
+    def _sanitize_background_command(command: str) -> str:
+        """Ensure backgrounded commands don't hold capture pipes open.
+
+        When ``subprocess.run`` uses ``capture_output=True`` it creates pipes
+        for stdout/stderr.  A backgrounded process (``cmd &``) inherits those
+        pipe FDs via the shell's fork, keeping them open indefinitely.
+        ``subprocess.run`` then blocks waiting for EOF that never arrives.
+
+        This rewrites background commands to redirect stdout/stderr to
+        ``/dev/null`` when the command doesn't already include an explicit
+        redirect, so the pipes close as soon as the shell exits.
+
+        Also strips ``disown`` which is not available under ``/bin/sh`` on
+        many systems (notably Debian/Ubuntu where /bin/sh is dash).
+        """
+
+        def _fd_prefix_start(text: str, index: int) -> int | None:
+            start = index
+            while start > 0 and text[start - 1].isdigit():
+                start -= 1
+            if start == index:
+                return None
+            if start == 0 or text[start - 1].isspace() or text[start - 1] in ";|&(<":
+                return start
+            return None
+
+        # Remove 'disown' — it's a bashism unavailable in /bin/sh (dash)
+        command = re.sub(r"\s\bdisown\b\s*$", "", command)
+        command = re.sub(r"\s\bdisown\b\s+(?!;|\||&)", " ", command)
+        command = re.sub(r"\s\bdisown\b\s*;", ";", command)
+
+        if "&" not in command:
+            return command
+
+        # Track the *current* stdout/stderr destinations within each command
+        # segment. This is intentionally order-sensitive so cases like
+        # `cmd 2>&1 >/tmp/out &` still get a stderr redirect injected: the
+        # `2>&1` duplicates the original stdout pipe before stdout is sent to
+        # the file, so stderr would otherwise keep the capture pipe open.
+        result: list[str] = []
+        quote_char: str | None = None
+        stdout_redirected = False
+        stderr_redirected = False
+        i = 0
+        while i < len(command):
+            ch = command[i]
+            prev = command[i - 1] if i > 0 else ""
+            nxt = command[i + 1] if i + 1 < len(command) else ""
+
+            if quote_char:
+                result.append(ch)
+                if ch == quote_char:
+                    quote_char = None
+                i += 1
+                continue
+
+            if ch == "\\":
+                result.append(ch)
+                if i + 1 < len(command):
+                    result.append(command[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+
+            if ch in "\"'":
+                quote_char = ch
+                result.append(ch)
+                i += 1
+                continue
+
+            if ch == "&" and nxt == ">":
+                op_end = i + 2
+                if op_end < len(command) and command[op_end] == ">":
+                    op_end += 1
+                stdout_redirected = True
+                stderr_redirected = True
+                result.append(command[i:op_end])
+                i = op_end
+                continue
+
+            if ch == ">":
+                prefix_start = _fd_prefix_start(command, i)
+                fd = command[prefix_start:i] if prefix_start is not None else "1"
+                op_end = i + 1
+                if op_end < len(command) and command[op_end] in ">|":
+                    op_end += 1
+
+                if op_end < len(command) and command[op_end] == "&":
+                    op_end += 1
+                    target_start = op_end
+                    if op_end < len(command) and command[op_end] == "-":
+                        op_end += 1
+                    else:
+                        while op_end < len(command) and command[op_end].isdigit():
+                            op_end += 1
+                    target = command[target_start:op_end]
+                    if fd == "2":
+                        if target == "-":
+                            stderr_redirected = True
+                        elif target == "1":
+                            stderr_redirected = stdout_redirected
+                    else:
+                        if target == "-":
+                            stdout_redirected = True
+                        elif target == "2":
+                            stdout_redirected = stderr_redirected
+                elif fd == "2":
+                    stderr_redirected = True
+                else:
+                    stdout_redirected = True
+
+                result.append(command[i:op_end])
+                i = op_end
+                continue
+
+            is_background = (
+                ch == "&"
+                and prev != "&"
+                and nxt != "&"
+                and prev != "\\"
+                and prev not in (">", "1")
+                and nxt != ">"
+            )
+            if is_background:
+                if not stdout_redirected:
+                    if result and not result[-1].endswith((" ", "\t")):
+                        result.append(" ")
+                    result.append(">/dev/null")
+                if not stderr_redirected:
+                    if result and not result[-1].endswith((" ", "\t")):
+                        result.append(" ")
+                    result.append("2>/dev/null")
+                if result and not result[-1].endswith((" ", "\t")):
+                    result.append(" ")
+                result.append("&")
+                stdout_redirected = False
+                stderr_redirected = False
+                i += 1
+                continue
+
+            result.append(ch)
+
+            if ch == ";" or (ch == "|" and prev != "|" and nxt != "|"):
+                stdout_redirected = False
+                stderr_redirected = False
+
+            i += 1
+
+        return "".join(result)
 
     def _rewrite_command_with_rtk(
         self,
@@ -132,6 +285,11 @@ class DeepClawLocalShellBackend(LocalShellBackend):
                 exit_code=1,
                 truncated=False,
             )
+
+        # Sanitize backgrounded commands so they don't hold capture pipes open
+        # (which would cause subprocess.run to block until timeout).  Also
+        # strips disown which is unavailable under /bin/sh on Debian/Ubuntu.
+        prepared_command = self._sanitize_background_command(prepared_command)
 
         try:
             result = subprocess.run(  # noqa: S602
