@@ -575,6 +575,21 @@ class TestBackgroundCommandSanitization:
         result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
         assert result == cmd
 
+    def test_escaped_ampersand_not_treated_as_background(self):
+        cmd = r"echo a \& b"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == cmd
+
+    def test_stderr_append_redirect_still_gets_stdout_redirect(self):
+        cmd = "sleep 10 2>>/tmp/sleep.err &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 2>>/tmp/sleep.err >/dev/null &"
+
+    def test_order_sensitive_redirect_keeps_stderr_safe(self):
+        cmd = "sleep 10 2>&1 >/tmp/sleep.out &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 2>&1 >/tmp/sleep.out 2>/dev/null &"
+
     def test_background_command_completes_without_hanging(self):
         """Regression: backgrounded command must not block subprocess.run.
 
