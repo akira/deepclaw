@@ -56,6 +56,124 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             keep_sensitive=self._allowed_sensitive,
         )
 
+    @staticmethod
+    def _has_background_operator(command: str) -> bool:
+        """Detect whether a shell command backgrounds a process with ``&``.
+
+        Looks for ``&`` that is not inside quotes and not part of ``&&`` or ``>&``
+        / ``2>&1`` style redirects.  This is a best-effort heuristic — false
+        positives/negatives are possible but the cost of a false positive is low
+        (an extra ``>/dev/null`` redirect on a foreground command, which is a
+        no-op when combined with ``capture_output``).
+        """
+        # Strip quoted strings so & inside quotes is ignored
+        stripped = ""
+        quote_char: str | None = None
+        for ch in command:
+            if quote_char:
+                if ch == quote_char:
+                    quote_char = None
+                continue
+            if ch in "\"'":
+                quote_char = ch
+                continue
+            stripped += ch
+
+        # Look for & not preceded/followed by & (&&) and not preceded by > (>&)
+        # or a digit (2>&1).  Walk char-by-char for robustness.
+        i = 0
+        while i < len(stripped):
+            if stripped[i] == "&":
+                prev = stripped[i - 1] if i > 0 else ""
+                nxt = stripped[i + 1] if i + 1 < len(stripped) else ""
+                if prev != "&" and nxt != "&":
+                    # Not &> or >& (file descriptor redirect)
+                    if prev in (">", "1") or nxt == ">":
+                        i += 1
+                        continue
+                    return True
+            i += 1
+        return False
+
+    @staticmethod
+    def _sanitize_background_command(command: str) -> str:
+        """Ensure backgrounded commands don't hold capture pipes open.
+
+        When ``subprocess.run`` uses ``capture_output=True`` it creates pipes
+        for stdout/stderr.  A backgrounded process (``cmd &``) inherits those
+        pipe FDs via the shell's fork, keeping them open indefinitely.
+        ``subprocess.run`` then blocks waiting for EOF that never arrives.
+
+        This rewrites background commands to redirect stdout/stderr to
+        ``/dev/null`` when the command doesn't already include an explicit
+        redirect, so the pipes close as soon as the shell exits.
+
+        Also strips ``disown`` which is not available under ``/bin/sh`` on
+        many systems (notably Debian/Ubuntu where /bin/sh is dash).
+        """
+        # Remove 'disown' — it's a bashism unavailable in /bin/sh (dash)
+        # Match standalone 'disown' tokens
+        import re
+
+        command = re.sub(r"\s\bdisown\b\s*$", "", command)
+        command = re.sub(r"\s\bdisown\b\s+(?!;|\||&)", " ", command)
+        command = re.sub(r"\s\bdisown\b\s*;", ";", command)
+
+        if not DeepClawLocalShellBackend._has_background_operator(command):
+            return command
+
+        # Check if stdout/stderr are already explicitly redirected.
+        # This is intentionally broad: if the command already sends stdout or
+        # stderr somewhere explicit, preserve that behavior rather than
+        # overwriting it with /dev/null.
+        stripped = ""
+        quote_char: str | None = None
+        for ch in command:
+            if quote_char:
+                if ch == quote_char:
+                    quote_char = None
+                continue
+            if ch in "\"'":
+                quote_char = ch
+                continue
+            stripped += ch
+
+        has_stdout_redirect = False
+        has_stderr_redirect = False
+        i = 0
+        while i < len(stripped):
+            ch = stripped[i]
+            if ch == "&" and i + 1 < len(stripped) and stripped[i + 1] == ">":
+                has_stdout_redirect = True
+                has_stderr_redirect = True
+                i += 2
+                continue
+            if ch == ">":
+                prev = stripped[i - 1] if i > 0 else ""
+                if prev == "2":
+                    has_stderr_redirect = True
+                elif prev == "&":
+                    has_stdout_redirect = True
+                    has_stderr_redirect = True
+                else:
+                    has_stdout_redirect = True
+                i += 1
+                continue
+            i += 1
+
+        suffix = ""
+        if not has_stdout_redirect:
+            suffix += " >/dev/null"
+        if not has_stderr_redirect:
+            suffix += " 2>/dev/null"
+
+        # Insert redirect before the final & (background operator)
+        # Find the last unquoted & that's a background operator
+        if command.rstrip().endswith("&"):
+            return command.rstrip()[:-1].rstrip() + suffix + " &"
+        # If the & is followed by disown or other text, just append
+        return command.rstrip() + suffix
+
     def _rewrite_command_with_rtk(
         self,
         command: str,
@@ -132,6 +250,11 @@ class DeepClawLocalShellBackend(LocalShellBackend):
                 exit_code=1,
                 truncated=False,
             )
+
+        # Sanitize backgrounded commands so they don't hold capture pipes open
+        # (which would cause subprocess.run to block until timeout).  Also
+        # strips disown which is unavailable under /bin/sh on Debian/Ubuntu.
+        prepared_command = self._sanitize_background_command(prepared_command)
 
         try:
             result = subprocess.run(  # noqa: S602
