@@ -309,6 +309,11 @@ class _RateLimitedEditChannel(_FakeStreamingChannel):
         self.edits.append((chat_id, message_id, text))
 
 
+class _UnavailableEditChannel(_FakeStreamingChannel):
+    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+        raise ChannelEditUnavailable("missing cached editable message")
+
+
 class TestTelegramBotChannel:
     @pytest.mark.asyncio
     async def test_send_short_message(self):
@@ -365,9 +370,7 @@ class TestTelegramBotChannel:
     @pytest.mark.asyncio
     async def test_send_retries_on_retry_after(self, monkeypatch):
         bot = MagicMock()
-        bot.send_message = AsyncMock(
-            side_effect=[RetryAfter(0), SimpleNamespace(message_id=104)]
-        )
+        bot.send_message = AsyncMock(side_effect=[RetryAfter(0), SimpleNamespace(message_id=104)])
         sleep_calls: list[float] = []
 
         async def _fake_sleep(seconds: float) -> None:
@@ -614,6 +617,21 @@ class TestGatewayRedaction:
         streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
         gateway = Gateway(agent=agent, streaming_config=streaming)
         channel = _RateLimitedEditChannel(retry_after=60)
+        incoming = SimpleNamespace(chat_id="123", text="do thing")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert channel.sent == [("123", "Thinking..."), ("123", "Done.")]
+        assert channel.edits == []
+
+    @pytest.mark.asyncio
+    async def test_gateway_falls_back_to_fresh_send_after_edit_unavailable(self):
+        agent = _FakeStreamingAgent(
+            [(SimpleNamespace(content_blocks=[{"type": "text", "text": "Done."}]), {})]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _UnavailableEditChannel()
         incoming = SimpleNamespace(chat_id="123", text="do thing")
 
         await gateway.handle_message(channel, incoming, "thread-1")
@@ -2766,6 +2784,41 @@ class TestSafetyApprovalCommands:
         assert (
             kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-2"
         )
+
+    @pytest.mark.asyncio
+    async def test_approve_retries_follow_up_pending_review_after_retry_after(self, monkeypatch):
+        update = _make_slash_update(text="/approve")
+        update.message.reply_text = AsyncMock(
+            side_effect=[RetryAfter(0), SimpleNamespace(message_id=202)]
+        )
+        pending = {
+            "1": {
+                "id": "interrupt-1",
+                "thread_id": "thread-1",
+                "type": "safety_review",
+                "message": "Approve or deny?",
+            }
+        }
+        next_pending = {
+            "id": "interrupt-2",
+            "thread_id": "thread-1",
+            "type": "safety_review",
+            "message": "Need another approval",
+        }
+        gateway = MagicMock()
+        gateway.resume_interrupt = AsyncMock(return_value=next_pending)
+        ctx = _make_slash_context(extra={PENDING_APPROVALS_KEY: pending, GATEWAY_KEY: gateway})
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        monkeypatch.setattr("deepclaw.channels.telegram.asyncio.sleep", _fake_sleep)
+
+        await cmd_approve(update, ctx)
+
+        assert update.message.reply_text.await_count == 2
+        assert sleep_calls
 
     @pytest.mark.asyncio
     async def test_approve_run_can_be_stopped_while_resume_interrupt_is_in_flight(self):

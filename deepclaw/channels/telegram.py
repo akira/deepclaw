@@ -435,10 +435,12 @@ async def _drain_queued_run(
                 pending_text = pending.get("message") or "Safety review required."
                 pending_markup = _pending_approval_markup(pending["id"])
                 await _call_with_retry_after_retry(
-                    lambda pending_text=pending_text, pending_markup=pending_markup: context.bot.send_message(
-                        chat_id=int(chat_id),
-                        text=pending_text,
-                        reply_markup=pending_markup,
+                    lambda pending_text=pending_text, pending_markup=pending_markup: (
+                        context.bot.send_message(
+                            chat_id=int(chat_id),
+                            text=pending_text,
+                            reply_markup=pending_markup,
+                        )
                     ),
                     description=f"pending approval send chat {chat_id}",
                 )
@@ -1346,11 +1348,23 @@ async def _resume_pending_interrupt(
         if next_pending:
             approvals[chat_id] = next_pending
             pending_text = next_pending.get("message") or "Safety review required."
-            reply_kwargs = {"reply_markup": _pending_approval_markup(next_pending["id"])}
+            pending_markup = _pending_approval_markup(next_pending["id"])
             if update.message is not None:
-                await update.message.reply_text(pending_text, **reply_kwargs)
+                message = update.message
+                await _call_with_retry_after_retry(
+                    lambda message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
+                        pending_text, reply_markup=pending_markup
+                    ),
+                    description=f"resume pending approval reply chat {chat_id}",
+                )
             elif update.callback_query and update.callback_query.message is not None:
-                await update.callback_query.message.reply_text(pending_text, **reply_kwargs)
+                message = update.callback_query.message
+                await _call_with_retry_after_retry(
+                    lambda message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
+                        pending_text, reply_markup=pending_markup
+                    ),
+                    description=f"resume pending approval callback reply chat {chat_id}",
+                )
         else:
             approvals.pop(chat_id, None)
             await _drain_queued_run(context, chat_id=chat_id, thread_id=pending["thread_id"])
