@@ -512,3 +512,108 @@ class TestCreateAgent:
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE not in captured["system_prompt"]
+
+
+class TestBackgroundCommandSanitization:
+    """Regression tests for background-command pipe-FD leak.
+
+    When the model emits a ``nohup ... &``-style command, the backgrounded
+    process inherits the capture pipes from ``subprocess.run`` and keeps
+    them open, causing ``subprocess.run`` to block until timeout.  The fix
+    rewrites background commands to redirect stdout/stderr to ``/dev/null``
+    and strips the ``disown`` builtin (unavailable under ``/bin/sh``).
+    """
+
+    def test_background_command_without_redirect_gets_redirect_added(self):
+        cmd = "nohup python3 -m http.server 80 --bind 0.0.0.0 &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert ">" in result
+        assert result.rstrip().endswith("&")
+        assert ">/dev/null" in result
+        assert "2>/dev/null" in result or "2>&1" in result
+
+    def test_background_command_with_redirect_not_duplicated(self):
+        cmd = "nohup python3 -m http.server 80 --bind 0.0.0.0 >/dev/null 2>&1 &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        # Should not add a second redirect; existing one is sufficient
+        assert result.count(">") <= 3  # original has >/dev/null and 2>&1
+
+    def test_background_command_with_file_redirect_is_preserved(self):
+        cmd = "nohup python3 -m http.server 80 >/tmp/server.log 2>/tmp/server.err &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == cmd
+
+    def test_disown_stripped_from_background_command(self):
+        cmd = "nohup python3 -m http.server 80 --bind 0.0.0.0 >/dev/null 2>&1 & disown"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert "disown" not in result
+
+    def test_disown_stripped_and_redirect_added_when_no_redirect(self):
+        cmd = "nohup python3 -m http.server 80 & disown"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert "disown" not in result
+        assert ">/dev/null" in result
+        assert result.rstrip().endswith("&")
+
+    def test_inline_background_command_gets_redirect_before_ampersand(self):
+        cmd = "sleep 10 & echo done"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 >/dev/null 2>/dev/null & echo done"
+
+    def test_later_foreground_redirect_does_not_mask_background_redirect(self):
+        cmd = "sleep 10 & echo done >/tmp/done.log"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 >/dev/null 2>/dev/null & echo done >/tmp/done.log"
+
+    def test_foreground_command_not_modified(self):
+        cmd = "echo hello"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == cmd
+
+    def test_quoted_ampersand_not_treated_as_background(self):
+        cmd = 'echo "a & b"'
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == cmd
+
+    def test_escaped_ampersand_not_treated_as_background(self):
+        cmd = r"echo a \& b"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == cmd
+
+    def test_stderr_append_redirect_still_gets_stdout_redirect(self):
+        cmd = "sleep 10 2>>/tmp/sleep.err &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 2>>/tmp/sleep.err >/dev/null &"
+
+    def test_order_sensitive_redirect_keeps_stderr_safe(self):
+        cmd = "sleep 10 2>&1 >/tmp/sleep.out &"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 2>&1 >/tmp/sleep.out 2>/dev/null &"
+
+    def test_background_command_completes_without_hanging(self):
+        """Regression: backgrounded command must not block subprocess.run.
+
+        Before the fix, ``nohup ... &`` without output redirect caused
+        ``subprocess.run(capture_output=True)`` to wait for EOF on pipes
+        held open by the background process, blocking until timeout.
+        """
+        import time
+
+        backend = agent_mod.DeepClawLocalShellBackend(
+            root_dir="/tmp", virtual_mode=True, timeout=10
+        )
+        try:
+            start = time.time()
+            result = backend.execute(
+                "nohup python3 -m http.server 18099 --bind 127.0.0.1 &",
+                timeout=5,
+            )
+            elapsed = time.time() - start
+
+            assert result.exit_code == 0
+            # Should complete in well under a second, not 5+ seconds
+            assert elapsed < 2.0, f"Took {elapsed:.2f}s — likely blocked on pipe FDs"
+        finally:
+            import os
+
+            os.system("pkill -f http.server.18099 2>/dev/null")
