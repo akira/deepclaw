@@ -3,6 +3,7 @@
 import copy
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -57,45 +58,6 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         )
 
     @staticmethod
-    def _has_background_operator(command: str) -> bool:
-        """Detect whether a shell command backgrounds a process with ``&``.
-
-        Looks for ``&`` that is not inside quotes and not part of ``&&`` or ``>&``
-        / ``2>&1`` style redirects.  This is a best-effort heuristic — false
-        positives/negatives are possible but the cost of a false positive is low
-        (an extra ``>/dev/null`` redirect on a foreground command, which is a
-        no-op when combined with ``capture_output``).
-        """
-        # Strip quoted strings so & inside quotes is ignored
-        stripped = ""
-        quote_char: str | None = None
-        for ch in command:
-            if quote_char:
-                if ch == quote_char:
-                    quote_char = None
-                continue
-            if ch in "\"'":
-                quote_char = ch
-                continue
-            stripped += ch
-
-        # Look for & not preceded/followed by & (&&) and not preceded by > (>&)
-        # or a digit (2>&1).  Walk char-by-char for robustness.
-        i = 0
-        while i < len(stripped):
-            if stripped[i] == "&":
-                prev = stripped[i - 1] if i > 0 else ""
-                nxt = stripped[i + 1] if i + 1 < len(stripped) else ""
-                if prev != "&" and nxt != "&":
-                    # Not &> or >& (file descriptor redirect)
-                    if prev in (">", "1") or nxt == ">":
-                        i += 1
-                        continue
-                    return True
-            i += 1
-        return False
-
-    @staticmethod
     def _sanitize_background_command(command: str) -> str:
         """Ensure backgrounded commands don't hold capture pipes open.
 
@@ -112,14 +74,11 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         many systems (notably Debian/Ubuntu where /bin/sh is dash).
         """
         # Remove 'disown' — it's a bashism unavailable in /bin/sh (dash)
-        # Match standalone 'disown' tokens
-        import re
-
         command = re.sub(r"\s\bdisown\b\s*$", "", command)
         command = re.sub(r"\s\bdisown\b\s+(?!;|\||&)", " ", command)
         command = re.sub(r"\s\bdisown\b\s*;", ";", command)
 
-        if not DeepClawLocalShellBackend._has_background_operator(command):
+        if "&" not in command:
             return command
 
         # Track redirects per command segment so we only preserve redirects
