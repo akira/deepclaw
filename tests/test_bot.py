@@ -10,6 +10,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphRecursionError
 from telegram import InlineKeyboardMarkup
+from telegram.constants import ChatAction
 from telegram.error import RetryAfter
 
 from deepclaw.auth import is_user_allowed
@@ -397,6 +398,16 @@ class TestTelegramBotChannel:
 
         assert excinfo.value.retry_after_seconds >= 3
 
+    @pytest.mark.asyncio
+    async def test_send_typing_swallows_retry_after(self):
+        bot = MagicMock()
+        bot.send_chat_action = AsyncMock(side_effect=RetryAfter(1))
+        channel = TelegramBotChannel(bot)
+
+        await channel.send_typing("123")
+
+        bot.send_chat_action.assert_awaited_once_with(chat_id=123, action=ChatAction.TYPING)
+
 
 class TestTelegramChannel:
     @pytest.mark.asyncio
@@ -429,6 +440,17 @@ class TestTelegramChannel:
 
         with pytest.raises(ChannelEditUnavailable):
             await channel.edit_message("1", "missing", "updated")
+
+    @pytest.mark.asyncio
+    async def test_send_typing_swallows_retry_after_for_update_channel(self):
+        update = _make_slash_update(text="hello")
+        update.effective_chat.send_action = AsyncMock(side_effect=RetryAfter(1))
+        ctx = _make_slash_context()
+        channel = TelegramChannel(update, ctx)
+
+        await channel.send_typing("1")
+
+        update.effective_chat.send_action.assert_awaited_once_with(ChatAction.TYPING)
 
     @pytest.mark.asyncio
     async def test_send_media_photo_path_uses_reply_photo(self, tmp_path):
@@ -2819,6 +2841,9 @@ class TestSafetyApprovalCommands:
 
         assert update.message.reply_text.await_count == 2
         assert sleep_calls
+        args, kwargs = update.message.reply_text.await_args
+        assert args == ("Need another approval",)
+        assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "safety:approve_once:interrupt-2"
 
     @pytest.mark.asyncio
     async def test_approve_run_can_be_stopped_while_resume_interrupt_is_in_flight(self):

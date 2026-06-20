@@ -435,7 +435,7 @@ async def _drain_queued_run(
                 pending_text = pending.get("message") or "Safety review required."
                 pending_markup = _pending_approval_markup(pending["id"])
                 await _call_with_retry_after_retry(
-                    lambda pending_text=pending_text, pending_markup=pending_markup: (
+                    lambda chat_id=chat_id, pending_text=pending_text, pending_markup=pending_markup: (
                         context.bot.send_message(
                             chat_id=int(chat_id),
                             text=pending_text,
@@ -1352,7 +1352,7 @@ async def _resume_pending_interrupt(
             if update.message is not None:
                 message = update.message
                 await _call_with_retry_after_retry(
-                    lambda message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
+                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
                         pending_text, reply_markup=pending_markup
                     ),
                     description=f"resume pending approval reply chat {chat_id}",
@@ -1360,7 +1360,7 @@ async def _resume_pending_interrupt(
             elif update.callback_query and update.callback_query.message is not None:
                 message = update.callback_query.message
                 await _call_with_retry_after_retry(
-                    lambda message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
+                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
                         pending_text, reply_markup=pending_markup
                     ),
                     description=f"resume pending approval callback reply chat {chat_id}",
@@ -1702,7 +1702,10 @@ class TelegramBotChannel(Channel):
 
     async def send_typing(self, chat_id: str) -> None:
         """Send a typing indicator."""
-        await self._bot.send_chat_action(chat_id=int(chat_id), action=ChatAction.TYPING)
+        try:
+            await self._bot.send_chat_action(chat_id=int(chat_id), action=ChatAction.TYPING)
+        except RetryAfter:
+            logger.debug("Telegram typing indicator rate-limited for chat %s", chat_id)
 
 
 class TelegramChannel(Channel):
@@ -1802,7 +1805,10 @@ class TelegramChannel(Channel):
 
     async def send_typing(self, chat_id: str) -> None:
         """Send a typing indicator."""
-        await self._update.effective_chat.send_action(ChatAction.TYPING)
+        try:
+            await self._update.effective_chat.send_action(ChatAction.TYPING)
+        except RetryAfter:
+            logger.debug("Telegram callback typing indicator rate-limited for chat %s", chat_id)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -13,6 +13,9 @@ class ChannelEditRateLimited(ChannelDeliveryIssue):
 
     retry_after_seconds: float
 
+    def __str__(self) -> str:
+        return f"edit rate-limited, retry after {self.retry_after_seconds:.1f}s"
+
 
 @dataclass
 class ChannelEditUnavailable(ChannelDeliveryIssue):
