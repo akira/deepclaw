@@ -1277,6 +1277,47 @@ class TestGatewayRedaction:
         assert channel.edits[-1][2] == "Checking command..."
 
     @pytest.mark.asyncio
+    async def test_preserves_progress_and_streamed_text_when_safety_review_interrupts(self):
+        interrupt = SimpleNamespace(
+            id="interrupt-3",
+            value={
+                "type": "safety_review",
+                "tool": "execute",
+                "command": "python -c 'print(3)'",
+                "warning": "Inline Python execution",
+                "message": "⚠️ Potentially dangerous command\n\nApprove or deny?",
+            },
+        )
+        agent = _FakeStreamingAgent(
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[
+                            {
+                                "type": "tool_call",
+                                "id": "call-1",
+                                "name": "execute",
+                                "args": {"command": "python -c 'print(3)'"},
+                            },
+                            {"type": "text", "text": "Checking command..."},
+                        ]
+                    ),
+                    {},
+                )
+            ],
+            interrupts=(interrupt,),
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=999)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="run eval")
+
+        pending = await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert pending is not None
+        assert channel.edits[-1][2] == "💻 execute: \"python -c 'print(3)'\"\nChecking command..."
+
+    @pytest.mark.asyncio
     async def test_resume_interrupt_uses_command_resume_payload(self):
         agent = _FakeStreamingAgent(
             [(SimpleNamespace(content_blocks=[{"type": "text", "text": "Approved and ran."}]), {})]

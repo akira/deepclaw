@@ -183,7 +183,7 @@ def _approval_primary_message(*, accumulated: str, assistant_text: str) -> str:
     output. If the interrupt happens before any real output is produced, replace
     the placeholder with a short neutral status.
     """
-    candidate = assistant_text or accumulated or ""
+    candidate = accumulated or assistant_text or ""
     if candidate.strip() and candidate.strip() != THINKING_MESSAGE:
         return candidate
     return "Paused for approval."
