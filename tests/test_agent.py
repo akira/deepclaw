@@ -304,6 +304,84 @@ class TestDeepClawLocalShellBackend:
         assert plain.output == "hello-from-backend"
         assert compressed.output == "hello-from-backend"
 
+    def test_execute_post_filters_large_grep_like_output_when_rtk_is_enabled(self, monkeypatch):
+        backend = agent_mod.DeepClawLocalShellBackend(
+            root_dir=".",
+            virtual_mode=False,
+            timeout=30,
+            compression_mode="rtk",
+        )
+        raw_output = "match\n" * 1200
+        filtered_output = "summary\n" * 20
+        calls = {"rewrite": None, "pipe": None, "executed": None}
+
+        monkeypatch.setattr(
+            agent_mod.shutil,
+            "which",
+            lambda name, path=None: "/usr/bin/rtk" if name == "rtk" else None,
+        )
+
+        def fake_run(command, **kwargs):
+            if isinstance(command, list) and command[:2] == ["/usr/bin/rtk", "rewrite"]:
+                calls["rewrite"] = command
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            if isinstance(command, list) and command[:2] == ["/usr/bin/rtk", "pipe"]:
+                calls["pipe"] = command
+                assert kwargs["input"] == raw_output
+                return subprocess.CompletedProcess(command, 0, stdout=filtered_output, stderr="")
+            calls["executed"] = command
+            return subprocess.CompletedProcess(command, 0, stdout=raw_output, stderr="")
+
+        monkeypatch.setattr(agent_mod.subprocess, "run", fake_run)
+
+        result = backend.execute("grep -R TODO .")
+
+        assert result.exit_code == 0
+        assert result.truncated is False
+        assert result.output == filtered_output.strip()
+        assert calls["rewrite"] == ["/usr/bin/rtk", "rewrite", "grep -R TODO ."]
+        assert calls["pipe"] == ["/usr/bin/rtk", "pipe", "--filter", "grep"]
+        assert calls["executed"] == "grep -R TODO ."
+
+    def test_execute_spills_large_output_to_runtime_file_when_output_remains_huge(
+        self, monkeypatch, tmp_path
+    ):
+        backend = agent_mod.DeepClawLocalShellBackend(
+            root_dir=".",
+            virtual_mode=False,
+            timeout=30,
+            compression_mode="rtk",
+        )
+        raw_output = "radon-line\n" * 2500
+
+        monkeypatch.setattr(agent_mod, "RUNTIME_DIR", tmp_path / "runtime")
+        monkeypatch.setattr(
+            agent_mod.shutil,
+            "which",
+            lambda name, path=None: "/usr/bin/rtk" if name == "rtk" else None,
+        )
+
+        def fake_run(command, **kwargs):
+            if isinstance(command, list) and command[:2] == ["/usr/bin/rtk", "rewrite"]:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout=raw_output, stderr="")
+
+        monkeypatch.setattr(agent_mod.subprocess, "run", fake_run)
+
+        result = backend.execute(
+            "/home/ubuntu/deepclaw/.venv/bin/python -m radon cc deepclaw -s -a"
+        )
+
+        assert result.exit_code == 0
+        assert result.truncated is True
+        assert "Output summarized to preserve context budget." in result.output
+        assert "Full output saved to:" in result.output
+
+        log_dir = tmp_path / "runtime" / "large_tool_results"
+        saved_logs = list(log_dir.glob("terminal-*.log"))
+        assert len(saved_logs) == 1
+        assert saved_logs[0].read_text(encoding="utf-8") == raw_output
+
 
 class TestCompactionHelpersRemoved:
     def test_custom_compaction_normalization_helpers_are_removed(self):

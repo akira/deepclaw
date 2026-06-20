@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -37,6 +38,11 @@ logger = logging.getLogger(__name__)
 class DeepClawLocalShellBackend(LocalShellBackend):
     """Local shell backend with conservative child-env filtering."""
 
+    _POST_FILTER_MIN_BYTES = 4096
+    _POST_FILTER_MIN_LINES = 80
+    _SUMMARY_TRIGGER_BYTES = 16000
+    _SUMMARY_TRIGGER_LINES = 400
+
     def __init__(
         self,
         *args,
@@ -55,6 +61,15 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             extra_env=self._deepclaw_env_overrides,
             keep_sensitive=self._allowed_sensitive,
         )
+
+    def _compression_uses_rtk(self) -> bool:
+        return self._compression_mode == "rtk"
+
+    def _resolve_rtk_path(self, env: dict[str, str]) -> str | None:
+        if not self._compression_uses_rtk():
+            return None
+        rtk_lookup_path = env.get("PATH") or os.environ.get("PATH")
+        return shutil.which("rtk", path=rtk_lookup_path)
 
     def _rewrite_command_with_rtk(
         self,
@@ -100,12 +115,105 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         if self._compression_mode != "rtk":
             return None, f"Error: unknown terminal compression mode: {self._compression_mode}"
 
-        rtk_lookup_path = env.get("PATH") or os.environ.get("PATH")
-        rtk_path = shutil.which("rtk", path=rtk_lookup_path)
+        rtk_path = self._resolve_rtk_path(env)
         if rtk_path is None:
             return None, "Error: RTK compression is enabled but `rtk` was not found in PATH."
 
         return self._rewrite_command_with_rtk(command, rtk_path=rtk_path, env=env, timeout=timeout)
+
+    def _infer_rtk_pipe_filter(self, command: str, prepared_command: str) -> str | None:
+        haystack = f"{command}\n{prepared_command}".lower()
+        filter_hints = (
+            ("pytest", "pytest"),
+            ("py.test", "pytest"),
+            ("grep ", "grep"),
+            ("grep\n", "grep"),
+            ("find ", "find"),
+            ("find\n", "find"),
+            ("git diff", "diff"),
+            ("git log", "git-log"),
+            ("diff ", "diff"),
+        )
+        for needle, filter_name in filter_hints:
+            if needle in haystack:
+                return filter_name
+        return None
+
+    def _should_try_post_filter(self, output: str) -> bool:
+        lines = output.count("\n") + (1 if output else 0)
+        return len(output) >= self._POST_FILTER_MIN_BYTES or lines >= self._POST_FILTER_MIN_LINES
+
+    def _filter_output_with_rtk(
+        self,
+        *,
+        output: str,
+        filter_name: str,
+        rtk_path: str,
+        env: dict[str, str],
+        timeout: int,
+    ) -> str | None:
+        try:
+            filtered = subprocess.run(
+                [rtk_path, "pipe", "--filter", filter_name],
+                check=False,
+                shell=False,
+                input=output,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                cwd=str(self.cwd),
+            )
+        except subprocess.TimeoutExpired:
+            logger.debug("RTK pipe filter %s timed out", filter_name)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("RTK pipe filter %s failed: %s", filter_name, exc)
+            return None
+
+        filtered_output = filtered.stdout.strip()
+        if filtered.returncode != 0 or not filtered_output:
+            return None
+        if len(filtered_output) >= len(output):
+            return None
+        return filtered_output
+
+    def _summary_should_spill(self, output: str) -> bool:
+        lines = output.count("\n") + (1 if output else 0)
+        return len(output) >= self._SUMMARY_TRIGGER_BYTES or lines >= self._SUMMARY_TRIGGER_LINES
+
+    def _spill_large_output_summary(
+        self,
+        *,
+        command: str,
+        output: str,
+        exit_code: int,
+        filter_name: str | None,
+    ) -> str:
+        target_dir = RUNTIME_DIR / "large_tool_results"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / f"terminal-{uuid.uuid4().hex[:12]}.log"
+        target_path.write_text(output, encoding="utf-8")
+
+        lines = output.splitlines()
+        head = lines[:12]
+        tail = lines[-12:] if len(lines) > 12 else []
+
+        summary = [
+            "Output summarized to preserve context budget.",
+            f"Full output saved to: {target_path}",
+            f"Command: {command}",
+            f"Exit code: {exit_code}",
+            f"Output size: {len(lines)} lines, {len(output)} chars",
+        ]
+        if filter_name:
+            summary.append(f"Post-filter applied: rtk pipe --filter {filter_name}")
+        summary.extend(["", "First lines:", *head])
+        if tail and tail != head:
+            summary.extend(["", "Last lines:", *tail])
+        summary.append("")
+        summary.append("Inspect the saved log for the complete output.")
+        return "\n".join(summary)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         if not command or not isinstance(command, str):
@@ -121,6 +229,7 @@ class DeepClawLocalShellBackend(LocalShellBackend):
             raise ValueError(msg)
 
         child_env = self._build_child_env()
+        rtk_path = self._resolve_rtk_path(child_env)
         prepared_command, prepare_error = self._prepare_command(
             command,
             env=child_env,
@@ -153,14 +262,39 @@ class DeepClawLocalShellBackend(LocalShellBackend):
                 output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
 
             output = "\n".join(output_parts) if output_parts else "<no output>"
-            truncated = False
-            if len(output) > self._max_output_bytes:
-                output = output[: self._max_output_bytes]
-                output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
-                truncated = True
+            filter_name = None
+            if (
+                rtk_path is not None
+                and self._should_try_post_filter(output)
+                and (candidate_filter := self._infer_rtk_pipe_filter(command, prepared_command))
+            ):
+                filtered_output = self._filter_output_with_rtk(
+                    output=output,
+                    filter_name=candidate_filter,
+                    rtk_path=rtk_path,
+                    env=child_env,
+                    timeout=effective_timeout,
+                )
+                if filtered_output is not None:
+                    output = filtered_output
+                    filter_name = candidate_filter
 
             if result.returncode != 0:
                 output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
+
+            truncated = False
+            if self._compression_uses_rtk() and self._summary_should_spill(output):
+                output = self._spill_large_output_summary(
+                    command=prepared_command,
+                    output=output,
+                    exit_code=result.returncode,
+                    filter_name=filter_name,
+                )
+                truncated = True
+            elif len(output) > self._max_output_bytes:
+                output = output[: self._max_output_bytes]
+                output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+                truncated = True
 
             return ExecuteResponse(
                 output=output,
