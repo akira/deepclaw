@@ -3,6 +3,28 @@ from dataclasses import dataclass
 
 
 @dataclass
+class ChannelDeliveryIssue(Exception):
+    """Base class for channel-specific delivery failures with structured handling."""
+
+
+@dataclass
+class ChannelEditRateLimited(ChannelDeliveryIssue):
+    """A channel temporarily rejected an edit due to rate limiting."""
+
+    retry_after_seconds: float
+
+    def __str__(self) -> str:
+        return f"edit rate-limited, retry after {self.retry_after_seconds:.1f}s"
+
+
+@dataclass
+class ChannelEditUnavailable(ChannelDeliveryIssue):
+    """Editing is unavailable for the target message and a fresh send is required."""
+
+    reason: str = "edit unavailable"
+
+
+@dataclass
 class IncomingMessage:
     """Normalized inbound message from any channel."""
 

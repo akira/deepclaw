@@ -19,7 +19,12 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
-from deepclaw.channels.base import Channel, IncomingMessage
+from deepclaw.channels.base import (
+    Channel,
+    ChannelEditRateLimited,
+    ChannelEditUnavailable,
+    IncomingMessage,
+)
 from deepclaw.safety import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -564,6 +569,52 @@ class Gateway:
             None if gateway_timeout_warning <= 0 else float(gateway_timeout_warning)
         )
         self._queue_state: dict[str, dict[str, Any]] = {}
+        self._edit_cooldowns: dict[str, float] = {}
+
+    def _edit_cooldown_active(self, chat_id: str) -> bool:
+        return time.monotonic() < self._edit_cooldowns.get(chat_id, 0.0)
+
+    def _note_edit_cooldown(self, chat_id: str, retry_after_seconds: float) -> float:
+        cooldown_until = time.monotonic() + max(0.0, retry_after_seconds)
+        self._edit_cooldowns[chat_id] = max(self._edit_cooldowns.get(chat_id, 0.0), cooldown_until)
+        return self._edit_cooldowns[chat_id]
+
+    async def _try_edit_stream_message(
+        self,
+        channel: Channel,
+        *,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        queue_snapshot: dict[str, Any],
+    ) -> bool:
+        if self._edit_cooldown_active(chat_id):
+            queue_snapshot["stream_delivery_mode"] = "fresh_send"
+            return False
+        try:
+            await self._edit_redacted_message(channel, chat_id, message_id, text)
+            queue_snapshot["stream_delivery_mode"] = "edit"
+            return True
+        except ChannelEditRateLimited as exc:
+            cooldown_until = self._note_edit_cooldown(chat_id, exc.retry_after_seconds)
+            queue_snapshot["stream_delivery_mode"] = "fresh_send"
+            queue_snapshot["stream_degraded_reason"] = "edit_rate_limited"
+            logger.warning(
+                "Streaming edit rate-limited for chat %s; cooldown active for %.2fs",
+                chat_id,
+                max(0.0, cooldown_until - time.monotonic()),
+            )
+            return False
+        except ChannelEditUnavailable as exc:
+            queue_snapshot["stream_delivery_mode"] = "fresh_send"
+            queue_snapshot["stream_degraded_reason"] = str(exc.reason)
+            logger.warning(
+                "Streaming edit unavailable for chat %s msg %s: %s",
+                chat_id,
+                message_id,
+                exc.reason,
+            )
+            return False
 
     def get_queue_snapshot(self, chat_id: str) -> dict[str, Any] | None:
         """Return a copy of the latest queue/progress snapshot for a chat."""
@@ -905,8 +956,17 @@ class Gateway:
                             or chars_since_edit >= self.streaming_config.buffer_threshold
                         ):
                             display = accumulated + CURSOR_INDICATOR
-                            if len(display) <= limit and display != last_display:
-                                await self._edit_redacted_message(channel, chat_id, msg_id, display)
+                            if (
+                                len(display) <= limit
+                                and display != last_display
+                                and await self._try_edit_stream_message(
+                                    channel,
+                                    chat_id=chat_id,
+                                    message_id=msg_id,
+                                    text=display,
+                                    queue_snapshot=queue_snapshot,
+                                )
+                            ):
                                 last_display = display
                             last_edit_time = time.monotonic()
                             chars_since_edit = 0
@@ -1018,10 +1078,25 @@ class Gateway:
             final_text = "Attached media."
 
         chunks = chunk_message(final_text, limit)
-        if chunks[0] != last_display:
-            await self._edit_redacted_message(channel, chat_id, msg_id, chunks[0])
+        used_fresh_send = False
+        if chunks[0] != last_display and not await self._try_edit_stream_message(
+            channel,
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=chunks[0],
+            queue_snapshot=queue_snapshot,
+        ):
+            await self._send_redacted_message(channel, chat_id, chunks[0])
+            used_fresh_send = True
         for extra_chunk in chunks[1:]:
             await self._send_redacted_message(channel, chat_id, extra_chunk)
+            used_fresh_send = True
+        queue_snapshot["final_delivery_mode"] = "fresh_send" if used_fresh_send else "edit"
+        logger.info(
+            "Completed stream delivery for chat %s via %s",
+            chat_id,
+            queue_snapshot["final_delivery_mode"],
+        )
         for media_path, is_voice in media_paths:
             try:
                 if not Path(media_path).exists():
