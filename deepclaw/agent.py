@@ -122,34 +122,41 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         if not DeepClawLocalShellBackend._has_background_operator(command):
             return command
 
-        # Check if stdout/stderr are already explicitly redirected.
-        # This is intentionally broad: if the command already sends stdout or
-        # stderr somewhere explicit, preserve that behavior rather than
-        # overwriting it with /dev/null.
-        stripped = ""
+        # Track redirects per command segment so we only preserve redirects
+        # that apply to the backgrounded command itself.  This avoids missing
+        # cases like `sleep 10 & echo done >/tmp/log`, where the later redirect
+        # does not protect the backgrounded `sleep` from inheriting pipes.
+        result: list[str] = []
         quote_char: str | None = None
-        for ch in command:
-            if quote_char:
-                if ch == quote_char:
-                    quote_char = None
-                continue
-            if ch in "\"'":
-                quote_char = ch
-                continue
-            stripped += ch
-
         has_stdout_redirect = False
         has_stderr_redirect = False
         i = 0
-        while i < len(stripped):
-            ch = stripped[i]
-            if ch == "&" and i + 1 < len(stripped) and stripped[i + 1] == ">":
+        while i < len(command):
+            ch = command[i]
+            prev = command[i - 1] if i > 0 else ""
+            nxt = command[i + 1] if i + 1 < len(command) else ""
+
+            if quote_char:
+                result.append(ch)
+                if ch == quote_char:
+                    quote_char = None
+                i += 1
+                continue
+
+            if ch in "\"'":
+                quote_char = ch
+                result.append(ch)
+                i += 1
+                continue
+
+            if ch == "&" and nxt == ">":
                 has_stdout_redirect = True
                 has_stderr_redirect = True
-                i += 2
+                result.append(ch)
+                i += 1
                 continue
+
             if ch == ">":
-                prev = stripped[i - 1] if i > 0 else ""
                 if prev == "2":
                     has_stderr_redirect = True
                 elif prev == "&":
@@ -157,22 +164,39 @@ class DeepClawLocalShellBackend(LocalShellBackend):
                     has_stderr_redirect = True
                 else:
                     has_stdout_redirect = True
+                result.append(ch)
                 i += 1
                 continue
+
+            is_background = (
+                ch == "&" and prev != "&" and nxt != "&" and prev not in (">", "1") and nxt != ">"
+            )
+            if is_background:
+                if not has_stdout_redirect:
+                    if result and not result[-1].endswith((" ", "\t")):
+                        result.append(" ")
+                    result.append(">/dev/null")
+                if not has_stderr_redirect:
+                    if result and not result[-1].endswith((" ", "\t")):
+                        result.append(" ")
+                    result.append("2>/dev/null")
+                if result and not result[-1].endswith((" ", "\t")):
+                    result.append(" ")
+                result.append("&")
+                has_stdout_redirect = False
+                has_stderr_redirect = False
+                i += 1
+                continue
+
+            result.append(ch)
+
+            if ch == ";" or (ch == "|" and prev != "|" and nxt != "|"):
+                has_stdout_redirect = False
+                has_stderr_redirect = False
+
             i += 1
 
-        suffix = ""
-        if not has_stdout_redirect:
-            suffix += " >/dev/null"
-        if not has_stderr_redirect:
-            suffix += " 2>/dev/null"
-
-        # Insert redirect before the final & (background operator)
-        # Find the last unquoted & that's a background operator
-        if command.rstrip().endswith("&"):
-            return command.rstrip()[:-1].rstrip() + suffix + " &"
-        # If the & is followed by disown or other text, just append
-        return command.rstrip() + suffix
+        return "".join(result)
 
     def _rewrite_command_with_rtk(
         self,

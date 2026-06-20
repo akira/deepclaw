@@ -555,6 +555,16 @@ class TestBackgroundCommandSanitization:
         assert ">/dev/null" in result
         assert result.rstrip().endswith("&")
 
+    def test_inline_background_command_gets_redirect_before_ampersand(self):
+        cmd = "sleep 10 & echo done"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 >/dev/null 2>/dev/null & echo done"
+
+    def test_later_foreground_redirect_does_not_mask_background_redirect(self):
+        cmd = "sleep 10 & echo done >/tmp/done.log"
+        result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
+        assert result == "sleep 10 >/dev/null 2>/dev/null & echo done >/tmp/done.log"
+
     def test_foreground_command_not_modified(self):
         cmd = "echo hello"
         result = agent_mod.DeepClawLocalShellBackend._sanitize_background_command(cmd)
