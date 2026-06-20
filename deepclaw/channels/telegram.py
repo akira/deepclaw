@@ -12,13 +12,13 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -39,7 +39,12 @@ from deepclaw.auth import (
     save_allowed_users,
     save_thread_ids,
 )
-from deepclaw.channels.base import Channel, IncomingMessage
+from deepclaw.channels.base import (
+    Channel,
+    ChannelEditRateLimited,
+    ChannelEditUnavailable,
+    IncomingMessage,
+)
 from deepclaw.config import DeepClawConfig
 from deepclaw.context_report import build_context_report
 from deepclaw.gateway import Gateway, chunk_message
@@ -99,6 +104,61 @@ _WORKSPACE_ROOT = Path("~/.deepclaw/workspace").expanduser()
 # Map of chat_id -> dict of msg_id -> telegram Message object
 # Used to translate string message IDs back to editable message objects.
 _STREAM_MESSAGES: dict[str, dict[str, object]] = {}
+
+_TELEGRAM_RETRY_BUFFER_SECONDS = 0.5
+_TELEGRAM_SEND_MAX_RETRIES = 2
+
+
+def _retry_after_seconds(exc: RetryAfter) -> float:
+    """Return a normalized float retry delay from python-telegram-bot RetryAfter."""
+    retry_after = exc.retry_after
+    if isinstance(retry_after, timedelta):
+        return float(retry_after.total_seconds())
+    return float(retry_after)
+
+
+async def _call_with_retry_after_retry(
+    operation,
+    *,
+    description: str,
+    max_retries: int = _TELEGRAM_SEND_MAX_RETRIES,
+):
+    """Retry Telegram send operations when flood control returns RetryAfter."""
+    attempt = 0
+    while True:
+        try:
+            return await operation()
+        except RetryAfter as exc:
+            if attempt >= max_retries:
+                raise
+            delay = _retry_after_seconds(exc) + _TELEGRAM_RETRY_BUFFER_SECONDS
+            attempt += 1
+            logger.warning(
+                "Telegram %s rate-limited; retrying in %.2fs (attempt %s/%s)",
+                description,
+                delay,
+                attempt,
+                max_retries,
+            )
+            await asyncio.sleep(delay)
+
+
+async def _telegram_bot_send_with_retry(bot, chat_id: int, text: str):
+    return await _call_with_retry_after_retry(
+        lambda: bot.send_message(chat_id=chat_id, text=text),
+        description=f"send_message chat {chat_id}",
+    )
+
+
+async def _telegram_reply_text_with_retry(message, text: str):
+    return await _call_with_retry_after_retry(
+        lambda: message.reply_text(text),
+        description="reply_text",
+    )
+
+
+def _telegram_edit_rate_limit(exc: RetryAfter) -> ChannelEditRateLimited:
+    return ChannelEditRateLimited(_retry_after_seconds(exc) + _TELEGRAM_RETRY_BUFFER_SECONDS)
 
 
 def _telegram_media_kind(path: str) -> str:
@@ -372,10 +432,15 @@ async def _drain_queued_run(
             pending = await gateway.handle_message(channel, incoming, thread_id)
             if pending:
                 _pending_approvals(context)[chat_id] = pending
-                await context.bot.send_message(
-                    chat_id=int(chat_id),
-                    text=pending.get("message") or "Safety review required.",
-                    reply_markup=_pending_approval_markup(pending["id"]),
+                pending_text = pending.get("message") or "Safety review required."
+                pending_markup = _pending_approval_markup(pending["id"])
+                await _call_with_retry_after_retry(
+                    lambda pending_text=pending_text, pending_markup=pending_markup: context.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=pending_text,
+                        reply_markup=pending_markup,
+                    ),
+                    description=f"pending approval send chat {chat_id}",
                 )
                 _STREAM_MESSAGES.pop(chat_id, None)
                 return pending
@@ -1568,7 +1633,7 @@ class TelegramBotChannel(Channel):
         """Send a message to a chat. Returns the first message_id as string."""
         first_msg_id: str | None = None
         for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
-            msg = await self._bot.send_message(chat_id=int(chat_id), text=chunk)
+            msg = await _telegram_bot_send_with_retry(self._bot, int(chat_id), chunk)
             msg_id = str(msg.message_id)
             if first_msg_id is None:
                 first_msg_id = msg_id
@@ -1596,6 +1661,8 @@ class TelegramBotChannel(Channel):
         if msg is not None:
             try:
                 await msg.edit_text(text)
+            except RetryAfter as exc:
+                raise _telegram_edit_rate_limit(exc) from exc
             except BadRequest as exc:
                 error_text = str(exc)
                 logger.warning(
@@ -1606,15 +1673,18 @@ class TelegramBotChannel(Channel):
                     text[:300],
                 )
                 if "Message is not modified" not in error_text:
-                    raise
+                    raise ChannelEditUnavailable(error_text) from exc
         else:
             try:
                 await self._bot.edit_message_text(
                     text=text, chat_id=int(chat_id), message_id=int(message_id)
                 )
+            except RetryAfter as exc:
+                raise _telegram_edit_rate_limit(exc) from exc
             except BadRequest as exc:
-                if "Message is not modified" not in str(exc):
-                    raise
+                error_text = str(exc)
+                if "Message is not modified" not in error_text:
+                    raise ChannelEditUnavailable(error_text) from exc
 
     async def send_typing(self, chat_id: str) -> None:
         """Send a typing indicator."""
@@ -1653,12 +1723,12 @@ class TelegramChannel(Channel):
     async def send(self, chat_id: str, text: str) -> str:
         """Send a text message via reply_text. Returns a string message_id."""
         if self._update.message is not None:
-            msg = await self._update.message.reply_text(text)
+            msg = await _telegram_reply_text_with_retry(self._update.message, text)
         elif (
             self._update.callback_query is not None
             and self._update.callback_query.message is not None
         ):
-            msg = await self._update.callback_query.message.reply_text(text)
+            msg = await _telegram_reply_text_with_retry(self._update.callback_query.message, text)
         else:
             raise RuntimeError("No Telegram message context available for send()")
         msg_id = str(msg.message_id)
@@ -1699,9 +1769,11 @@ class TelegramChannel(Channel):
         """Edit a previously sent message."""
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
         if msg is None:
-            return
+            raise ChannelEditUnavailable("missing cached editable message")
         try:
             await msg.edit_text(text)
+        except RetryAfter as exc:
+            raise _telegram_edit_rate_limit(exc) from exc
         except BadRequest as exc:
             error_text = str(exc)
             logger.warning(
@@ -1712,7 +1784,7 @@ class TelegramChannel(Channel):
                 text[:300],
             )
             if "Message is not modified" not in error_text:
-                raise
+                raise ChannelEditUnavailable(error_text) from exc
 
     async def send_typing(self, chat_id: str) -> None:
         """Send a typing indicator."""
