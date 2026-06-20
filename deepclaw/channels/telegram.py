@@ -1352,16 +1352,16 @@ async def _resume_pending_interrupt(
             if update.message is not None:
                 message = update.message
                 await _call_with_retry_after_retry(
-                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
-                        pending_text, reply_markup=pending_markup
+                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: (
+                        message.reply_text(pending_text, reply_markup=pending_markup)
                     ),
                     description=f"resume pending approval reply chat {chat_id}",
                 )
             elif update.callback_query and update.callback_query.message is not None:
                 message = update.callback_query.message
                 await _call_with_retry_after_retry(
-                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: message.reply_text(
-                        pending_text, reply_markup=pending_markup
+                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: (
+                        message.reply_text(pending_text, reply_markup=pending_markup)
                     ),
                     description=f"resume pending approval callback reply chat {chat_id}",
                 )

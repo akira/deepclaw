@@ -2843,7 +2843,10 @@ class TestSafetyApprovalCommands:
         assert sleep_calls
         args, kwargs = update.message.reply_text.await_args
         assert args == ("Need another approval",)
-        assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "safety:approve_once:interrupt-2"
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-2"
+        )
 
     @pytest.mark.asyncio
     async def test_approve_run_can_be_stopped_while_resume_interrupt_is_in_flight(self):
