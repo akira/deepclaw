@@ -194,6 +194,7 @@ class DeepClawLocalShellBackend(LocalShellBackend):
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"terminal-{uuid.uuid4().hex[:12]}.log"
         target_path.write_text(output, encoding="utf-8")
+        routed_path = Path("/large_tool_results") / target_path.name
 
         lines = output.splitlines()
         head = lines[:12]
@@ -201,7 +202,7 @@ class DeepClawLocalShellBackend(LocalShellBackend):
 
         summary = [
             "Output summarized to preserve context budget.",
-            f"Full output saved to: {target_path}",
+            f"Full output saved to: {routed_path}",
             f"Command: {command}",
             f"Exit code: {exit_code}",
             f"Output size: {len(lines)} lines, {len(output)} chars",

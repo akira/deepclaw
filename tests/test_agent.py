@@ -375,7 +375,7 @@ class TestDeepClawLocalShellBackend:
         assert result.exit_code == 0
         assert result.truncated is True
         assert "Output summarized to preserve context budget." in result.output
-        assert "Full output saved to:" in result.output
+        assert "Full output saved to: /large_tool_results/terminal-" in result.output
 
         log_dir = tmp_path / "runtime" / "large_tool_results"
         saved_logs = list(log_dir.glob("terminal-*.log"))
