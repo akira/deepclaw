@@ -175,11 +175,18 @@ def _extract_pending_interrupt(state: Any, thread_id: str) -> dict[str, Any] | N
     return None
 
 
-def _format_pending_interrupt_message(pending: Mapping[str, Any]) -> str:
-    """Format the Telegram-visible prompt for a pending safety review."""
-    base = str(pending.get("message") or "Safety review required.").strip()
-    suffix = "Use /approve, /approve session, or /deny <reason> to respond."
-    return f"{base}\n\n{suffix}" if base else suffix
+def _approval_primary_message(*, accumulated: str, assistant_text: str) -> str:
+    """Return the main streamed message to keep visible during approval waits.
+
+    Approval instructions are sent separately by the channel layer with buttons,
+    so the primary streaming message should preserve any meaningful streamed
+    output. If the interrupt happens before any real output is produced, replace
+    the placeholder with a short neutral status.
+    """
+    candidate = accumulated or assistant_text or ""
+    if candidate.strip() and candidate.strip() != THINKING_MESSAGE:
+        return candidate
+    return "Paused for approval."
 
 
 def _normalize_text(text: str) -> str:
@@ -982,7 +989,10 @@ class Gateway:
                 await typing_task
 
         if pending is not None:
-            response_text = _format_pending_interrupt_message(pending)
+            response_text = _approval_primary_message(
+                accumulated=accumulated,
+                assistant_text=assistant_text,
+            )
             queue_snapshot["status"] = "awaiting_approval"
             queue_snapshot["pending_approval"] = _redacted_pending_approval(pending)
         else:
