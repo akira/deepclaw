@@ -343,7 +343,9 @@ class TestBrowserbasePlugin:
             ),
             patch("deepclaw.tools.browserbase.import_module", side_effect=fake_import_module),
             patch("deepclaw.tools.browserbase.threading.main_thread", return_value=main_thread),
-            patch("deepclaw.tools.browserbase.threading.current_thread", return_value=worker_thread),
+            patch(
+                "deepclaw.tools.browserbase.threading.current_thread", return_value=worker_thread
+            ),
         ):
             result = asyncio.run(
                 browserbase_mod._create_stagehand(model_name="anthropic/claude-sonnet-4-6")

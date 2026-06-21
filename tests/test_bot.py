@@ -3155,7 +3155,9 @@ class TestCmdRetry:
         ctx = _make_slash_context(
             extra={
                 GATEWAY_KEY: gateway,
-                "queued_runs": {"1": [{"text": "needs approval", "user_id": "1", "source": "telegram"}]},
+                "queued_runs": {
+                    "1": [{"text": "needs approval", "user_id": "1", "source": "telegram"}]
+                },
             }
         )
         ctx.bot.send_message = AsyncMock()
@@ -3184,7 +3186,9 @@ class TestCmdRetry:
         ctx = _make_slash_context(
             extra={
                 GATEWAY_KEY: gateway,
-                "queued_runs": {"1": [{"text": "needs approval", "user_id": "1", "source": "telegram"}]},
+                "queued_runs": {
+                    "1": [{"text": "needs approval", "user_id": "1", "source": "telegram"}]
+                },
             }
         )
         ctx.bot.send_message = AsyncMock()

@@ -611,7 +611,9 @@ def _concise_error_message(exc: Exception) -> str:
             "Browserbase/Stagehand."
         )
     if "rate limit exceeded" in lowered or "error code: 429" in lowered:
-        return "Run failed: the model provider rate-limited this request (429). Please retry shortly."
+        return (
+            "Run failed: the model provider rate-limited this request (429). Please retry shortly."
+        )
     if isinstance(exc, RetryAfter) or "flood control exceeded" in lowered:
         return "Run failed: Telegram rate-limited this request. Please retry shortly."
     if isinstance(exc, BadRequest) and "message is too long" in lowered:
@@ -649,7 +651,9 @@ async def _telegram_bot_send_text_chunked_with_retry(
         kwargs = {"reply_markup": reply_markup} if index == 0 and reply_markup is not None else {}
         messages.append(
             await _call_with_retry_after_retry(
-                lambda chunk=chunk, kwargs=kwargs: bot.send_message(chat_id=chat_id, text=chunk, **kwargs),
+                lambda chunk=chunk, kwargs=kwargs: bot.send_message(
+                    chat_id=chat_id, text=chunk, **kwargs
+                ),
                 description=f"send_message chat {chat_id}",
             )
         )
@@ -1910,7 +1914,11 @@ async def _resume_pending_interrupt(
         return False
     except Exception as exc:
         logger.exception("Resumed interrupt failed for chat %s", chat_id)
-        reply_message = update.message if update.message is not None else getattr(update.callback_query, "message", None)
+        reply_message = (
+            update.message
+            if update.message is not None
+            else getattr(update.callback_query, "message", None)
+        )
         await _notify_fatal_run_error(
             context=context,
             chat_id=chat_id,
@@ -2789,7 +2797,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
     if not _begin_active_run(context, chat_id):
-
         await update.message.reply_text(_active_run_text())
         return
     try:
