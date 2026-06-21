@@ -1196,6 +1196,32 @@ class TestGatewayRedaction:
         assert "Try again, or use /clear to start fresh" in final_text
 
     @pytest.mark.asyncio
+    async def test_gateway_replaces_already_streamed_progress_with_fatal_rate_limit_message(self):
+        class _RateLimitedAgent:
+            async def astream(self, *_args, **_kwargs):
+                yield (SimpleNamespace(content_blocks=[{"type": "text", "text": "Researching funding history..."}]), {})
+                raise RuntimeError("Error code: 429 - {'error': 'Rate limit exceeded'}")
+                yield  # pragma: no cover
+
+            async def aget_state(self, _config):
+                return SimpleNamespace(interrupts=())
+
+        streaming = SimpleNamespace(edit_interval=0.0, buffer_threshold=1)
+        gateway = Gateway(agent=_RateLimitedAgent(), streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="research startups")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert len(channel.edits) >= 2
+        assert "Researching funding history" in channel.edits[0][2]
+        final_text = channel.edits[-1][2]
+        assert final_text == (
+            "Run failed: the model provider rate-limited this request (429). Please retry shortly."
+        )
+        assert "Researching funding history" not in final_text
+
+    @pytest.mark.asyncio
     async def test_gateway_sends_inactivity_warning_before_timeout(self):
         class _SlowAgent:
             async def astream(self, *_args, **_kwargs):
