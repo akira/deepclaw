@@ -453,6 +453,18 @@ async def _telegram_bot_edit_rich_with_retry(bot: Any, chat_id: int, message_id:
     )
 
 
+async def _delete_stream_preview(bot: Any, chat_id: str, message_id: str, msg: Any) -> None:
+    with contextlib.suppress(Exception):
+        delete_message = getattr(msg, "delete", None)
+        if callable(delete_message):
+            result = delete_message()
+            if inspect.isawaitable(result):
+                await result
+        else:
+            await bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+    _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
+
+
 async def _send_markdown_chunks_with_fallback(
     text: str,
     send_markdown,
@@ -2203,19 +2215,10 @@ class TelegramBotChannel(Channel):
                             int(chat_id),
                             text,
                         )
-                        with contextlib.suppress(Exception):
-                            delete_message = getattr(msg, "delete", None)
-                            if callable(delete_message):
-                                await delete_message()
-                            else:
-                                await self._bot.delete_message(
-                                    chat_id=int(chat_id),
-                                    message_id=int(message_id),
-                                )
+                        await _delete_stream_preview(self._bot, chat_id, message_id, msg)
                         _STREAM_MESSAGES.setdefault(chat_id, {})[str(rich_msg.message_id)] = (
                             rich_msg
                         )
-                        _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
                         return
                     except Exception as exc:
                         if not _is_rich_fallback_error(exc):
@@ -2230,6 +2233,7 @@ class TelegramBotChannel(Channel):
                             len(_normalize_text_for_telegram_presentation(text))
                             > TELEGRAM_MESSAGE_LIMIT
                         ):
+                            await _delete_stream_preview(self._bot, chat_id, message_id, msg)
                             raise ChannelEditUnavailable("rich fallback overflow") from exc
                 if render_markdown:
 
@@ -2285,6 +2289,12 @@ class TelegramBotChannel(Channel):
                             len(_normalize_text_for_telegram_presentation(text))
                             > TELEGRAM_MESSAGE_LIMIT
                         ):
+                            with contextlib.suppress(Exception):
+                                await self._bot.delete_message(
+                                    chat_id=int(chat_id),
+                                    message_id=int(message_id),
+                                )
+                            _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
                             raise ChannelEditUnavailable("rich fallback overflow") from exc
                 if render_markdown:
 
@@ -2554,12 +2564,8 @@ class TelegramChannel(Channel):
                             int(reply_target) if reply_target is not None else None
                         ),
                     )
-                    with contextlib.suppress(Exception):
-                        delete_message = getattr(msg, "delete", None)
-                        if callable(delete_message):
-                            await delete_message()
+                    await _delete_stream_preview(self._bot, chat_id, message_id, msg)
                     _STREAM_MESSAGES.setdefault(chat_id, {})[str(rich_msg.message_id)] = rich_msg
-                    _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
                     return
                 except Exception as exc:
                     if not _is_rich_fallback_error(exc):
@@ -2570,6 +2576,12 @@ class TelegramChannel(Channel):
                         message_id,
                         exc,
                     )
+                    if (
+                        len(_normalize_text_for_telegram_presentation(text))
+                        > TELEGRAM_MESSAGE_LIMIT
+                    ):
+                        await _delete_stream_preview(self._bot, chat_id, message_id, msg)
+                        raise ChannelEditUnavailable("rich fallback overflow") from exc
             if render_markdown:
 
                 async def _edit_markdown(_text: str):

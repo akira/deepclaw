@@ -631,6 +631,24 @@ class TestTelegramBotChannel:
         assert "120" in _STREAM_MESSAGES.get("123", {})
 
     @pytest.mark.asyncio
+    async def test_edit_message_rich_fallback_overflow_deletes_preview_before_raising(self):
+        bot = MagicMock()
+        bot.do_api_request = AsyncMock(side_effect=BadRequest("unsupported rich payload"))
+        preview = MagicMock()
+        preview.message_id = 200
+        preview.delete = AsyncMock()
+        preview.edit_text = AsyncMock(side_effect=BadRequest("Message is too long"))
+        _STREAM_MESSAGES.setdefault("123", {})["200"] = preview
+        channel = TelegramBotChannel(bot)
+        long_table = "| Name | Value |\n| --- | --- |\n| foo | " + ("x" * 5000) + " |"
+
+        with pytest.raises(ChannelEditUnavailable, match="rich fallback overflow"):
+            await channel.edit_message("123", "200", long_table, render_markdown=True)
+
+        preview.delete.assert_awaited_once()
+        assert "200" not in _STREAM_MESSAGES.get("123", {})
+
+    @pytest.mark.asyncio
     async def test_send_typing_swallows_retry_after(self):
         bot = MagicMock()
         bot.send_chat_action = AsyncMock(side_effect=RetryAfter(1))
@@ -711,6 +729,25 @@ class TestTelegramChannel:
         preview.delete.assert_awaited_once()
         assert "200" not in _STREAM_MESSAGES.get("1", {})
         assert "204" in _STREAM_MESSAGES.get("1", {})
+
+    @pytest.mark.asyncio
+    async def test_edit_message_rich_fallback_overflow_deletes_preview_before_raising(self):
+        update = _make_slash_update(text="hello")
+        ctx = _make_slash_context()
+        ctx.bot.do_api_request = AsyncMock(side_effect=BadRequest("unsupported rich payload"))
+        channel = TelegramChannel(update, ctx)
+        preview = update.message.reply_text.return_value
+        preview.message_id = 200
+        preview.delete = AsyncMock()
+        preview.edit_text = AsyncMock(side_effect=BadRequest("Message is too long"))
+        _STREAM_MESSAGES.setdefault("1", {})["200"] = preview
+        long_table = "| Name | Value |\n| --- | --- |\n| foo | " + ("x" * 5000) + " |"
+
+        with pytest.raises(ChannelEditUnavailable, match="rich fallback overflow"):
+            await channel.edit_message("1", "200", long_table, render_markdown=True)
+
+        preview.delete.assert_awaited_once()
+        assert "200" not in _STREAM_MESSAGES.get("1", {})
 
     @pytest.mark.asyncio
     async def test_send_falls_back_to_callback_message_reply_text(self):
