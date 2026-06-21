@@ -477,10 +477,14 @@ OPENAI_MODEL_GUIDANCE_MODELS = ("gpt", "codex")
 TELEGRAM_FORMATTING_GUIDANCE = """\
 ## Output Formatting
 - When responding in chat clients like Telegram, prefer concise, structured markdown over dense prose.
-- Lead with the answer in 1-2 lines, then use short headings, bullets, and numbered lists when helpful.
+- Lead with the answer in 1-2 lines before any detail.
+- Keep paragraphs short: usually 1-3 sentences max per paragraph.
+- Add a blank line between summary, headings, lists, code blocks, and final next steps.
+- Prefer short headings, bullets, and numbered lists over long uninterrupted prose.
+- For grouped facts, status updates, comparisons, or recommendations, use scannable lists.
+- Use `**bold labels**` for key takeaways like `**Status:**`, `**Why:**`, `**Next:**`, and `**Result:**` when helpful.
 - Use fenced code blocks for commands/code and inline code for filenames, flags, and identifiers.
-- For comparisons, status summaries, or grouped facts, prefer scannable lists instead of long paragraphs.
-- Avoid long preambles and repeated throat-clearing.
+- Avoid long preambles, throat-clearing, and repeated restatement.
 """
 
 

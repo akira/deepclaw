@@ -33,6 +33,7 @@ from deepclaw.channels.telegram import (
     _format_skills_list,
     _format_text_for_telegram_markdown,
     _looks_like_supported_image,
+    _normalize_text_for_telegram_presentation,
     _parse_skills_command,
     _pending_approval_markup,
     _plain_text_from_markdown_source,
@@ -343,6 +344,35 @@ class _UnavailableEditChannel(_FakeStreamingChannel):
 
 
 class TestTelegramFormattingHelpers:
+    def test_normalizer_adds_spacing_and_label_bullets(self):
+        text = (
+            "Result: deployed locally\n"
+            "Why: Better formatting on Telegram\n"
+            "This is a longish paragraph that should stay readable while preserving meaning. "
+            "It has multiple sentences. It should be split into shorter paragraphs for Telegram.\n"
+            "## Next steps\n"
+            "- Verify visually"
+        )
+        normalized = _normalize_text_for_telegram_presentation(text)
+        assert normalized == (
+            "- **Result:** deployed locally\n\n"
+            "- **Why:** Better formatting on Telegram\n\n"
+            "This is a longish paragraph that should stay readable while preserving meaning. It has multiple sentences.\n\n"
+            "It should be split into shorter paragraphs for Telegram.\n\n"
+            "## Next steps\n\n"
+            "- Verify visually"
+        )
+
+    def test_normalizer_preserves_plain_key_value_lines(self):
+        text = "PATH: /usr/local/bin\nHOME: /home/ubuntu\nfoo=1\nbar=2"
+        normalized = _normalize_text_for_telegram_presentation(text)
+        assert normalized == "PATH: /usr/local/bin\n\nHOME: /home/ubuntu\n\nfoo=1\n\nbar=2"
+
+    def test_normalizer_does_not_rewrite_exception_like_lines(self):
+        text = "Traceback (most recent call last):\nValueError: bad input"
+        normalized = _normalize_text_for_telegram_presentation(text)
+        assert normalized == "Traceback (most recent call last):\n\nValueError: bad input"
+
     def test_formatter_does_not_treat_literal_asterisks_as_italic(self):
         text = "2 * 3 = 6 * 4 = 24"
         formatted = _format_text_for_telegram_markdown(text)
@@ -360,7 +390,7 @@ class TestTelegramFormattingHelpers:
         text = "## Title\n- **bold**\n[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
         plain = _plain_text_from_markdown_source(text)
         assert plain == (
-            "Title\n• bold\n[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
+            "Title\n\n• bold\n\n[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
         )
 
 
@@ -408,7 +438,26 @@ class TestTelegramBotChannel:
         assert bot.send_message.await_count == 2
         first_call, second_call = bot.send_message.await_args_list
         assert first_call.kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
-        assert second_call.kwargs == {"chat_id": 123, "text": "Title\n• bold"}
+        assert second_call.kwargs == {"chat_id": 123, "text": "Title\n\n• bold"}
+
+    @pytest.mark.asyncio
+    async def test_send_markdown_rechunks_after_normalization_growth(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock(
+            side_effect=[
+                SimpleNamespace(message_id=107),
+                SimpleNamespace(message_id=108),
+            ]
+        )
+        channel = TelegramBotChannel(bot)
+        text = "Result: " + ("x" * 4088)
+
+        message_id = await channel.send("123", text, render_markdown=True)
+
+        assert message_id == "107"
+        assert bot.send_message.await_count == 2
+        for call in bot.send_message.await_args_list:
+            assert len(call.kwargs["text"]) <= TELEGRAM_MESSAGE_LIMIT
 
     @pytest.mark.asyncio
     async def test_send_chunks_overlong_messages(self):

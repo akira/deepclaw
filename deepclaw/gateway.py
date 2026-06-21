@@ -1102,7 +1102,13 @@ class Gateway:
         if not final_text and media_paths:
             final_text = "Attached media."
 
-        chunks = chunk_message(final_text, limit)
+        prepare_text = getattr(channel, "prepare_text_for_delivery", None)
+        delivery_text = final_text
+        if callable(prepare_text):
+            prepared = prepare_text(final_text, render_markdown=True)
+            if isinstance(prepared, str):
+                delivery_text = prepared
+        chunks = chunk_message(delivery_text, limit)
         used_fresh_send = False
         force_final_edit = channel.requires_final_reformat_edit
         if (

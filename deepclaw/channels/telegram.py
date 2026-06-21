@@ -118,6 +118,8 @@ _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _BULLET_RE = re.compile(r"^(?P<indent>\s*)[-*]\s+(?P<body>.+)$")
 _NUMBERED_RE = re.compile(r"^(?P<indent>\s*)(?P<num>\d+)\.\s+(?P<body>.+)$")
 _BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(?P<body>.+)$")
+_LABEL_LINE_RE = re.compile(r"^(?P<label>[A-Za-z][A-Za-z0-9 /&-]{1,24}):\s+(?P<body>.+)$")
+_PREFERRED_LABELS = {"status", "why", "next", "result", "summary", "impact", "recommendation"}
 _PLACEHOLDER_PREFIX = "\ufff0TG"
 
 
@@ -202,8 +204,115 @@ def _render_inline_code(code: str) -> str:
     return "`" + code.replace("`", "\\`") + "`"
 
 
+def _looks_like_structured_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("#", "- ", "* ", "> ", "```")):
+        return True
+    return bool(_NUMBERED_RE.match(stripped))
+
+
+def _should_promote_label_line(label: str, body: str) -> bool:
+    normalized_label = label.strip().lower()
+    if normalized_label not in _PREFERRED_LABELS:
+        return False
+    if not body.strip():
+        return False
+    return "\n" not in body
+
+
+def _split_long_paragraph(paragraph: str, *, max_sentences: int = 2, max_chars: int = 140) -> list[str]:
+    paragraph = paragraph.strip()
+    if len(paragraph) <= max_chars:
+        return [paragraph]
+    sentence_parts = re.split(r"(?<=[.!?])\s+", paragraph)
+    if len(sentence_parts) <= 1:
+        return [paragraph]
+    chunks: list[str] = []
+    current: list[str] = []
+    for sentence in sentence_parts:
+        current.append(sentence)
+        current_text = " ".join(current).strip()
+        if len(current) >= max_sentences or len(current_text) >= max_chars:
+            chunks.append(current_text)
+            current = []
+    if current:
+        chunks.append(" ".join(current).strip())
+    return [chunk for chunk in chunks if chunk]
+
+
+def _normalize_text_for_telegram_presentation(text: str) -> str:
+    normalized = text.replace("\r\n", "\n")
+    if "```" in normalized:
+        fence_placeholders: dict[str, str] = {}
+        normalized = _FENCED_CODE_RE.sub(
+            lambda match: _stash_placeholder(
+                fence_placeholders,
+                f"```{match.group('lang').strip()}\n{match.group('code').rstrip()}\n```",
+            ),
+            normalized,
+        )
+    else:
+        fence_placeholders = {}
+
+    raw_lines = [line.rstrip() for line in normalized.split("\n")]
+    output: list[str] = []
+
+    def _append_with_spacing(line: str) -> None:
+        if output and output[-1] != "":
+            output.append("")
+        output.append(line)
+
+    for raw_line in raw_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            if output and output[-1] != "":
+                output.append("")
+            continue
+        if raw_line in fence_placeholders:
+            _append_with_spacing(raw_line)
+            output.append("")
+            continue
+        label_match = _LABEL_LINE_RE.match(stripped)
+        if label_match and _should_promote_label_line(
+            label_match.group('label'), label_match.group('body')
+        ):
+            _append_with_spacing(
+                f"- **{label_match.group('label').strip()}:** {label_match.group('body').strip()}"
+            )
+            continue
+        if _looks_like_structured_line(stripped):
+            _append_with_spacing(stripped)
+            continue
+        for chunk in _split_long_paragraph(stripped):
+            _append_with_spacing(chunk)
+
+    compacted: list[str] = []
+    previous_blank = False
+    for line in output:
+        if line == "":
+            if previous_blank or not compacted:
+                previous_blank = True
+                continue
+            previous_blank = True
+            compacted.append(line)
+            continue
+        previous_blank = False
+        compacted.append(line)
+
+    while compacted and compacted[-1] == "":
+        compacted.pop()
+
+    result = "\n".join(compacted)
+    for token, fenced in fence_placeholders.items():
+        result = result.replace(token, fenced)
+    return result
+
+
 def _plain_text_from_markdown_source(text: str) -> str:
-    plain = text.replace("\r\n", "\n")
+    plain = _normalize_text_for_telegram_presentation(text)
+    plain = plain.replace("\r\n", "\n")
     plain = _FENCED_CODE_RE.sub(lambda match: match.group("code").rstrip(), plain)
     plain = _INLINE_CODE_RE.sub(lambda match: match.group(1), plain)
     plain = "\n".join(_plainify_markdown_line(line) for line in plain.split("\n"))
@@ -212,7 +321,8 @@ def _plain_text_from_markdown_source(text: str) -> str:
 
 def _format_text_for_telegram_markdown(text: str) -> str:
     placeholders: dict[str, str] = {}
-    formatted = text.replace("\r\n", "\n")
+    formatted = _normalize_text_for_telegram_presentation(text)
+    formatted = formatted.replace("\r\n", "\n")
     formatted = _FENCED_CODE_RE.sub(
         lambda match: _stash_placeholder(
             placeholders,
@@ -1798,6 +1908,11 @@ class TelegramBotChannel(Channel):
     def message_limit(self) -> int:
         return TELEGRAM_MESSAGE_LIMIT
 
+    def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
+        if render_markdown:
+            return _normalize_text_for_telegram_presentation(text)
+        return text
+
     async def start(self) -> None:
         pass
 
@@ -1806,8 +1921,9 @@ class TelegramBotChannel(Channel):
 
     async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
         """Send a message to a chat. Returns the first message_id as string."""
+        prepared_text = self.prepare_text_for_delivery(text, render_markdown=render_markdown)
         first_msg_id: str | None = None
-        for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
+        for chunk in chunk_message(prepared_text, TELEGRAM_MESSAGE_LIMIT):
             if render_markdown:
                 formatted = _format_text_for_telegram_markdown(chunk)
                 plain = _plain_text_from_markdown_source(chunk)
@@ -1971,6 +2087,11 @@ class TelegramChannel(Channel):
     def message_limit(self) -> int:
         return TELEGRAM_MESSAGE_LIMIT
 
+    def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
+        if render_markdown:
+            return _normalize_text_for_telegram_presentation(text)
+        return text
+
     async def start(self) -> None:
         pass
 
@@ -1979,10 +2100,11 @@ class TelegramChannel(Channel):
 
     async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
         """Send a text message via reply_text. Returns a string message_id."""
+        prepared_text = self.prepare_text_for_delivery(text, render_markdown=render_markdown)
         if self._update.message is not None:
             if render_markdown:
-                formatted = _format_text_for_telegram_markdown(text)
-                plain = _plain_text_from_markdown_source(text)
+                formatted = _format_text_for_telegram_markdown(prepared_text)
+                plain = _plain_text_from_markdown_source(prepared_text)
 
                 async def _reply_markdown(_text: str):
                     return await _telegram_reply_text_with_retry(
@@ -2002,14 +2124,14 @@ class TelegramChannel(Channel):
                     description="update reply_text",
                 )
             else:
-                msg = await _telegram_reply_text_with_retry(self._update.message, text)
+                msg = await _telegram_reply_text_with_retry(self._update.message, prepared_text)
         elif (
             self._update.callback_query is not None
             and self._update.callback_query.message is not None
         ):
             if render_markdown:
-                formatted = _format_text_for_telegram_markdown(text)
-                plain = _plain_text_from_markdown_source(text)
+                formatted = _format_text_for_telegram_markdown(prepared_text)
+                plain = _plain_text_from_markdown_source(prepared_text)
 
                 async def _callback_reply_markdown(_text: str):
                     return await _telegram_reply_text_with_retry(
@@ -2033,7 +2155,7 @@ class TelegramChannel(Channel):
                 )
             else:
                 msg = await _telegram_reply_text_with_retry(
-                    self._update.callback_query.message, text
+                    self._update.callback_query.message, prepared_text
                 )
         else:
             raise RuntimeError("No Telegram message context available for send()")

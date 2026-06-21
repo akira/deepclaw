@@ -97,3 +97,7 @@ class Channel(ABC):
     def message_limit(self) -> int:
         """Max message length for this channel."""
         return 4096
+
+    def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
+        """Platform-specific final-text normalization before chunking/delivery."""
+        return text
