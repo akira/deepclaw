@@ -44,6 +44,7 @@ class TelegramConfig:
     bot_token: str = ""
     allowed_users: list[str] = field(default_factory=list)
     streaming: TelegramStreamingConfig = field(default_factory=TelegramStreamingConfig)
+    rich_messages: bool = True
 
 
 @dataclass
@@ -255,6 +256,7 @@ DEFAULT_CONFIG_YAML = """\
 # telegram:
 #   allowed_users:
 #     - "123456789"      # your Telegram user ID
+#   rich_messages: true   # native Bot API rich messages for tables/task lists/details/math
 #   streaming:
 #     edit_interval: 1.0
 #     buffer_threshold: 100
@@ -331,6 +333,7 @@ def load_config() -> DeepClawConfig:
         bot_token=bot_token,
         allowed_users=allowed_users,
         streaming=streaming,
+        rich_messages=_to_bool(yaml_telegram.get("rich_messages"), TelegramConfig.rich_messages),
     )
 
     generation = GenerationConfig(

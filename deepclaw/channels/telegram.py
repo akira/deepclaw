@@ -6,6 +6,7 @@ Streams agent responses by progressively editing a single Telegram message.
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import mimetypes
 import re
@@ -17,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
@@ -79,6 +80,7 @@ from deepclaw.tools.skills import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_RICH_MESSAGE_LIMIT = 32768
 THREAD_IDS_KEY = "thread_ids"
 ALLOWED_USERS_KEY = "allowed_users"
 PAIRING_CODE_KEY = "pairing_code"
@@ -120,6 +122,16 @@ _NUMBERED_RE = re.compile(r"^(?P<indent>\s*)(?P<num>\d+)\.\s+(?P<body>.+)$")
 _BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(?P<body>.+)$")
 _LABEL_LINE_RE = re.compile(r"^(?P<label>[A-Za-z][A-Za-z0-9 /&-]{1,24}):\s+(?P<body>.+)$")
 _PREFERRED_LABELS = {"status", "why", "next", "result", "summary", "impact", "recommendation"}
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_RICH_DETAILS_RE = re.compile(r"<details\b[^>]*>.*?</details>", re.IGNORECASE | re.DOTALL)
+_RICH_MATH_IN_DETAILS_RE = re.compile(
+    r"(\$\$.*?\$\$|"
+    r"\\\[.*?\\\]|"
+    r"\\\(.*?\\\)|"
+    r"\\(?:sum|frac|alpha|beta|gamma|delta|theta|lambda|mu|pi|sigma|"
+    r"int|prod|sqrt|lim|infty|begin\{(?:equation|align|matrix|cases)\}))",
+    re.IGNORECASE | re.DOTALL,
+)
 _PLACEHOLDER_PREFIX = "\ufff0TG"
 
 
@@ -340,6 +352,154 @@ def _format_text_for_telegram_markdown(text: str) -> str:
     for token, rendered in placeholders.items():
         formatted = formatted.replace(token, rendered)
     return formatted
+
+
+def _bot_supports_rich_messages(bot: Any) -> bool:
+    return inspect.iscoroutinefunction(getattr(bot, "do_api_request", None))
+
+
+def _content_fits_rich_limits(content: str) -> bool:
+    return len(content) <= TELEGRAM_RICH_MESSAGE_LIMIT
+
+
+def _has_telegram_desktop_details_math_crash_shape(content: str) -> bool:
+    if not content:
+        return False
+    for details_block in _RICH_DETAILS_RE.findall(content):
+        if _RICH_MATH_IN_DETAILS_RE.search(details_block):
+            return True
+    return False
+
+
+def _needs_rich_rendering(content: str) -> bool:
+    if not content:
+        return False
+    if any(_TABLE_SEPARATOR_RE.match(line) for line in content.splitlines()):
+        return True
+    if re.search(r"(?m)^\s*[-*]\s+\[[ xX]\]\s+", content):
+        return True
+    if re.search(r"(?m)^<details\b|^</details>|^<summary\b|^</summary>", content):
+        return True
+    return "$$" in content
+
+
+def _rich_eligible(bot: Any, *, rich_messages_enabled: bool, content: str) -> bool:
+    return bool(
+        rich_messages_enabled
+        and content
+        and content.strip()
+        and _bot_supports_rich_messages(bot)
+        and _content_fits_rich_limits(content)
+        and _needs_rich_rendering(content)
+        and not _has_telegram_desktop_details_math_crash_shape(content)
+    )
+
+
+def _rich_message_payload(content: str) -> dict[str, Any]:
+    return {"markdown": content}
+
+
+def _is_rich_capability_error(exc: Exception) -> bool:
+    if isinstance(exc, (AttributeError, TypeError, NotImplementedError)):
+        return True
+    if getattr(exc, "error_code", None) == 404:
+        return True
+    text = str(exc).lower()
+    return "no such method" in text or (
+        ("method" in text or "endpoint" in text)
+        and ("not found" in text or "does not exist" in text or "unsupported" in text)
+    )
+
+
+def _is_rich_fallback_error(exc: Exception) -> bool:
+    return isinstance(exc, BadRequest) or _is_rich_capability_error(exc)
+
+
+async def _telegram_bot_send_rich_with_retry(
+    bot: Any,
+    chat_id: int,
+    content: str,
+    *,
+    reply_to_message_id: int | None = None,
+):
+    api_kwargs: dict[str, Any] = {
+        "chat_id": chat_id,
+        "rich_message": _rich_message_payload(content),
+    }
+    if reply_to_message_id is not None:
+        api_kwargs["reply_parameters"] = {"message_id": reply_to_message_id}
+    return await _call_with_retry_after_retry(
+        lambda: bot.do_api_request(
+            "sendRichMessage",
+            api_kwargs=api_kwargs,
+            return_type=Message,
+        ),
+        description=f"sendRichMessage chat {chat_id}",
+    )
+
+
+async def _telegram_bot_edit_rich_with_retry(bot: Any, chat_id: int, message_id: int, content: str):
+    return await _call_with_retry_after_retry(
+        lambda: bot.do_api_request(
+            "editMessageText",
+            api_kwargs={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "rich_message": _rich_message_payload(content),
+            },
+            return_type=Message,
+        ),
+        description=f"editMessageText rich chat {chat_id} msg {message_id}",
+    )
+
+
+async def _delete_stream_preview(bot: Any, chat_id: str, message_id: str, msg: Any) -> None:
+    with contextlib.suppress(Exception):
+        delete_message = getattr(msg, "delete", None)
+        if callable(delete_message):
+            result = delete_message()
+            if inspect.isawaitable(result):
+                await result
+        else:
+            await bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+    _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
+
+
+async def _send_markdown_chunks_with_fallback(
+    text: str,
+    send_markdown,
+    send_plain,
+    *,
+    description: str,
+) -> list[Any]:
+    messages: list[Any] = []
+    pending = [_normalize_text_for_telegram_presentation(text)]
+    safe_limit = TELEGRAM_MESSAGE_LIMIT
+    while pending:
+        chunk = pending.pop(0)
+        formatted = _format_text_for_telegram_markdown(chunk)
+        plain = _plain_text_from_markdown_source(chunk)
+        if len(formatted) > TELEGRAM_MESSAGE_LIMIT or len(plain) > TELEGRAM_MESSAGE_LIMIT:
+            if len(chunk) <= 1:
+                raise ValueError("unable to shrink Telegram markdown chunk below message limit")
+            split_limit = max(1, min(len(chunk) - 1, safe_limit))
+            smaller_chunks = chunk_message(chunk, split_limit)
+            if len(smaller_chunks) <= 1:
+                safe_limit = max(1, safe_limit // 2)
+                smaller_chunks = chunk_message(chunk, max(1, min(len(chunk) - 1, safe_limit)))
+            pending = smaller_chunks + pending
+            continue
+        msg = await _send_text_with_optional_markdown(
+            send_markdown,
+            send_plain,
+            formatted,
+            plain,
+            description=description,
+        )
+        messages.append(msg)
+        if safe_limit < TELEGRAM_MESSAGE_LIMIT:
+            safe_limit = min(TELEGRAM_MESSAGE_LIMIT, safe_limit * 2)
+    return messages
 
 
 async def _send_text_with_optional_markdown(
@@ -696,7 +856,11 @@ async def _drain_queued_run(
                 username=queued.get("username"),
                 source=queued.get("source", "telegram"),
             )
-            channel = TelegramBotChannel(context.bot)
+            config = context.bot_data[CONFIG_KEY]
+            channel = TelegramBotChannel(
+                context.bot,
+                rich_messages_enabled=config.telegram.rich_messages,
+            )
             gateway: Gateway = context.bot_data[GATEWAY_KEY]
             pending = await gateway.handle_message(channel, incoming, thread_id)
             if pending:
@@ -1891,8 +2055,9 @@ class TelegramBotChannel(Channel):
     without an active Update context (proactive messaging).
     """
 
-    def __init__(self, bot):
+    def __init__(self, bot, *, rich_messages_enabled: bool = True):
         self._bot = bot
+        self._rich_messages_enabled = rich_messages_enabled
 
     @property
     def name(self) -> str:
@@ -1910,7 +2075,22 @@ class TelegramBotChannel(Channel):
     def message_limit(self) -> int:
         return TELEGRAM_MESSAGE_LIMIT
 
+    def final_delivery_limit(self, text: str, *, render_markdown: bool = False) -> int:
+        if render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=text,
+        ):
+            return TELEGRAM_RICH_MESSAGE_LIMIT
+        return TELEGRAM_MESSAGE_LIMIT
+
     def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
+        if render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=text,
+        ):
+            return text
         if render_markdown:
             return _normalize_text_for_telegram_presentation(text)
         return text
@@ -1925,10 +2105,46 @@ class TelegramBotChannel(Channel):
         """Send a message to a chat. Returns the first message_id as string."""
         prepared_text = self.prepare_text_for_delivery(text, render_markdown=render_markdown)
         first_msg_id: str | None = None
-        for chunk in chunk_message(prepared_text, TELEGRAM_MESSAGE_LIMIT):
-            if render_markdown:
-                formatted = _format_text_for_telegram_markdown(chunk)
-                plain = _plain_text_from_markdown_source(chunk)
+        for chunk in chunk_message(
+            prepared_text, self.final_delivery_limit(text, render_markdown=render_markdown)
+        ):
+            sent_messages: list[Any]
+            if render_markdown and _rich_eligible(
+                self._bot,
+                rich_messages_enabled=self._rich_messages_enabled,
+                content=chunk,
+            ):
+                try:
+                    sent_messages = [
+                        await _telegram_bot_send_rich_with_retry(self._bot, int(chat_id), chunk)
+                    ]
+                except Exception as exc:
+                    if not _is_rich_fallback_error(exc):
+                        raise
+                    logger.warning(
+                        "Telegram rich send failed for chat %s; falling back to MarkdownV2: %s",
+                        chat_id,
+                        exc,
+                    )
+
+                    async def _send_markdown(_text: str):
+                        return await _telegram_bot_send_with_retry(
+                            self._bot,
+                            int(chat_id),
+                            _text,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                        )
+
+                    async def _send_plain(_text: str):
+                        return await _telegram_bot_send_with_retry(self._bot, int(chat_id), _text)
+
+                    sent_messages = await _send_markdown_chunks_with_fallback(
+                        chunk,
+                        _send_markdown,
+                        _send_plain,
+                        description=f"bot send chat {chat_id}",
+                    )
+            elif render_markdown:
 
                 async def _send_markdown(_text: str):
                     return await _telegram_bot_send_with_retry(
@@ -1941,19 +2157,21 @@ class TelegramBotChannel(Channel):
                 async def _send_plain(_text: str):
                     return await _telegram_bot_send_with_retry(self._bot, int(chat_id), _text)
 
-                msg = await _send_text_with_optional_markdown(
+                sent_messages = await _send_markdown_chunks_with_fallback(
+                    chunk,
                     _send_markdown,
                     _send_plain,
-                    formatted,
-                    plain,
                     description=f"bot send chat {chat_id}",
                 )
             else:
-                msg = await _telegram_bot_send_with_retry(self._bot, int(chat_id), chunk)
-            msg_id = str(msg.message_id)
-            if first_msg_id is None:
-                first_msg_id = msg_id
-            _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+                sent_messages = [
+                    await _telegram_bot_send_with_retry(self._bot, int(chat_id), chunk)
+                ]
+            for msg in sent_messages:
+                msg_id = str(msg.message_id)
+                if first_msg_id is None:
+                    first_msg_id = msg_id
+                _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return first_msg_id or ""
 
     async def send_media(self, chat_id: str, path: str, caption: str | None = None) -> str:
@@ -1983,8 +2201,40 @@ class TelegramBotChannel(Channel):
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
         formatted = _format_text_for_telegram_markdown(text) if render_markdown else text
         plain = _plain_text_from_markdown_source(text) if render_markdown else text
+        should_try_rich = render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=text,
+        )
         if msg is not None:
             try:
+                if should_try_rich:
+                    try:
+                        rich_msg = await _telegram_bot_send_rich_with_retry(
+                            self._bot,
+                            int(chat_id),
+                            text,
+                        )
+                        await _delete_stream_preview(self._bot, chat_id, message_id, msg)
+                        _STREAM_MESSAGES.setdefault(chat_id, {})[str(rich_msg.message_id)] = (
+                            rich_msg
+                        )
+                        return
+                    except Exception as exc:
+                        if not _is_rich_fallback_error(exc):
+                            raise ChannelEditUnavailable(f"rich send failed: {exc}") from exc
+                        logger.warning(
+                            "Telegram rich final send failed for chat %s msg %s; falling back to MarkdownV2 edit: %s",
+                            chat_id,
+                            message_id,
+                            exc,
+                        )
+                        if (
+                            len(_normalize_text_for_telegram_presentation(text))
+                            > TELEGRAM_MESSAGE_LIMIT
+                        ):
+                            await _delete_stream_preview(self._bot, chat_id, message_id, msg)
+                            raise ChannelEditUnavailable("rich fallback overflow") from exc
                 if render_markdown:
 
                     async def _edit_markdown(_text: str):
@@ -2017,6 +2267,35 @@ class TelegramBotChannel(Channel):
                     raise ChannelEditUnavailable(error_text) from exc
         else:
             try:
+                if should_try_rich:
+                    try:
+                        await _telegram_bot_edit_rich_with_retry(
+                            self._bot,
+                            int(chat_id),
+                            int(message_id),
+                            text,
+                        )
+                        return
+                    except Exception as exc:
+                        if not _is_rich_fallback_error(exc):
+                            raise ChannelEditUnavailable(f"rich edit failed: {exc}") from exc
+                        logger.warning(
+                            "Telegram rich edit failed for chat %s msg %s; falling back to MarkdownV2: %s",
+                            chat_id,
+                            message_id,
+                            exc,
+                        )
+                        if (
+                            len(_normalize_text_for_telegram_presentation(text))
+                            > TELEGRAM_MESSAGE_LIMIT
+                        ):
+                            with contextlib.suppress(Exception):
+                                await self._bot.delete_message(
+                                    chat_id=int(chat_id),
+                                    message_id=int(message_id),
+                                )
+                            _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
+                            raise ChannelEditUnavailable("rich fallback overflow") from exc
                 if render_markdown:
 
                     async def _bot_edit_markdown(_text: str):
@@ -2072,6 +2351,11 @@ class TelegramChannel(Channel):
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self._update = update
         self._context = context
+        self._bot = context.bot
+        config = context.bot_data.get(CONFIG_KEY)
+        self._rich_messages_enabled = bool(
+            getattr(getattr(config, "telegram", None), "rich_messages", True)
+        )
 
     @property
     def name(self) -> str:
@@ -2089,7 +2373,22 @@ class TelegramChannel(Channel):
     def message_limit(self) -> int:
         return TELEGRAM_MESSAGE_LIMIT
 
+    def final_delivery_limit(self, text: str, *, render_markdown: bool = False) -> int:
+        if render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=text,
+        ):
+            return TELEGRAM_RICH_MESSAGE_LIMIT
+        return TELEGRAM_MESSAGE_LIMIT
+
     def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
+        if render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=text,
+        ):
+            return text
         if render_markdown:
             return _normalize_text_for_telegram_presentation(text)
         return text
@@ -2103,10 +2402,39 @@ class TelegramChannel(Channel):
     async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
         """Send a text message via reply_text. Returns a string message_id."""
         prepared_text = self.prepare_text_for_delivery(text, render_markdown=render_markdown)
+        reply_target = None
+        if self._update.message is not None:
+            reply_target = getattr(self._update.message, "message_id", None)
+        elif (
+            self._update.callback_query is not None
+            and self._update.callback_query.message is not None
+        ):
+            reply_target = getattr(self._update.callback_query.message, "message_id", None)
+        if render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=prepared_text,
+        ):
+            try:
+                msg = await _telegram_bot_send_rich_with_retry(
+                    self._bot,
+                    int(chat_id),
+                    prepared_text,
+                    reply_to_message_id=reply_target if isinstance(reply_target, int) else None,
+                )
+                msg_id = str(msg.message_id)
+                _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
+                return msg_id
+            except Exception as exc:
+                if not _is_rich_fallback_error(exc):
+                    raise
+                logger.warning(
+                    "Telegram rich reply send failed for chat %s; falling back to MarkdownV2: %s",
+                    chat_id,
+                    exc,
+                )
         if self._update.message is not None:
             if render_markdown:
-                formatted = _format_text_for_telegram_markdown(prepared_text)
-                plain = _plain_text_from_markdown_source(prepared_text)
 
                 async def _reply_markdown(_text: str):
                     return await _telegram_reply_text_with_retry(
@@ -2118,13 +2446,16 @@ class TelegramChannel(Channel):
                 async def _reply_plain(_text: str):
                     return await _telegram_reply_text_with_retry(self._update.message, _text)
 
-                msg = await _send_text_with_optional_markdown(
+                sent_messages = await _send_markdown_chunks_with_fallback(
+                    prepared_text,
                     _reply_markdown,
                     _reply_plain,
-                    formatted,
-                    plain,
                     description="update reply_text",
                 )
+                msg = sent_messages[0]
+                for extra_msg in sent_messages:
+                    extra_msg_id = str(extra_msg.message_id)
+                    _STREAM_MESSAGES.setdefault(chat_id, {})[extra_msg_id] = extra_msg
             else:
                 msg = await _telegram_reply_text_with_retry(self._update.message, prepared_text)
         elif (
@@ -2132,8 +2463,6 @@ class TelegramChannel(Channel):
             and self._update.callback_query.message is not None
         ):
             if render_markdown:
-                formatted = _format_text_for_telegram_markdown(prepared_text)
-                plain = _plain_text_from_markdown_source(prepared_text)
 
                 async def _callback_reply_markdown(_text: str):
                     return await _telegram_reply_text_with_retry(
@@ -2148,13 +2477,16 @@ class TelegramChannel(Channel):
                         _text,
                     )
 
-                msg = await _send_text_with_optional_markdown(
+                sent_messages = await _send_markdown_chunks_with_fallback(
+                    prepared_text,
                     _callback_reply_markdown,
                     _callback_reply_plain,
-                    formatted,
-                    plain,
                     description="callback reply_text",
                 )
+                msg = sent_messages[0]
+                for extra_msg in sent_messages:
+                    extra_msg_id = str(extra_msg.message_id)
+                    _STREAM_MESSAGES.setdefault(chat_id, {})[extra_msg_id] = extra_msg
             else:
                 msg = await _telegram_reply_text_with_retry(
                     self._update.callback_query.message, prepared_text
@@ -2209,7 +2541,47 @@ class TelegramChannel(Channel):
             raise ChannelEditUnavailable("missing cached editable message")
         formatted = _format_text_for_telegram_markdown(text) if render_markdown else text
         plain = _plain_text_from_markdown_source(text) if render_markdown else text
+        should_try_rich = render_markdown and _rich_eligible(
+            self._bot,
+            rich_messages_enabled=self._rich_messages_enabled,
+            content=text,
+        )
         try:
+            if should_try_rich:
+                try:
+                    reply_target = None
+                    if self._update.message is not None:
+                        reply_target = getattr(self._update.message, "message_id", None)
+                    elif self._update.callback_query is not None:
+                        reply_target = getattr(
+                            self._update.callback_query.message, "message_id", None
+                        )
+                    rich_msg = await _telegram_bot_send_rich_with_retry(
+                        self._bot,
+                        int(chat_id),
+                        text,
+                        reply_to_message_id=(
+                            int(reply_target) if reply_target is not None else None
+                        ),
+                    )
+                    await _delete_stream_preview(self._bot, chat_id, message_id, msg)
+                    _STREAM_MESSAGES.setdefault(chat_id, {})[str(rich_msg.message_id)] = rich_msg
+                    return
+                except Exception as exc:
+                    if not _is_rich_fallback_error(exc):
+                        raise ChannelEditUnavailable(f"rich send failed: {exc}") from exc
+                    logger.warning(
+                        "Telegram rich final send failed for chat %s msg %s; falling back to MarkdownV2 edit: %s",
+                        chat_id,
+                        message_id,
+                        exc,
+                    )
+                    if (
+                        len(_normalize_text_for_telegram_presentation(text))
+                        > TELEGRAM_MESSAGE_LIMIT
+                    ):
+                        await _delete_stream_preview(self._bot, chat_id, message_id, msg)
+                        raise ChannelEditUnavailable("rich fallback overflow") from exc
             if render_markdown:
 
                 async def _edit_markdown(_text: str):
@@ -2378,7 +2750,10 @@ async def post_init(application: Application) -> None:
     logger.info("Send /pair %s to your bot in Telegram to pair", pairing_code)
 
     # Create a long-lived channel for proactive messaging (cron delivery, etc.)
-    bot_channel = TelegramBotChannel(application.bot)
+    bot_channel = TelegramBotChannel(
+        application.bot,
+        rich_messages_enabled=config.telegram.rich_messages,
+    )
     application.bot_data["telegram_channel"] = bot_channel
 
     jobs_path = application.bot_data.get(JOBS_PATH_KEY)
