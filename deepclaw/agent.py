@@ -482,6 +482,8 @@ TELEGRAM_FORMATTING_GUIDANCE = """\
 - Add a blank line between summary, headings, lists, code blocks, and final next steps.
 - Prefer short headings, bullets, and numbered lists over long uninterrupted prose.
 - For grouped facts, status updates, comparisons, or recommendations, use scannable lists.
+- For comparisons, rankings, metrics, or other naturally tabular data, prefer markdown tables over prose lists.
+- If the response contains repeated rows with the same fields, format it as a table first unless there are only 2-3 very short items.
 - Use `**bold labels**` for key takeaways like `**Status:**`, `**Why:**`, `**Next:**`, and `**Result:**` when helpful.
 - Use fenced code blocks for commands/code and inline code for filenames, flags, and identifiers.
 - Avoid long preambles, throat-clearing, and repeated restatement.

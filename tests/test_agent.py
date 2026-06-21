@@ -465,6 +465,8 @@ class TestCreateAgent:
         assert result == "agent"
         assert agent_mod.TOOL_USE_ENFORCEMENT in captured["system_prompt"]
         assert agent_mod.OPENAI_MODEL_EXECUTION_GUIDANCE in captured["system_prompt"]
+        assert "prefer markdown tables over prose lists" in captured["system_prompt"]
+        assert "format it as a table first" in captured["system_prompt"]
 
     def test_skips_openai_execution_guidance_for_non_gpt_models(self, tmp_path, monkeypatch):
         captured = {}
