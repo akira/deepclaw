@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import logging
 import mimetypes
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
@@ -107,6 +108,143 @@ _STREAM_MESSAGES: dict[str, dict[str, object]] = {}
 
 _TELEGRAM_RETRY_BUFFER_SECONDS = 0.5
 _TELEGRAM_SEND_MAX_RETRIES = 2
+_MDV2_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#\+\-=|{}.!\\])")
+_FENCED_CODE_RE = re.compile(r"```(?P<lang>[^\n`]*)\n?(?P<code>[\s\S]*?)```")
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+_SPOILER_RE = re.compile(r"\|\|([^|\n]+)\|\|")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+_BULLET_RE = re.compile(r"^(?P<indent>\s*)[-*]\s+(?P<body>.+)$")
+_NUMBERED_RE = re.compile(r"^(?P<indent>\s*)(?P<num>\d+)\.\s+(?P<body>.+)$")
+_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(?P<body>.+)$")
+_PLACEHOLDER_PREFIX = "\uFFF0TG"
+
+
+def _escape_mdv2(text: str) -> str:
+    return _MDV2_ESCAPE_RE.sub(r"\\\1", text)
+
+
+def _stash_placeholder(placeholders: dict[str, str], rendered: str) -> str:
+    token = f"{_PLACEHOLDER_PREFIX}{len(placeholders)}\uFFF1"
+    placeholders[token] = rendered
+    return token
+
+
+def _format_markdown_inline(text: str) -> str:
+    placeholders: dict[str, str] = {}
+
+    def _swap(pattern: re.Pattern[str], builder) -> None:
+        nonlocal text
+        text = pattern.sub(lambda match: _stash_placeholder(placeholders, builder(match)), text)
+
+    _swap(_BOLD_RE, lambda match: f"*{_escape_mdv2(match.group(1).strip())}*")
+    _swap(_STRIKE_RE, lambda match: f"~{_escape_mdv2(match.group(1).strip())}~")
+    _swap(_SPOILER_RE, lambda match: f"||{_escape_mdv2(match.group(1).strip())}||")
+
+    escaped = _escape_mdv2(text)
+    for token, rendered in placeholders.items():
+        escaped = escaped.replace(token, rendered)
+    return escaped
+
+
+def _plainify_markdown_line(line: str) -> str:
+    if not line.strip():
+        return ""
+    heading_match = _HEADING_RE.match(line)
+    if heading_match:
+        line = heading_match.group(1).strip()
+    else:
+        bullet_match = _BULLET_RE.match(line)
+        if bullet_match:
+            indent = "  " * (len(bullet_match.group("indent")) // 2)
+            line = f"{indent}• {bullet_match.group('body').strip()}"
+        else:
+            numbered_match = _NUMBERED_RE.match(line)
+            if numbered_match:
+                indent = "  " * (len(numbered_match.group("indent")) // 2)
+                line = f"{indent}{numbered_match.group('num')}. {numbered_match.group('body').strip()}"
+            else:
+                blockquote_match = _BLOCKQUOTE_RE.match(line)
+                if blockquote_match:
+                    line = f"▌ {blockquote_match.group('body').strip()}"
+    line = _BOLD_RE.sub(lambda match: match.group(1).strip(), line)
+    line = _STRIKE_RE.sub(lambda match: match.group(1).strip(), line)
+    line = _SPOILER_RE.sub(lambda match: match.group(1).strip(), line)
+    return line
+
+
+def _format_markdown_line(line: str) -> str:
+    if not line.strip():
+        return ""
+    heading_match = _HEADING_RE.match(line)
+    if heading_match:
+        return f"*{_escape_mdv2(heading_match.group(1).strip())}*"
+    bullet_match = _BULLET_RE.match(line)
+    if bullet_match:
+        indent = "  " * (len(bullet_match.group("indent")) // 2)
+        return f"{indent}• {_format_markdown_inline(bullet_match.group('body').strip())}"
+    numbered_match = _NUMBERED_RE.match(line)
+    if numbered_match:
+        indent = "  " * (len(numbered_match.group("indent")) // 2)
+        num = numbered_match.group("num")
+        body = _format_markdown_inline(numbered_match.group("body").strip())
+        return f"{indent}{num}\\. {body}"
+    blockquote_match = _BLOCKQUOTE_RE.match(line)
+    if blockquote_match:
+        return f"▌ {_format_markdown_inline(blockquote_match.group('body').strip())}"
+    return _format_markdown_inline(line)
+
+
+def _render_inline_code(code: str) -> str:
+    return "`" + code.replace("`", "\\`") + "`"
+
+
+def _plain_text_from_markdown_source(text: str) -> str:
+    plain = text.replace("\r\n", "\n")
+    plain = _FENCED_CODE_RE.sub(lambda match: match.group("code").rstrip(), plain)
+    plain = _INLINE_CODE_RE.sub(lambda match: match.group(1), plain)
+    plain = "\n".join(_plainify_markdown_line(line) for line in plain.split("\n"))
+    return plain
+
+
+def _format_text_for_telegram_markdown(text: str) -> str:
+    placeholders: dict[str, str] = {}
+    formatted = text.replace("\r\n", "\n")
+    formatted = _FENCED_CODE_RE.sub(
+        lambda match: _stash_placeholder(
+            placeholders,
+            f"```{match.group('lang').strip()}\n{match.group('code').rstrip()}\n```",
+        ),
+        formatted,
+    )
+    formatted = _INLINE_CODE_RE.sub(
+        lambda match: _stash_placeholder(placeholders, _render_inline_code(match.group(1))),
+        formatted,
+    )
+    formatted = "\n".join(_format_markdown_line(line) for line in formatted.split("\n"))
+    for token, rendered in placeholders.items():
+        formatted = formatted.replace(token, rendered)
+    return formatted
+
+
+async def _send_text_with_optional_markdown(
+    send_fn,
+    fallback_fn,
+    formatted_text: str,
+    plain_text: str,
+    *,
+    description: str,
+):
+    try:
+        return await send_fn(formatted_text)
+    except BadRequest as exc:
+        logger.warning(
+            "Telegram markdown render failed for %s; falling back to plain text: %s",
+            description,
+            exc,
+        )
+        return await fallback_fn(plain_text)
 
 
 def _retry_after_seconds(exc: RetryAfter) -> float:
@@ -143,16 +281,33 @@ async def _call_with_retry_after_retry(
             await asyncio.sleep(delay)
 
 
-async def _telegram_bot_send_with_retry(bot, chat_id: int, text: str):
+async def _telegram_bot_send_with_retry(
+    bot,
+    chat_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+):
+    kwargs = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
     return await _call_with_retry_after_retry(
-        lambda: bot.send_message(chat_id=chat_id, text=text),
+        lambda: bot.send_message(**kwargs),
         description=f"send_message chat {chat_id}",
     )
 
 
-async def _telegram_reply_text_with_retry(message, text: str):
+async def _telegram_reply_text_with_retry(
+    message,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+):
+    kwargs = {"text": text}
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
     return await _call_with_retry_after_retry(
-        lambda: message.reply_text(text),
+        lambda: message.reply_text(**kwargs),
         description="reply_text",
     )
 
@@ -1634,6 +1789,10 @@ class TelegramBotChannel(Channel):
         return True
 
     @property
+    def requires_final_reformat_edit(self) -> bool:
+        return True
+
+    @property
     def message_limit(self) -> int:
         return TELEGRAM_MESSAGE_LIMIT
 
@@ -1643,11 +1802,34 @@ class TelegramBotChannel(Channel):
     async def stop(self) -> None:
         pass
 
-    async def send(self, chat_id: str, text: str) -> str:
+    async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
         """Send a message to a chat. Returns the first message_id as string."""
         first_msg_id: str | None = None
         for chunk in chunk_message(text, TELEGRAM_MESSAGE_LIMIT):
-            msg = await _telegram_bot_send_with_retry(self._bot, int(chat_id), chunk)
+            if render_markdown:
+                formatted = _format_text_for_telegram_markdown(chunk)
+                plain = _plain_text_from_markdown_source(chunk)
+
+                async def _send_markdown(_text: str):
+                    return await _telegram_bot_send_with_retry(
+                        self._bot,
+                        int(chat_id),
+                        _text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+
+                async def _send_plain(_text: str):
+                    return await _telegram_bot_send_with_retry(self._bot, int(chat_id), _text)
+
+                msg = await _send_text_with_optional_markdown(
+                    _send_markdown,
+                    _send_plain,
+                    formatted,
+                    plain,
+                    description=f"bot send chat {chat_id}",
+                )
+            else:
+                msg = await _telegram_bot_send_with_retry(self._bot, int(chat_id), chunk)
             msg_id = str(msg.message_id)
             if first_msg_id is None:
                 first_msg_id = msg_id
@@ -1669,12 +1851,36 @@ class TelegramBotChannel(Channel):
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
 
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
         """Edit a previously sent message."""
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
+        formatted = _format_text_for_telegram_markdown(text) if render_markdown else text
+        plain = _plain_text_from_markdown_source(text) if render_markdown else text
         if msg is not None:
             try:
-                await msg.edit_text(text)
+                if render_markdown:
+                    async def _edit_markdown(_text: str):
+                        return await msg.edit_text(_text, parse_mode=ParseMode.MARKDOWN_V2)
+
+                    async def _edit_plain(_text: str):
+                        return await msg.edit_text(_text)
+
+                    await _send_text_with_optional_markdown(
+                        _edit_markdown,
+                        _edit_plain,
+                        formatted,
+                        plain,
+                        description=f"bot edit cached chat {chat_id} msg {message_id}",
+                    )
+                else:
+                    await msg.edit_text(text)
             except RetryAfter as exc:
                 raise _telegram_edit_rate_limit(exc) from exc
             except BadRequest as exc:
@@ -1684,15 +1890,41 @@ class TelegramBotChannel(Channel):
                     chat_id,
                     message_id,
                     error_text,
-                    text[:300],
+                    plain[:300],
                 )
                 if "Message is not modified" not in error_text:
                     raise ChannelEditUnavailable(error_text) from exc
         else:
             try:
-                await self._bot.edit_message_text(
-                    text=text, chat_id=int(chat_id), message_id=int(message_id)
-                )
+                if render_markdown:
+                    async def _bot_edit_markdown(_text: str):
+                        return await self._bot.edit_message_text(
+                            text=_text,
+                            chat_id=int(chat_id),
+                            message_id=int(message_id),
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                        )
+
+                    async def _bot_edit_plain(_text: str):
+                        return await self._bot.edit_message_text(
+                            text=_text,
+                            chat_id=int(chat_id),
+                            message_id=int(message_id),
+                        )
+
+                    await _send_text_with_optional_markdown(
+                        _bot_edit_markdown,
+                        _bot_edit_plain,
+                        formatted,
+                        plain,
+                        description=f"bot edit chat {chat_id} msg {message_id}",
+                    )
+                else:
+                    await self._bot.edit_message_text(
+                        text=text,
+                        chat_id=int(chat_id),
+                        message_id=int(message_id),
+                    )
             except RetryAfter as exc:
                 raise _telegram_edit_rate_limit(exc) from exc
             except BadRequest as exc:
@@ -1728,6 +1960,10 @@ class TelegramChannel(Channel):
         return True
 
     @property
+    def requires_final_reformat_edit(self) -> bool:
+        return True
+
+    @property
     def message_limit(self) -> int:
         return TELEGRAM_MESSAGE_LIMIT
 
@@ -1737,15 +1973,62 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         pass
 
-    async def send(self, chat_id: str, text: str) -> str:
+    async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
         """Send a text message via reply_text. Returns a string message_id."""
         if self._update.message is not None:
-            msg = await _telegram_reply_text_with_retry(self._update.message, text)
+            if render_markdown:
+                formatted = _format_text_for_telegram_markdown(text)
+                plain = _plain_text_from_markdown_source(text)
+
+                async def _reply_markdown(_text: str):
+                    return await _telegram_reply_text_with_retry(
+                        self._update.message,
+                        _text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+
+                async def _reply_plain(_text: str):
+                    return await _telegram_reply_text_with_retry(self._update.message, _text)
+
+                msg = await _send_text_with_optional_markdown(
+                    _reply_markdown,
+                    _reply_plain,
+                    formatted,
+                    plain,
+                    description="update reply_text",
+                )
+            else:
+                msg = await _telegram_reply_text_with_retry(self._update.message, text)
         elif (
             self._update.callback_query is not None
             and self._update.callback_query.message is not None
         ):
-            msg = await _telegram_reply_text_with_retry(self._update.callback_query.message, text)
+            if render_markdown:
+                formatted = _format_text_for_telegram_markdown(text)
+                plain = _plain_text_from_markdown_source(text)
+
+                async def _callback_reply_markdown(_text: str):
+                    return await _telegram_reply_text_with_retry(
+                        self._update.callback_query.message,
+                        _text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+
+                async def _callback_reply_plain(_text: str):
+                    return await _telegram_reply_text_with_retry(
+                        self._update.callback_query.message,
+                        _text,
+                    )
+
+                msg = await _send_text_with_optional_markdown(
+                    _callback_reply_markdown,
+                    _callback_reply_plain,
+                    formatted,
+                    plain,
+                    description="callback reply_text",
+                )
+            else:
+                msg = await _telegram_reply_text_with_retry(self._update.callback_query.message, text)
         else:
             raise RuntimeError("No Telegram message context available for send()")
         msg_id = str(msg.message_id)
@@ -1782,13 +2065,37 @@ class TelegramChannel(Channel):
         _STREAM_MESSAGES.setdefault(chat_id, {})[msg_id] = msg
         return msg_id
 
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
         """Edit a previously sent message."""
         msg = _STREAM_MESSAGES.get(chat_id, {}).get(message_id)
         if msg is None:
             raise ChannelEditUnavailable("missing cached editable message")
+        formatted = _format_text_for_telegram_markdown(text) if render_markdown else text
+        plain = _plain_text_from_markdown_source(text) if render_markdown else text
         try:
-            await msg.edit_text(text)
+            if render_markdown:
+                async def _edit_markdown(_text: str):
+                    return await msg.edit_text(_text, parse_mode=ParseMode.MARKDOWN_V2)
+
+                async def _edit_plain(_text: str):
+                    return await msg.edit_text(_text)
+
+                await _send_text_with_optional_markdown(
+                    _edit_markdown,
+                    _edit_plain,
+                    formatted,
+                    plain,
+                    description=f"update edit chat {chat_id} msg {message_id}",
+                )
+            else:
+                await msg.edit_text(text)
         except RetryAfter as exc:
             raise _telegram_edit_rate_limit(exc) from exc
         except BadRequest as exc:
@@ -1798,7 +2105,7 @@ class TelegramChannel(Channel):
                 chat_id,
                 message_id,
                 error_text,
-                text[:300],
+                plain[:300],
             )
             if "Message is not modified" not in error_text:
                 raise ChannelEditUnavailable(error_text) from exc

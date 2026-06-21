@@ -10,8 +10,8 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphRecursionError
 from telegram import InlineKeyboardMarkup
-from telegram.constants import ChatAction
-from telegram.error import RetryAfter
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, RetryAfter
 
 from deepclaw.auth import is_user_allowed
 from deepclaw.channels.base import ChannelEditRateLimited, ChannelEditUnavailable
@@ -31,9 +31,11 @@ from deepclaw.channels.telegram import (
     _build_incoming_text,
     _format_remote_skills,
     _format_skills_list,
+    _format_text_for_telegram_markdown,
     _looks_like_supported_image,
     _parse_skills_command,
     _pending_approval_markup,
+    _plain_text_from_markdown_source,
     _validate_model,
     authorize_chat,
     cmd_approval_callback,
@@ -266,13 +268,17 @@ class TestAuthorizeChat:
 
 class _FakeStreamingChannel:
     def __init__(self):
-        self.sent: list[tuple[str, str]] = []
-        self.edits: list[tuple[str, str, str]] = []
+        self.sent: list[tuple[str, str, bool]] = []
+        self.edits: list[tuple[str, str, str, bool]] = []
         self.media_sent: list[tuple[str, str, str | None]] = []
 
     @property
     def name(self) -> str:
         return "telegram"
+
+    @property
+    def requires_final_reformat_edit(self) -> bool:
+        return True
 
     @property
     def message_limit(self) -> int:
@@ -281,8 +287,8 @@ class _FakeStreamingChannel:
     async def send_typing(self, chat_id: str) -> None:
         return None
 
-    async def send(self, chat_id: str, text: str) -> str:
-        self.sent.append((chat_id, text))
+    async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
+        self.sent.append((chat_id, text, render_markdown))
         return "msg-1"
 
     async def send_media(self, chat_id: str, path: str, caption: str | None = None) -> str:
@@ -293,8 +299,15 @@ class _FakeStreamingChannel:
         self.media_sent.append((chat_id, path, caption))
         return "voice-1"
 
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
-        self.edits.append((chat_id, message_id, text))
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
+        self.edits.append((chat_id, message_id, text, render_markdown))
 
 
 class _RateLimitedEditChannel(_FakeStreamingChannel):
@@ -303,16 +316,51 @@ class _RateLimitedEditChannel(_FakeStreamingChannel):
         self.retry_after = retry_after
         self.edit_attempts = 0
 
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
         self.edit_attempts += 1
         if self.edit_attempts == 1:
             raise ChannelEditRateLimited(self.retry_after)
-        self.edits.append((chat_id, message_id, text))
+        self.edits.append((chat_id, message_id, text, render_markdown))
 
 
 class _UnavailableEditChannel(_FakeStreamingChannel):
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
         raise ChannelEditUnavailable("missing cached editable message")
+
+
+class TestTelegramFormattingHelpers:
+    def test_formatter_does_not_treat_literal_asterisks_as_italic(self):
+        text = "2 * 3 = 6 * 4 = 24"
+        formatted = _format_text_for_telegram_markdown(text)
+        assert formatted == r"2 \* 3 \= 6 \* 4 \= 24"
+
+    def test_formatter_keeps_markdown_links_with_parentheses_as_literal_text(self):
+        text = "[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics)) and **bold**"
+        formatted = _format_text_for_telegram_markdown(text)
+        assert formatted == r"\[Wiki\]\(https://en\.wikipedia\.org/wiki/Function\_\(mathematics\)\) and *bold*"
+
+    def test_plain_text_fallback_uses_original_markdown_source(self):
+        text = "## Title\n- **bold**\n[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
+        plain = _plain_text_from_markdown_source(text)
+        assert plain == (
+            "Title\n"
+            "• bold\n"
+            "[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
+        )
 
 
 class TestTelegramBotChannel:
@@ -327,6 +375,39 @@ class TestTelegramBotChannel:
 
         bot.send_message.assert_awaited_once_with(chat_id=123, text="hello")
         assert message_id == "100"
+
+    @pytest.mark.asyncio
+    async def test_send_markdown_final_message_uses_markdown_v2(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=105))
+
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send("123", "## Title\n- **bold**", render_markdown=True)
+
+        assert message_id == "105"
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["chat_id"] == 123
+        assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert "*Title*" in kwargs["text"]
+        assert "• *bold*" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_send_markdown_falls_back_to_plain_text_on_bad_request(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock(
+            side_effect=[BadRequest("Can't parse entities"), SimpleNamespace(message_id=106)]
+        )
+
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send("123", "## Title\n- **bold**", render_markdown=True)
+
+        assert message_id == "106"
+        assert bot.send_message.await_count == 2
+        first_call, second_call = bot.send_message.await_args_list
+        assert first_call.kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert second_call.kwargs == {"chat_id": 123, "text": "Title\n• bold"}
 
     @pytest.mark.asyncio
     async def test_send_chunks_overlong_messages(self):
@@ -418,8 +499,23 @@ class TestTelegramChannel:
 
         message_id = await channel.send("1", "Thinking...")
 
-        update.message.reply_text.assert_awaited_once_with("Thinking...")
+        update.message.reply_text.assert_awaited_once_with(text="Thinking...")
         assert message_id == "200"
+
+    @pytest.mark.asyncio
+    async def test_send_markdown_uses_markdown_v2_for_update_channel(self):
+        update = _make_slash_update(text="hello")
+        ctx = _make_slash_context()
+        channel = TelegramChannel(update, ctx)
+
+        message_id = await channel.send("1", "## Title\n- **bold**", render_markdown=True)
+
+        assert message_id == "200"
+        update.message.reply_text.assert_awaited_once()
+        kwargs = update.message.reply_text.await_args.kwargs
+        assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert "*Title*" in kwargs["text"]
+        assert "• *bold*" in kwargs["text"]
 
     @pytest.mark.asyncio
     async def test_send_falls_back_to_callback_message_reply_text(self):
@@ -429,7 +525,7 @@ class TestTelegramChannel:
 
         message_id = await channel.send("1", "Thinking...")
 
-        update.callback_query.message.reply_text.assert_awaited_once_with("Thinking...")
+        update.callback_query.message.reply_text.assert_awaited_once_with(text="Thinking...")
         assert message_id == "201"
 
     @pytest.mark.asyncio
@@ -585,11 +681,15 @@ class TestGatewayProgressFormatting:
 
 class TestGatewayRedaction:
     @pytest.mark.asyncio
-    async def test_streaming_redacts_before_edit_and_final_send(self):
+    async def test_gateway_redacts_streamed_text_and_logs(self, caplog):
         secret = "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"
+        caplog.set_level("INFO")
         agent = _FakeStreamingAgent(
             [
-                (SimpleNamespace(content_blocks=[{"type": "text", "text": secret}]), {}),
+                (
+                    SimpleNamespace(content_blocks=[{"type": "text", "text": f"token: {secret}"}]),
+                    {},
+                )
             ]
         )
         streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
@@ -599,10 +699,27 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        assert channel.sent == [("123", "Thinking...")]
+        assert channel.sent == [("123", "Thinking...", False)]
         assert channel.edits
-        assert all(secret not in text for _, _, text in channel.edits)
-        assert any("[REDACTED]" in text for _, _, text in channel.edits)
+        assert all(secret not in text for _, _, text, _ in channel.edits)
+        assert any("[REDACTED]" in text for _, _, text, _ in channel.edits)
+
+    @pytest.mark.asyncio
+    async def test_gateway_uses_markdown_render_only_for_final_delivery(self):
+        agent = _FakeStreamingAgent(
+            [(SimpleNamespace(content_blocks=[{"type": "text", "text": "## Title\n- **bold**"}]), {})]
+        )
+        streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
+        gateway = Gateway(agent=agent, streaming_config=streaming)
+        channel = _FakeStreamingChannel()
+        incoming = SimpleNamespace(chat_id="123", text="format this")
+
+        await gateway.handle_message(channel, incoming, "thread-1")
+
+        assert channel.sent == [("123", "Thinking...", False)]
+        assert channel.edits[0][3] is False
+        assert channel.edits[-1][3] is True
+        assert channel.edits[-1][2] == "## Title\n- **bold**"
 
     @pytest.mark.asyncio
     async def test_gateway_sends_native_media_for_media_directives(self, tmp_path):
@@ -627,7 +744,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        assert channel.sent == [("123", "Thinking...")]
+        assert channel.sent == [("123", "Thinking...", False)]
         assert channel.edits[-1][2] == "Here you go."
         assert channel.media_sent == [("123", str(image_path), None)]
 
@@ -643,7 +760,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        assert channel.sent == [("123", "Thinking..."), ("123", "Done.")]
+        assert channel.sent == [("123", "Thinking...", False), ("123", "Done.", True)]
         assert channel.edits == []
 
     @pytest.mark.asyncio
@@ -658,7 +775,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        assert channel.sent == [("123", "Thinking..."), ("123", "Done.")]
+        assert channel.sent == [("123", "Thinking...", False), ("123", "Done.", True)]
         assert channel.edits == []
 
     @pytest.mark.asyncio
@@ -861,7 +978,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        assert any("No activity for" in text for _, text in channel.sent)
+        assert any("No activity for" in text for _, text, _ in channel.sent)
         assert "inactive for" in channel.edits[-1][2]
 
     @pytest.mark.asyncio
@@ -902,7 +1019,7 @@ class TestGatewayRedaction:
         assert all(secret not in entry for entry in logged_messages)
         assert any("[REDACTED]" in entry for entry in logged_messages if "Tool" in entry)
         assert all(
-            CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text in channel.edits
+            CURSOR_INDICATOR not in text or "[REDACTED]" in text for _, _, text, _ in channel.edits
         )
 
     @pytest.mark.asyncio
@@ -953,7 +1070,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        edits_text = "\n".join(text for _, _, text in channel.edits)
+        edits_text = "\n".join(text for _, _, text, _ in channel.edits)
         assert '📚 skill_view: "systematic-debugging"' in edits_text
         assert '📚 skill_view: "deepclaw-development"' in edits_text
         assert '💻 terminal: "TRACE_ID=' in edits_text
@@ -1057,7 +1174,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        edits_text = "\n".join(text for _, _, text in channel.edits)
+        edits_text = "\n".join(text for _, _, text, _ in channel.edits)
         assert '💻 execute: "sudo apt-get install ripgrep"' in edits_text
         assert "💻 execute (×2)" not in edits_text
         assert "\n💻 execute\n" not in edits_text
@@ -1100,7 +1217,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        edits_text = "\n".join(text for _, _, text in channel.edits)
+        edits_text = "\n".join(text for _, _, text, _ in channel.edits)
         assert '💻 execute: "sudo apt-get install ripgrep"' in edits_text
 
         snapshot = gateway.get_queue_snapshot("123")
@@ -1141,7 +1258,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        edits_text = "\n".join(text for _, _, text in channel.edits)
+        edits_text = "\n".join(text for _, _, text, _ in channel.edits)
         assert "💻 execute" in edits_text
 
         snapshot = gateway.get_queue_snapshot("123")
@@ -1184,7 +1301,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        edits_text = "\n".join(text for _, _, text in channel.edits)
+        edits_text = "\n".join(text for _, _, text, _ in channel.edits)
         assert "🔧 task" not in edits_text
         assert '🔎 web_search: "site:sf.eater.com best restaurants"' in edits_text
         assert "Let me search the web for the list." not in edits_text
@@ -1307,7 +1424,7 @@ class TestGatewayRedaction:
 
         await gateway.handle_message(channel, incoming, "thread-1")
 
-        edit_texts = [text for _, _, text in channel.edits]
+        edit_texts = [text for _, _, text, _ in channel.edits]
         assert edit_texts.count("💻 execute▌") == 1
 
     @pytest.mark.asyncio
