@@ -587,12 +587,19 @@ class Gateway:
         message_id: str,
         text: str,
         queue_snapshot: dict[str, Any],
+        render_markdown: bool = False,
     ) -> bool:
         if self._edit_cooldown_active(chat_id):
             queue_snapshot["stream_delivery_mode"] = "fresh_send"
             return False
         try:
-            await self._edit_redacted_message(channel, chat_id, message_id, text)
+            await self._edit_redacted_message(
+                channel,
+                chat_id,
+                message_id,
+                text,
+                render_markdown=render_markdown,
+            )
             queue_snapshot["stream_delivery_mode"] = "edit"
             return True
         except ChannelEditRateLimited as exc:
@@ -650,14 +657,32 @@ class Gateway:
         return config
 
     async def _edit_redacted_message(
-        self, channel: Channel, chat_id: str, message_id: str, text: str
+        self,
+        channel: Channel,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
     ) -> None:
         """Redact secrets before editing a streamed message."""
-        await channel.edit_message(chat_id, message_id, redact_secrets(text))
+        await channel.edit_message(
+            chat_id,
+            message_id,
+            redact_secrets(text),
+            render_markdown=render_markdown,
+        )
 
-    async def _send_redacted_message(self, channel: Channel, chat_id: str, text: str) -> str:
+    async def _send_redacted_message(
+        self,
+        channel: Channel,
+        chat_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> str:
         """Redact secrets before sending a message."""
-        return await channel.send(chat_id, redact_secrets(text))
+        return await channel.send(chat_id, redact_secrets(text), render_markdown=render_markdown)
 
     async def _get_pending_interrupt(
         self,
@@ -1077,19 +1102,39 @@ class Gateway:
         if not final_text and media_paths:
             final_text = "Attached media."
 
-        chunks = chunk_message(final_text, limit)
+        prepare_text = getattr(channel, "prepare_text_for_delivery", None)
+        delivery_text = final_text
+        if callable(prepare_text):
+            prepared = prepare_text(final_text, render_markdown=True)
+            if isinstance(prepared, str):
+                delivery_text = prepared
+        chunks = chunk_message(delivery_text, limit)
         used_fresh_send = False
-        if chunks[0] != last_display and not await self._try_edit_stream_message(
+        force_final_edit = channel.requires_final_reformat_edit
+        if (
+            force_final_edit or chunks[0] != last_display
+        ) and not await self._try_edit_stream_message(
             channel,
             chat_id=chat_id,
             message_id=msg_id,
             text=chunks[0],
             queue_snapshot=queue_snapshot,
+            render_markdown=True,
         ):
-            await self._send_redacted_message(channel, chat_id, chunks[0])
+            await self._send_redacted_message(
+                channel,
+                chat_id,
+                chunks[0],
+                render_markdown=True,
+            )
             used_fresh_send = True
         for extra_chunk in chunks[1:]:
-            await self._send_redacted_message(channel, chat_id, extra_chunk)
+            await self._send_redacted_message(
+                channel,
+                chat_id,
+                extra_chunk,
+                render_markdown=True,
+            )
             used_fresh_send = True
         queue_snapshot["final_delivery_mode"] = "fresh_send" if used_fresh_send else "edit"
         logger.info(

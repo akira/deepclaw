@@ -474,6 +474,19 @@ Before finalizing:
 
 OPENAI_MODEL_GUIDANCE_MODELS = ("gpt", "codex")
 
+TELEGRAM_FORMATTING_GUIDANCE = """\
+## Output Formatting
+- When responding in chat clients like Telegram, prefer concise, structured markdown over dense prose.
+- Lead with the answer in 1-2 lines before any detail.
+- Keep paragraphs short: usually 1-3 sentences max per paragraph.
+- Add a blank line between summary, headings, lists, code blocks, and final next steps.
+- Prefer short headings, bullets, and numbered lists over long uninterrupted prose.
+- For grouped facts, status updates, comparisons, or recommendations, use scannable lists.
+- Use `**bold labels**` for key takeaways like `**Status:**`, `**Why:**`, `**Next:**`, and `**Result:**` when helpful.
+- Use fenced code blocks for commands/code and inline code for filenames, flags, and identifiers.
+- Avoid long preambles, throat-clearing, and repeated restatement.
+"""
+
 
 def _load_soul() -> str | None:
     """Load SOUL.md from ~/.deepclaw/SOUL.md.
@@ -667,6 +680,7 @@ def create_agent(config, checkpointer):
     system_prompt_parts = []
     if soul:
         system_prompt_parts.append(soul)
+    system_prompt_parts.append(TELEGRAM_FORMATTING_GUIDANCE)
     system_prompt_parts.append(TOOL_USE_ENFORCEMENT)
 
     model_name = (config.model or "").lower()

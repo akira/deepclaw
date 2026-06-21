@@ -57,7 +57,7 @@ class Channel(ABC):
     async def stop(self) -> None: ...
 
     @abstractmethod
-    async def send(self, chat_id: str, text: str) -> str:
+    async def send(self, chat_id: str, text: str, *, render_markdown: bool = False) -> str:
         """Send a text message. Returns a message_id for later editing."""
         ...
 
@@ -67,7 +67,14 @@ class Channel(ABC):
         return await self.send(chat_id, fallback)
 
     @abstractmethod
-    async def edit_message(self, chat_id: str, message_id: str, text: str) -> None:
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
         """Edit a previously sent message. Silently ignore if unsupported."""
         ...
 
@@ -82,6 +89,15 @@ class Channel(ABC):
         return False
 
     @property
+    def requires_final_reformat_edit(self) -> bool:
+        """Whether final delivery should force one last edit for rendering upgrades."""
+        return False
+
+    @property
     def message_limit(self) -> int:
         """Max message length for this channel."""
         return 4096
+
+    def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
+        """Platform-specific final-text normalization before chunking/delivery."""
+        return text
