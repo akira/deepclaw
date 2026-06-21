@@ -222,7 +222,9 @@ def _should_promote_label_line(label: str, body: str) -> bool:
     return "\n" not in body
 
 
-def _split_long_paragraph(paragraph: str, *, max_sentences: int = 2, max_chars: int = 140) -> list[str]:
+def _split_long_paragraph(
+    paragraph: str, *, max_sentences: int = 2, max_chars: int = 140
+) -> list[str]:
     paragraph = paragraph.strip()
     if len(paragraph) <= max_chars:
         return [paragraph]
@@ -276,7 +278,7 @@ def _normalize_text_for_telegram_presentation(text: str) -> str:
             continue
         label_match = _LABEL_LINE_RE.match(stripped)
         if label_match and _should_promote_label_line(
-            label_match.group('label'), label_match.group('body')
+            label_match.group("label"), label_match.group("body")
         ):
             _append_with_spacing(
                 f"- **{label_match.group('label').strip()}:** {label_match.group('body').strip()}"
