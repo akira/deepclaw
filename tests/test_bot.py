@@ -25,6 +25,7 @@ from deepclaw.channels.telegram import (
     MODEL_OVERRIDE_KEY,
     PENDING_APPROVALS_KEY,
     TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_RICH_MESSAGE_LIMIT,
     THREAD_IDS_KEY,
     TelegramBotChannel,
     TelegramChannel,
@@ -33,6 +34,7 @@ from deepclaw.channels.telegram import (
     _format_skills_list,
     _format_text_for_telegram_markdown,
     _looks_like_supported_image,
+    _needs_rich_rendering,
     _normalize_text_for_telegram_presentation,
     _parse_skills_command,
     _pending_approval_markup,
@@ -373,6 +375,10 @@ class TestTelegramFormattingHelpers:
         normalized = _normalize_text_for_telegram_presentation(text)
         assert normalized == "Traceback (most recent call last):\n\nValueError: bad input"
 
+    def test_detects_markdown_table_as_rich_eligible_shape(self):
+        text = "| Name | Value |\n| --- | --- |\n| foo | bar |"
+        assert _needs_rich_rendering(text) is True
+
     def test_formatter_does_not_treat_literal_asterisks_as_italic(self):
         text = "2 * 3 = 6 * 4 = 24"
         formatted = _format_text_for_telegram_markdown(text)
@@ -441,6 +447,65 @@ class TestTelegramBotChannel:
         assert second_call.kwargs == {"chat_id": 123, "text": "Title\n\n• bold"}
 
     @pytest.mark.asyncio
+    async def test_send_markdown_table_uses_rich_message_api(self):
+        bot = MagicMock()
+        bot.do_api_request = AsyncMock(return_value=SimpleNamespace(message_id=109))
+        bot.send_message = AsyncMock()
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send(
+            "123",
+            "| Name | Value |\n| --- | --- |\n| foo | bar |",
+            render_markdown=True,
+        )
+
+        assert message_id == "109"
+        bot.do_api_request.assert_awaited_once()
+        _, kwargs = bot.do_api_request.await_args
+        assert kwargs["return_type"].__name__ == "Message"
+        assert kwargs["api_kwargs"]["rich_message"] == {
+            "markdown": "| Name | Value |\n| --- | --- |\n| foo | bar |"
+        }
+        bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_markdown_table_falls_back_when_rich_rejected(self):
+        bot = MagicMock()
+        bot.do_api_request = AsyncMock(side_effect=BadRequest("unsupported rich payload"))
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=110))
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send(
+            "123",
+            "| Name | Value |\n| --- | --- |\n| foo | bar |",
+            render_markdown=True,
+        )
+
+        assert message_id == "110"
+        assert bot.do_api_request.await_count == 1
+        bot.send_message.assert_awaited_once()
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert "\\| Name \\| Value \\|" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_send_rich_fallback_rechunks_back_to_markdown_limit(self):
+        rich_text = "| Name | Value |\n| --- | --- |\n| foo | " + ("x" * 5000) + " |"
+        bot = MagicMock()
+        bot.do_api_request = AsyncMock(side_effect=BadRequest("unsupported rich payload"))
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=111))
+        channel = TelegramBotChannel(bot)
+
+        message_id = await channel.send("123", rich_text, render_markdown=True)
+
+        assert message_id == "111"
+        assert bot.do_api_request.await_count == 1
+        assert bot.send_message.await_count >= 2
+        for call in bot.send_message.await_args_list:
+            assert call.kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+            assert len(call.kwargs["text"]) <= TELEGRAM_MESSAGE_LIMIT
+
+    @pytest.mark.asyncio
     async def test_send_markdown_rechunks_after_normalization_growth(self):
         bot = MagicMock()
         bot.send_message = AsyncMock(
@@ -458,6 +523,15 @@ class TestTelegramBotChannel:
         assert bot.send_message.await_count == 2
         for call in bot.send_message.await_args_list:
             assert len(call.kwargs["text"]) <= TELEGRAM_MESSAGE_LIMIT
+
+    def test_final_delivery_limit_uses_rich_cap_for_tables(self):
+        bot = MagicMock()
+        bot.do_api_request = AsyncMock()
+        channel = TelegramBotChannel(bot)
+        text = "| Name | Value |\n| --- | --- |\n| foo | bar |"
+        assert (
+            channel.final_delivery_limit(text, render_markdown=True) == TELEGRAM_RICH_MESSAGE_LIMIT
+        )
 
     @pytest.mark.asyncio
     async def test_send_chunks_overlong_messages(self):
@@ -566,6 +640,25 @@ class TestTelegramChannel:
         assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
         assert "*Title*" in kwargs["text"]
         assert "• *bold*" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_send_table_uses_rich_message_api_for_update_channel(self):
+        update = _make_slash_update(text="hello")
+        ctx = _make_slash_context()
+        ctx.bot.do_api_request = AsyncMock(return_value=SimpleNamespace(message_id=203))
+        channel = TelegramChannel(update, ctx)
+
+        message_id = await channel.send(
+            "1",
+            "| Name | Value |\n| --- | --- |\n| foo | bar |",
+            render_markdown=True,
+        )
+
+        assert message_id == "203"
+        ctx.bot.do_api_request.assert_awaited_once()
+        _, kwargs = ctx.bot.do_api_request.await_args
+        assert kwargs["api_kwargs"]["reply_parameters"] == {"message_id": update.message.message_id}
+        update.message.reply_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_send_falls_back_to_callback_message_reply_text(self):
@@ -2157,6 +2250,7 @@ def _make_slash_update(user_id: int = 1, text: str = "/cmd", username: str = "al
     user = SimpleNamespace(id=user_id, username=username)
     chat = SimpleNamespace(id=user_id, type="private")
     message = MagicMock()
+    message.message_id = 199
     message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=200))
     message.text = text
     message.caption = None

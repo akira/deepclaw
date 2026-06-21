@@ -101,3 +101,7 @@ class Channel(ABC):
     def prepare_text_for_delivery(self, text: str, *, render_markdown: bool = False) -> str:
         """Platform-specific final-text normalization before chunking/delivery."""
         return text
+
+    def final_delivery_limit(self, text: str, *, render_markdown: bool = False) -> int:
+        """Per-message limit for final delivery chunking on this channel."""
+        return self.message_limit

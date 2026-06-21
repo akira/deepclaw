@@ -1104,11 +1104,17 @@ class Gateway:
 
         prepare_text = getattr(channel, "prepare_text_for_delivery", None)
         delivery_text = final_text
+        delivery_limit = limit
         if callable(prepare_text):
             prepared = prepare_text(final_text, render_markdown=True)
             if isinstance(prepared, str):
                 delivery_text = prepared
-        chunks = chunk_message(delivery_text, limit)
+        final_delivery_limit = getattr(channel, "final_delivery_limit", None)
+        if callable(final_delivery_limit):
+            proposed_limit = final_delivery_limit(final_text, render_markdown=True)
+            if isinstance(proposed_limit, int) and proposed_limit > 0:
+                delivery_limit = proposed_limit
+        chunks = chunk_message(delivery_text, delivery_limit)
         used_fresh_send = False
         force_final_edit = channel.requires_final_reformat_edit
         if (
