@@ -650,6 +650,15 @@ def _pending_approval_text() -> str:
     return "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
 
 
+def _pending_approval_prompt_text(pending: dict[str, Any] | None) -> str:
+    """Return the best approval prompt text for a pending safety review."""
+    if pending:
+        prompt = (pending.get("message") or "").strip()
+        if prompt:
+            return prompt
+    return _pending_approval_text()
+
+
 def _truncate_queued_text(text: str, limit: int = 80) -> str:
     """Return a compact preview for queued requests."""
     compact = " ".join((text or "").split())
@@ -701,7 +710,7 @@ async def _drain_queued_run(
             pending = await gateway.handle_message(channel, incoming, thread_id)
             if pending:
                 _pending_approvals(context)[chat_id] = pending
-                pending_text = pending.get("message") or "Safety review required."
+                pending_text = _pending_approval_prompt_text(pending)
                 pending_markup = _pending_approval_markup(pending["id"])
                 await _call_with_retry_after_retry(
                     lambda chat_id=chat_id, pending_text=pending_text, pending_markup=pending_markup: (
@@ -1512,8 +1521,14 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not last_text:
         await update.message.reply_text("No previous message to retry.")
         return
-    if _pending_approvals(context).get(chat_id):
-        await update.message.reply_text(_pending_approval_text())
+    if pending := _pending_approvals(context).get(chat_id):
+        message = update.message
+        if message is None:
+            return
+        await message.reply_text(
+            _pending_approval_prompt_text(pending),
+            reply_markup=_pending_approval_markup(pending["id"]),
+        )
         return
     if not _begin_active_run(context, chat_id):
         await update.message.reply_text(_active_run_text())
@@ -1532,6 +1547,13 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pending = await gateway.handle_message(channel, incoming, thread_id)
         if pending:
             _pending_approvals(context)[chat_id] = pending
+            message = update.message
+            if message is None:
+                return
+            await message.reply_text(
+                _pending_approval_prompt_text(pending),
+                reply_markup=_pending_approval_markup(pending["id"]),
+            )
         else:
             _pending_approvals(context).pop(chat_id, None)
             await _drain_queued_run(context, chat_id=chat_id, thread_id=thread_id)
@@ -1616,7 +1638,7 @@ async def _resume_pending_interrupt(
         approvals = _pending_approvals(context)
         if next_pending:
             approvals[chat_id] = next_pending
-            pending_text = next_pending.get("message") or "Safety review required."
+            pending_text = _pending_approval_prompt_text(next_pending)
             pending_markup = _pending_approval_markup(next_pending["id"])
             if update.message is not None:
                 message = update.message
@@ -2292,8 +2314,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if _pending_approvals(context).get(chat_id):
-        await update.message.reply_text(_pending_approval_text())
+    if pending := _pending_approvals(context).get(chat_id):
+        message = update.message
+        if message is None:
+            return
+        await message.reply_text(
+            _pending_approval_prompt_text(pending),
+            reply_markup=_pending_approval_markup(pending["id"]),
+        )
         return
 
     if not _begin_active_run(context, chat_id):
@@ -2320,7 +2348,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if pending:
             _pending_approvals(context)[chat_id] = pending
             await update.message.reply_text(
-                pending.get("message") or "Safety review required.",
+                _pending_approval_prompt_text(pending),
                 reply_markup=_pending_approval_markup(pending["id"]),
             )
         else:

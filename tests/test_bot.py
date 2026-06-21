@@ -2115,7 +2115,7 @@ class TestTelegramMediaHandleMessage:
         update.message.photo = [photo]
 
         gateway = MagicMock()
-        gateway.handle_message = AsyncMock()
+        gateway.handle_message = AsyncMock(return_value=None)
         ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
 
         with patch("deepclaw.channels.telegram._UPLOADS_DIR", tmp_path):
@@ -2798,7 +2798,42 @@ class TestCmdRetry:
         assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"] == pending
         assert ctx.bot_data["queued_runs"]["1"] == [{"text": "after approval"}]
         ctx.bot.send_message.assert_awaited_once()
+        _, kwargs = ctx.bot.send_message.await_args
+        assert kwargs["text"] == "Need approval"
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:approval-1"
+        )
         assert gateway.handle_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_surfaces_new_pending_approval_with_buttons(self):
+        update = _make_slash_update(text="/retry")
+        pending = {
+            "id": "approval-2",
+            "thread_id": "thread-1",
+            "message": "Need approval now",
+            "tool": "execute",
+        }
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(return_value=pending)
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                LAST_MESSAGE_KEY: {"1": "retry this"},
+            }
+        )
+
+        await cmd_retry(update, ctx)
+
+        assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"] == pending
+        update.message.reply_text.assert_called_once()
+        args, kwargs = update.message.reply_text.call_args
+        assert args == ("Need approval now",)
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][1].callback_data
+            == "safety:approve_session:approval-2"
+        )
 
     @pytest.mark.asyncio
     async def test_retry_blocked_while_approval_pending(self):
@@ -2806,14 +2841,48 @@ class TestCmdRetry:
         ctx = _make_slash_context(
             extra={
                 LAST_MESSAGE_KEY: {"1": "run something"},
-                PENDING_APPROVALS_KEY: {"1": {"id": "interrupt-1", "thread_id": "thread-1"}},
+                PENDING_APPROVALS_KEY: {
+                    "1": {
+                        "id": "interrupt-1",
+                        "thread_id": "thread-1",
+                        "message": "Approve or deny?",
+                    }
+                },
             }
         )
 
         await cmd_retry(update, ctx)
 
-        update.message.reply_text.assert_called_once_with(
-            "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
+        update.message.reply_text.assert_called_once()
+        args, kwargs = update.message.reply_text.call_args
+        assert args == ("Approve or deny?",)
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_message_pending_approval_reply_includes_buttons(self):
+        update = _make_slash_update(text="tell me status")
+        ctx = _make_slash_context(
+            extra={
+                PENDING_APPROVALS_KEY: {
+                    "1": {
+                        "id": "interrupt-3",
+                        "thread_id": "thread-1",
+                        "message": "Approve this dangerous command?",
+                    }
+                }
+            }
+        )
+
+        await handle_message(update, ctx)
+
+        update.message.reply_text.assert_called_once()
+        args, kwargs = update.message.reply_text.call_args
+        assert args == ("Approve this dangerous command?",)
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-3"
         )
 
     @pytest.mark.asyncio
@@ -3359,8 +3428,12 @@ class TestSafetyApprovalCommands:
         await handle_message(update, ctx)
 
         gateway.handle_message.assert_not_awaited()
-        update.message.reply_text.assert_called_once_with(
-            "A safety approval is pending. Use /approve, /approve session, or /deny <reason> to respond."
+        update.message.reply_text.assert_called_once()
+        args, kwargs = update.message.reply_text.call_args
+        assert args == ("Approve or deny?",)
+        assert (
+            kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            == "safety:approve_once:interrupt-1"
         )
 
 
