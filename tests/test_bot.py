@@ -17,6 +17,7 @@ from deepclaw.auth import is_user_allowed
 from deepclaw.channels.base import ChannelEditRateLimited, ChannelEditUnavailable
 from deepclaw.channels.telegram import (
     _MAX_QUEUED_RUNS_PER_CHAT,
+    _STREAM_MESSAGES,
     ACTIVE_RUNS_KEY,
     ALLOWED_USERS_KEY,
     CONFIG_KEY,
@@ -604,6 +605,32 @@ class TestTelegramBotChannel:
         assert excinfo.value.retry_after_seconds >= 3
 
     @pytest.mark.asyncio
+    async def test_edit_message_rich_final_replaces_preview_with_fresh_send(self):
+        bot = MagicMock()
+        bot.do_api_request = AsyncMock(return_value=SimpleNamespace(message_id=120))
+        preview = MagicMock()
+        preview.message_id = 200
+        preview.delete = AsyncMock()
+        _STREAM_MESSAGES.setdefault("123", {})["200"] = preview
+        channel = TelegramBotChannel(bot)
+
+        await channel.edit_message(
+            "123",
+            "200",
+            "| Name | Value |\n| --- | --- |\n| foo | bar |",
+            render_markdown=True,
+        )
+
+        bot.do_api_request.assert_awaited_once()
+        _, kwargs = bot.do_api_request.await_args
+        assert kwargs["api_kwargs"]["rich_message"] == {
+            "markdown": "| Name | Value |\n| --- | --- |\n| foo | bar |"
+        }
+        preview.delete.assert_awaited_once()
+        assert "200" not in _STREAM_MESSAGES.get("123", {})
+        assert "120" in _STREAM_MESSAGES.get("123", {})
+
+    @pytest.mark.asyncio
     async def test_send_typing_swallows_retry_after(self):
         bot = MagicMock()
         bot.send_chat_action = AsyncMock(side_effect=RetryAfter(1))
@@ -659,6 +686,31 @@ class TestTelegramChannel:
         _, kwargs = ctx.bot.do_api_request.await_args
         assert kwargs["api_kwargs"]["reply_parameters"] == {"message_id": update.message.message_id}
         update.message.reply_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edit_message_rich_final_replaces_preview_with_fresh_send(self):
+        update = _make_slash_update(text="hello")
+        ctx = _make_slash_context()
+        ctx.bot.do_api_request = AsyncMock(return_value=SimpleNamespace(message_id=204))
+        channel = TelegramChannel(update, ctx)
+        preview = update.message.reply_text.return_value
+        preview.message_id = 200
+        preview.delete = AsyncMock()
+        _STREAM_MESSAGES.setdefault("1", {})["200"] = preview
+
+        await channel.edit_message(
+            "1",
+            "200",
+            "| Name | Value |\n| --- | --- |\n| foo | bar |",
+            render_markdown=True,
+        )
+
+        ctx.bot.do_api_request.assert_awaited_once()
+        _, kwargs = ctx.bot.do_api_request.await_args
+        assert kwargs["api_kwargs"]["reply_parameters"] == {"message_id": 200}
+        preview.delete.assert_awaited_once()
+        assert "200" not in _STREAM_MESSAGES.get("1", {})
+        assert "204" in _STREAM_MESSAGES.get("1", {})
 
     @pytest.mark.asyncio
     async def test_send_falls_back_to_callback_message_reply_text(self):
@@ -2251,6 +2303,7 @@ def _make_slash_update(user_id: int = 1, text: str = "/cmd", username: str = "al
     chat = SimpleNamespace(id=user_id, type="private")
     message = MagicMock()
     message.message_id = 199
+    message.delete = AsyncMock()
     message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=200))
     message.text = text
     message.caption = None
@@ -2269,6 +2322,8 @@ def _make_callback_update(user_id: int = 1, data: str = "approve", username: str
     user = SimpleNamespace(id=user_id, username=username)
     chat = SimpleNamespace(id=user_id, type="private")
     message = MagicMock()
+    message.message_id = 198
+    message.delete = AsyncMock()
     message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=201))
     message.edit_reply_markup = AsyncMock()
     callback_query = MagicMock()

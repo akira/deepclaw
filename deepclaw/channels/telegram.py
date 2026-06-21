@@ -2194,18 +2194,30 @@ class TelegramBotChannel(Channel):
             try:
                 if should_try_rich:
                     try:
-                        await _telegram_bot_edit_rich_with_retry(
+                        rich_msg = await _telegram_bot_send_rich_with_retry(
                             self._bot,
                             int(chat_id),
-                            int(message_id),
                             text,
                         )
+                        with contextlib.suppress(Exception):
+                            delete_message = getattr(msg, "delete", None)
+                            if callable(delete_message):
+                                await delete_message()
+                            else:
+                                await self._bot.delete_message(
+                                    chat_id=int(chat_id),
+                                    message_id=int(message_id),
+                                )
+                        _STREAM_MESSAGES.setdefault(chat_id, {})[str(rich_msg.message_id)] = (
+                            rich_msg
+                        )
+                        _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
                         return
                     except Exception as exc:
                         if not _is_rich_fallback_error(exc):
-                            raise ChannelEditUnavailable(f"rich edit failed: {exc}") from exc
+                            raise ChannelEditUnavailable(f"rich send failed: {exc}") from exc
                         logger.warning(
-                            "Telegram rich edit failed for chat %s msg %s; falling back to MarkdownV2: %s",
+                            "Telegram rich final send failed for chat %s msg %s; falling back to MarkdownV2 edit: %s",
                             chat_id,
                             message_id,
                             exc,
@@ -2523,18 +2535,24 @@ class TelegramChannel(Channel):
         try:
             if should_try_rich:
                 try:
-                    await _telegram_bot_edit_rich_with_retry(
+                    rich_msg = await _telegram_bot_send_rich_with_retry(
                         self._bot,
                         int(chat_id),
-                        int(message_id),
                         text,
+                        reply_to_message_id=int(getattr(msg, "message_id", message_id)),
                     )
+                    with contextlib.suppress(Exception):
+                        delete_message = getattr(msg, "delete", None)
+                        if callable(delete_message):
+                            await delete_message()
+                    _STREAM_MESSAGES.setdefault(chat_id, {})[str(rich_msg.message_id)] = rich_msg
+                    _STREAM_MESSAGES.get(chat_id, {}).pop(message_id, None)
                     return
                 except Exception as exc:
                     if not _is_rich_fallback_error(exc):
-                        raise ChannelEditUnavailable(f"rich edit failed: {exc}") from exc
+                        raise ChannelEditUnavailable(f"rich send failed: {exc}") from exc
                     logger.warning(
-                        "Telegram rich edit failed for chat %s msg %s; falling back to MarkdownV2: %s",
+                        "Telegram rich final send failed for chat %s msg %s; falling back to MarkdownV2 edit: %s",
                         chat_id,
                         message_id,
                         exc,
