@@ -3018,8 +3018,8 @@ class TestCmdRetry:
 
         assert ctx.bot_data[PENDING_APPROVALS_KEY]["1"] == pending
         update.message.reply_text.assert_called_once()
-        args, kwargs = update.message.reply_text.call_args
-        assert args == ("Need approval now",)
+        _, kwargs = update.message.reply_text.call_args
+        assert kwargs["text"] == "Need approval now"
         assert (
             kwargs["reply_markup"].inline_keyboard[0][1].callback_data
             == "safety:approve_session:approval-2"
@@ -3044,8 +3044,8 @@ class TestCmdRetry:
         await cmd_retry(update, ctx)
 
         update.message.reply_text.assert_called_once()
-        args, kwargs = update.message.reply_text.call_args
-        assert args == ("Approve or deny?",)
+        _, kwargs = update.message.reply_text.call_args
+        assert kwargs["text"] == "Approve or deny?"
         assert (
             kwargs["reply_markup"].inline_keyboard[0][0].callback_data
             == "safety:approve_once:interrupt-1"
@@ -3069,11 +3069,133 @@ class TestCmdRetry:
         await handle_message(update, ctx)
 
         update.message.reply_text.assert_called_once()
-        args, kwargs = update.message.reply_text.call_args
-        assert args == ("Approve this dangerous command?",)
+        _, kwargs = update.message.reply_text.call_args
+        assert kwargs["text"] == "Approve this dangerous command?"
         assert (
             kwargs["reply_markup"].inline_keyboard[0][2].callback_data == "safety:deny:interrupt-3"
         )
+
+    @pytest.mark.asyncio
+    async def test_handle_message_pending_approval_long_prompt_is_chunked_with_buttons(self):
+        update = _make_slash_update(text="tell me status")
+        long_prompt = "Approve this dangerous command?\n" + ("x" * (TELEGRAM_MESSAGE_LIMIT + 50))
+        ctx = _make_slash_context(
+            extra={
+                PENDING_APPROVALS_KEY: {
+                    "1": {
+                        "id": "interrupt-long",
+                        "thread_id": "thread-1",
+                        "message": long_prompt,
+                    }
+                }
+            }
+        )
+
+        await handle_message(update, ctx)
+
+        assert update.message.reply_text.await_count >= 2
+        first_kwargs = update.message.reply_text.await_args_list[0].kwargs
+        later_kwargs = [call.kwargs for call in update.message.reply_text.await_args_list[1:]]
+        assert first_kwargs["reply_markup"].inline_keyboard[0][0].callback_data == (
+            "safety:approve_once:interrupt-long"
+        )
+        assert all("reply_markup" not in kwargs for kwargs in later_kwargs)
+        assert all(
+            len(kwargs["text"]) <= TELEGRAM_MESSAGE_LIMIT
+            for kwargs in [first_kwargs, *later_kwargs]
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_message_notifies_user_when_run_fails(self):
+        update = _make_slash_update(text="tell me status")
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(
+            side_effect=ValueError("signal only works in main thread of the main interpreter")
+        )
+        ctx = _make_slash_context(extra={GATEWAY_KEY: gateway})
+
+        await handle_message(update, ctx)
+
+        update.message.reply_text.assert_awaited_once()
+        kwargs = update.message.reply_text.await_args.kwargs
+        assert "main-thread signal bug" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_retry_notifies_user_when_provider_rate_limited(self):
+        update = _make_slash_update(text="/retry")
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(
+            side_effect=RuntimeError("Error code: 429 - {'error': 'Rate limit exceeded'}")
+        )
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                LAST_MESSAGE_KEY: {"1": "retry this"},
+            }
+        )
+
+        await cmd_retry(update, ctx)
+
+        update.message.reply_text.assert_awaited_once()
+        kwargs = update.message.reply_text.await_args.kwargs
+        assert "model provider rate-limited" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_drain_queued_run_long_pending_prompt_is_chunked_for_bot_send(self):
+        from deepclaw.channels.telegram import _drain_queued_run
+
+        long_prompt = "Approve queued command?\n" + ("x" * (TELEGRAM_MESSAGE_LIMIT + 50))
+        pending = {
+            "id": "approval-long",
+            "thread_id": "thread-1",
+            "message": long_prompt,
+        }
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(return_value=pending)
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                "queued_runs": {"1": [{"text": "needs approval", "user_id": "1", "source": "telegram"}]},
+            }
+        )
+        ctx.bot.send_message = AsyncMock()
+
+        result = await _drain_queued_run(ctx, chat_id="1", thread_id="thread-1")
+
+        assert result == pending
+        assert ctx.bot.send_message.await_count >= 2
+        first_kwargs = ctx.bot.send_message.await_args_list[0].kwargs
+        later_kwargs = [call.kwargs for call in ctx.bot.send_message.await_args_list[1:]]
+        assert first_kwargs["reply_markup"].inline_keyboard[0][1].callback_data == (
+            "safety:approve_session:approval-long"
+        )
+        assert all("reply_markup" not in kwargs for kwargs in later_kwargs)
+        assert all(
+            len(kwargs["text"]) <= TELEGRAM_MESSAGE_LIMIT
+            for kwargs in [first_kwargs, *later_kwargs]
+        )
+
+    @pytest.mark.asyncio
+    async def test_drain_queued_run_notifies_chat_when_run_fails(self):
+        from deepclaw.channels.telegram import _drain_queued_run
+
+        gateway = MagicMock()
+        gateway.handle_message = AsyncMock(side_effect=RuntimeError("boom"))
+        ctx = _make_slash_context(
+            extra={
+                GATEWAY_KEY: gateway,
+                "queued_runs": {"1": [{"text": "needs approval", "user_id": "1", "source": "telegram"}]},
+            }
+        )
+        ctx.bot.send_message = AsyncMock()
+
+        result = await _drain_queued_run(ctx, chat_id="1", thread_id="thread-1")
+
+        assert result is None
+        ctx.bot.send_message.assert_awaited_once()
+        kwargs = ctx.bot.send_message.await_args.kwargs
+        assert kwargs["chat_id"] == 1
+        assert kwargs["text"] == "Run failed: RuntimeError: boom"
 
     @pytest.mark.asyncio
     async def test_retry_blocked_while_task_running(self):
@@ -3346,8 +3468,10 @@ class TestSafetyApprovalCommands:
 
         assert update.message.reply_text.await_count == 2
         assert sleep_calls
-        args, kwargs = update.message.reply_text.await_args
-        assert args == ("Need another approval",)
+        call = update.message.reply_text.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["text"] == "Need another approval"
         assert (
             kwargs["reply_markup"].inline_keyboard[0][0].callback_data
             == "safety:approve_once:interrupt-2"
@@ -3619,8 +3743,8 @@ class TestSafetyApprovalCommands:
 
         gateway.handle_message.assert_not_awaited()
         update.message.reply_text.assert_called_once()
-        args, kwargs = update.message.reply_text.call_args
-        assert args == ("Approve or deny?",)
+        _, kwargs = update.message.reply_text.call_args
+        assert kwargs["text"] == "Approve or deny?"
         assert (
             kwargs["reply_markup"].inline_keyboard[0][0].callback_data
             == "safety:approve_once:interrupt-1"
