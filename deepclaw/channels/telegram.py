@@ -844,7 +844,11 @@ async def _drain_queued_run(
                 username=queued.get("username"),
                 source=queued.get("source", "telegram"),
             )
-            channel = TelegramBotChannel(context.bot)
+            config = context.bot_data[CONFIG_KEY]
+            channel = TelegramBotChannel(
+                context.bot,
+                rich_messages_enabled=config.telegram.rich_messages,
+            )
             gateway: Gateway = context.bot_data[GATEWAY_KEY]
             pending = await gateway.handle_message(channel, incoming, thread_id)
             if pending:
@@ -2535,11 +2539,20 @@ class TelegramChannel(Channel):
         try:
             if should_try_rich:
                 try:
+                    reply_target = None
+                    if self._update.message is not None:
+                        reply_target = getattr(self._update.message, "message_id", None)
+                    elif self._update.callback_query is not None:
+                        reply_target = getattr(
+                            self._update.callback_query.message, "message_id", None
+                        )
                     rich_msg = await _telegram_bot_send_rich_with_retry(
                         self._bot,
                         int(chat_id),
                         text,
-                        reply_to_message_id=int(getattr(msg, "message_id", message_id)),
+                        reply_to_message_id=(
+                            int(reply_target) if reply_target is not None else None
+                        ),
                     )
                     with contextlib.suppress(Exception):
                         delete_message = getattr(msg, "delete", None)

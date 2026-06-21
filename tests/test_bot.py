@@ -707,7 +707,7 @@ class TestTelegramChannel:
 
         ctx.bot.do_api_request.assert_awaited_once()
         _, kwargs = ctx.bot.do_api_request.await_args
-        assert kwargs["api_kwargs"]["reply_parameters"] == {"message_id": 200}
+        assert kwargs["api_kwargs"]["reply_parameters"] == {"message_id": 199}
         preview.delete.assert_awaited_once()
         assert "200" not in _STREAM_MESSAGES.get("1", {})
         assert "204" in _STREAM_MESSAGES.get("1", {})
@@ -2892,10 +2892,12 @@ class TestCmdRetry:
         update = _make_slash_update(text="/retry")
         calls: list[str] = []
         observed_active_slot: list[bool] = []
+        observed_rich_flags: list[bool] = []
 
         async def _fake_handle_message(_channel, incoming, _thread_id):
             calls.append(incoming.text)
             observed_active_slot.append(bool(ctx.bot_data[ACTIVE_RUNS_KEY].get("1")))
+            observed_rich_flags.append(bool(getattr(_channel, "_rich_messages_enabled", False)))
 
         gateway = MagicMock()
         gateway.handle_message = AsyncMock(side_effect=_fake_handle_message)
@@ -2906,11 +2908,13 @@ class TestCmdRetry:
                 "queued_runs": {"1": [{"text": "then this"}]},
             }
         )
+        ctx.bot_data[CONFIG_KEY].telegram.rich_messages = False
 
         await cmd_retry(update, ctx)
 
         assert calls == ["retry this", "then this"]
         assert observed_active_slot == [True, True]
+        assert observed_rich_flags == [False, False]
         assert ctx.bot_data[ACTIVE_RUNS_KEY] == {}
         assert ctx.bot_data.get("queued_runs", {}) == {}
 
