@@ -351,15 +351,16 @@ class TestTelegramFormattingHelpers:
     def test_formatter_keeps_markdown_links_with_parentheses_as_literal_text(self):
         text = "[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics)) and **bold**"
         formatted = _format_text_for_telegram_markdown(text)
-        assert formatted == r"\[Wiki\]\(https://en\.wikipedia\.org/wiki/Function\_\(mathematics\)\) and *bold*"
+        assert (
+            formatted
+            == r"\[Wiki\]\(https://en\.wikipedia\.org/wiki/Function\_\(mathematics\)\) and *bold*"
+        )
 
     def test_plain_text_fallback_uses_original_markdown_source(self):
         text = "## Title\n- **bold**\n[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
         plain = _plain_text_from_markdown_source(text)
         assert plain == (
-            "Title\n"
-            "• bold\n"
-            "[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
+            "Title\n• bold\n[Wiki](https://en.wikipedia.org/wiki/Function_(mathematics))"
         )
 
 
@@ -707,7 +708,14 @@ class TestGatewayRedaction:
     @pytest.mark.asyncio
     async def test_gateway_uses_markdown_render_only_for_final_delivery(self):
         agent = _FakeStreamingAgent(
-            [(SimpleNamespace(content_blocks=[{"type": "text", "text": "## Title\n- **bold**"}]), {})]
+            [
+                (
+                    SimpleNamespace(
+                        content_blocks=[{"type": "text", "text": "## Title\n- **bold**"}]
+                    ),
+                    {},
+                )
+            ]
         )
         streaming = SimpleNamespace(edit_interval=999.0, buffer_threshold=1)
         gateway = Gateway(agent=agent, streaming_config=streaming)

@@ -1106,15 +1106,14 @@ class Gateway:
         used_fresh_send = False
         force_final_edit = channel.requires_final_reformat_edit
         if (
-            (force_final_edit or chunks[0] != last_display)
-            and not await self._try_edit_stream_message(
-                channel,
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=chunks[0],
-                queue_snapshot=queue_snapshot,
-                render_markdown=True,
-            )
+            force_final_edit or chunks[0] != last_display
+        ) and not await self._try_edit_stream_message(
+            channel,
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=chunks[0],
+            queue_snapshot=queue_snapshot,
+            render_markdown=True,
         ):
             await self._send_redacted_message(
                 channel,

@@ -118,7 +118,7 @@ _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _BULLET_RE = re.compile(r"^(?P<indent>\s*)[-*]\s+(?P<body>.+)$")
 _NUMBERED_RE = re.compile(r"^(?P<indent>\s*)(?P<num>\d+)\.\s+(?P<body>.+)$")
 _BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(?P<body>.+)$")
-_PLACEHOLDER_PREFIX = "\uFFF0TG"
+_PLACEHOLDER_PREFIX = "\ufff0TG"
 
 
 def _escape_mdv2(text: str) -> str:
@@ -126,7 +126,7 @@ def _escape_mdv2(text: str) -> str:
 
 
 def _stash_placeholder(placeholders: dict[str, str], rendered: str) -> str:
-    token = f"{_PLACEHOLDER_PREFIX}{len(placeholders)}\uFFF1"
+    token = f"{_PLACEHOLDER_PREFIX}{len(placeholders)}\ufff1"
     placeholders[token] = rendered
     return token
 
@@ -163,7 +163,9 @@ def _plainify_markdown_line(line: str) -> str:
             numbered_match = _NUMBERED_RE.match(line)
             if numbered_match:
                 indent = "  " * (len(numbered_match.group("indent")) // 2)
-                line = f"{indent}{numbered_match.group('num')}. {numbered_match.group('body').strip()}"
+                line = (
+                    f"{indent}{numbered_match.group('num')}. {numbered_match.group('body').strip()}"
+                )
             else:
                 blockquote_match = _BLOCKQUOTE_RE.match(line)
                 if blockquote_match:
@@ -1866,6 +1868,7 @@ class TelegramBotChannel(Channel):
         if msg is not None:
             try:
                 if render_markdown:
+
                     async def _edit_markdown(_text: str):
                         return await msg.edit_text(_text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -1897,6 +1900,7 @@ class TelegramBotChannel(Channel):
         else:
             try:
                 if render_markdown:
+
                     async def _bot_edit_markdown(_text: str):
                         return await self._bot.edit_message_text(
                             text=_text,
@@ -2028,7 +2032,9 @@ class TelegramChannel(Channel):
                     description="callback reply_text",
                 )
             else:
-                msg = await _telegram_reply_text_with_retry(self._update.callback_query.message, text)
+                msg = await _telegram_reply_text_with_retry(
+                    self._update.callback_query.message, text
+                )
         else:
             raise RuntimeError("No Telegram message context available for send()")
         msg_id = str(msg.message_id)
@@ -2081,6 +2087,7 @@ class TelegramChannel(Channel):
         plain = _plain_text_from_markdown_source(text) if render_markdown else text
         try:
             if render_markdown:
+
                 async def _edit_markdown(_text: str):
                     return await msg.edit_text(_text, parse_mode=ParseMode.MARKDOWN_V2)
 
