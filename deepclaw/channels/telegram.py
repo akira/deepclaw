@@ -576,14 +576,88 @@ async def _telegram_reply_text_with_retry(
     text: str,
     *,
     parse_mode: str | None = None,
+    reply_markup=None,
 ):
     kwargs = {"text": text}
     if parse_mode:
         kwargs["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        kwargs["reply_markup"] = reply_markup
     return await _call_with_retry_after_retry(
         lambda: message.reply_text(**kwargs),
         description="reply_text",
     )
+
+
+async def _telegram_reply_text_chunked_with_retry(
+    message,
+    text: str,
+    *,
+    reply_markup=None,
+) -> list[Any]:
+    messages: list[Any] = []
+    for index, chunk in enumerate(chunk_message(text, TELEGRAM_MESSAGE_LIMIT)):
+        kwargs = {"reply_markup": reply_markup} if index == 0 and reply_markup is not None else {}
+        messages.append(await _telegram_reply_text_with_retry(message, chunk, **kwargs))
+    return messages
+
+
+def _concise_error_message(exc: Exception) -> str:
+    message = " ".join(str(exc).split())
+    lowered = message.lower()
+    if "signal only works in main thread" in lowered:
+        return (
+            "Run failed: browser automation hit a main-thread signal bug while starting "
+            "Browserbase/Stagehand."
+        )
+    if "rate limit exceeded" in lowered or "error code: 429" in lowered:
+        return (
+            "Run failed: the model provider rate-limited this request (429). Please retry shortly."
+        )
+    if isinstance(exc, RetryAfter) or "flood control exceeded" in lowered:
+        return "Run failed: Telegram rate-limited this request. Please retry shortly."
+    if isinstance(exc, BadRequest) and "message is too long" in lowered:
+        return "Run failed: Telegram rejected an overlong message before delivery completed."
+    if message:
+        if len(message) > 220:
+            message = message[:217] + "..."
+        return f"Run failed: {type(exc).__name__}: {message}"
+    return f"Run failed: {type(exc).__name__}."
+
+
+async def _notify_fatal_run_error(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: str,
+    exc: Exception,
+    message=None,
+) -> None:
+    text = _concise_error_message(exc)
+    if message is not None:
+        await _telegram_reply_text_chunked_with_retry(message, text)
+        return
+    await _telegram_bot_send_text_chunked_with_retry(context.bot, int(chat_id), text)
+
+
+async def _telegram_bot_send_text_chunked_with_retry(
+    bot,
+    chat_id: int,
+    text: str,
+    *,
+    reply_markup=None,
+) -> list[Any]:
+    messages: list[Any] = []
+    for index, chunk in enumerate(chunk_message(text, TELEGRAM_MESSAGE_LIMIT)):
+        kwargs = {"reply_markup": reply_markup} if index == 0 and reply_markup is not None else {}
+        messages.append(
+            await _call_with_retry_after_retry(
+                lambda chunk=chunk, kwargs=kwargs: bot.send_message(
+                    chat_id=chat_id, text=chunk, **kwargs
+                ),
+                description=f"send_message chat {chat_id}",
+            )
+        )
+    return messages
 
 
 def _telegram_edit_rate_limit(exc: RetryAfter) -> ChannelEditRateLimited:
@@ -876,20 +950,23 @@ async def _drain_queued_run(
                 _pending_approvals(context)[chat_id] = pending
                 pending_text = _pending_approval_prompt_text(pending)
                 pending_markup = _pending_approval_markup(pending["id"])
-                await _call_with_retry_after_retry(
-                    lambda chat_id=chat_id, pending_text=pending_text, pending_markup=pending_markup: (
-                        context.bot.send_message(
-                            chat_id=int(chat_id),
-                            text=pending_text,
-                            reply_markup=pending_markup,
-                        )
-                    ),
-                    description=f"pending approval send chat {chat_id}",
+                await _telegram_bot_send_text_chunked_with_retry(
+                    context.bot,
+                    int(chat_id),
+                    pending_text,
+                    reply_markup=pending_markup,
                 )
                 _STREAM_MESSAGES.pop(chat_id, None)
                 return pending
             _pending_approvals(context).pop(chat_id, None)
             _STREAM_MESSAGES.pop(chat_id, None)
+        return None
+    except asyncio.CancelledError:
+        logger.info("Cancelled queued run for chat %s", chat_id)
+        return None
+    except Exception as exc:
+        logger.exception("Queued run failed for chat %s", chat_id)
+        await _notify_fatal_run_error(context=context, chat_id=chat_id, exc=exc)
         return None
     finally:
         _finish_active_run(context, chat_id)
@@ -1689,7 +1766,8 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
         if message is None:
             return
-        await message.reply_text(
+        await _telegram_reply_text_chunked_with_retry(
+            message,
             _pending_approval_prompt_text(pending),
             reply_markup=_pending_approval_markup(pending["id"]),
         )
@@ -1714,7 +1792,8 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             message = update.message
             if message is None:
                 return
-            await message.reply_text(
+            await _telegram_reply_text_chunked_with_retry(
+                message,
                 _pending_approval_prompt_text(pending),
                 reply_markup=_pending_approval_markup(pending["id"]),
             )
@@ -1723,6 +1802,15 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _drain_queued_run(context, chat_id=chat_id, thread_id=thread_id)
     except asyncio.CancelledError:
         logger.info("Cancelled active retry for chat %s", chat_id)
+        return
+    except Exception as exc:
+        logger.exception("Active retry failed for chat %s", chat_id)
+        await _notify_fatal_run_error(
+            context=context,
+            chat_id=chat_id,
+            exc=exc,
+            message=update.message,
+        )
         return
     finally:
         _finish_active_run(context, chat_id)
@@ -1806,25 +1894,37 @@ async def _resume_pending_interrupt(
             pending_markup = _pending_approval_markup(next_pending["id"])
             if update.message is not None:
                 message = update.message
-                await _call_with_retry_after_retry(
-                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: (
-                        message.reply_text(pending_text, reply_markup=pending_markup)
-                    ),
-                    description=f"resume pending approval reply chat {chat_id}",
+                await _telegram_reply_text_chunked_with_retry(
+                    message,
+                    pending_text,
+                    reply_markup=pending_markup,
                 )
             elif update.callback_query and update.callback_query.message is not None:
                 message = update.callback_query.message
-                await _call_with_retry_after_retry(
-                    lambda chat_id=chat_id, message=message, pending_text=pending_text, pending_markup=pending_markup: (
-                        message.reply_text(pending_text, reply_markup=pending_markup)
-                    ),
-                    description=f"resume pending approval callback reply chat {chat_id}",
+                await _telegram_reply_text_chunked_with_retry(
+                    message,
+                    pending_text,
+                    reply_markup=pending_markup,
                 )
         else:
             approvals.pop(chat_id, None)
             await _drain_queued_run(context, chat_id=chat_id, thread_id=pending["thread_id"])
     except asyncio.CancelledError:
         logger.info("Cancelled resumed interrupt for chat %s", chat_id)
+        return False
+    except Exception as exc:
+        logger.exception("Resumed interrupt failed for chat %s", chat_id)
+        reply_message = (
+            update.message
+            if update.message is not None
+            else getattr(update.callback_query, "message", None)
+        )
+        await _notify_fatal_run_error(
+            context=context,
+            chat_id=chat_id,
+            exc=exc,
+            message=reply_message,
+        )
         return False
     finally:
         _finish_active_run(context, chat_id)
@@ -2690,12 +2790,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message = update.message
         if message is None:
             return
-        await message.reply_text(
+        await _telegram_reply_text_chunked_with_retry(
+            message,
             _pending_approval_prompt_text(pending),
             reply_markup=_pending_approval_markup(pending["id"]),
         )
         return
-
     if not _begin_active_run(context, chat_id):
         await update.message.reply_text(_active_run_text())
         return
@@ -2719,7 +2819,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         pending = await gateway.handle_message(channel, incoming, thread_id)
         if pending:
             _pending_approvals(context)[chat_id] = pending
-            await update.message.reply_text(
+            await _telegram_reply_text_chunked_with_retry(
+                update.message,
                 _pending_approval_prompt_text(pending),
                 reply_markup=_pending_approval_markup(pending["id"]),
             )
@@ -2728,6 +2829,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await _drain_queued_run(context, chat_id=chat_id, thread_id=thread_id)
     except asyncio.CancelledError:
         logger.info("Cancelled active message run for chat %s", chat_id)
+        return
+    except Exception as exc:
+        logger.exception("Active message run failed for chat %s", chat_id)
+        await _notify_fatal_run_error(
+            context=context,
+            chat_id=chat_id,
+            exc=exc,
+            message=update.message,
+        )
         return
     finally:
         _finish_active_run(context, chat_id)

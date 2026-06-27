@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ _DEFAULT_AGENT_MODEL = "anthropic/claude-sonnet-4-6"
 _MAX_SEARCH_RESULTS = 10
 _DEFAULT_MAX_FETCH_CHARS = 12000
 _DEFAULT_INTERACTIVE_MAX_STEPS = 20
+_STAGEHAND_SIGNAL_PATCH_LOCK = threading.Lock()
 
 
 def _get_env(key: str) -> str:
@@ -284,12 +286,26 @@ async def _create_stagehand(*, model_name: str):
             "Browserbase rendered tools require the `stagehand` package. Install it with `uv add stagehand`."
         )
 
-    stagehand = Stagehand(
-        env="BROWSERBASE",
-        api_key=api_key,
-        project_id=project_id,
-        model_name=model_name,
-    )
+    with _STAGEHAND_SIGNAL_PATCH_LOCK:
+        if threading.current_thread() is threading.main_thread():
+            stagehand = Stagehand(
+                env="BROWSERBASE",
+                api_key=api_key,
+                project_id=project_id,
+                model_name=model_name,
+            )
+        else:
+            original_register_signal_handlers = Stagehand._register_signal_handlers
+            Stagehand._register_signal_handlers = lambda self: None
+            try:
+                stagehand = Stagehand(
+                    env="BROWSERBASE",
+                    api_key=api_key,
+                    project_id=project_id,
+                    model_name=model_name,
+                )
+            finally:
+                Stagehand._register_signal_handlers = original_register_signal_handlers
     await stagehand.init()
     return stagehand
 

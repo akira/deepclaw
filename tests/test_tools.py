@@ -1,5 +1,6 @@
 """Tests for the tool plugin system plus web_search and vision plugins."""
 
+import asyncio
 import json
 import os
 import threading
@@ -302,6 +303,57 @@ class TestBrowserbasePlugin:
 
         assert "error" in result
         assert "stagehand" in result["error"]
+
+    def test_rendered_extract_suppresses_stagehand_signal_registration_off_main_thread(self):
+        from deepclaw.tools import browserbase as browserbase_mod
+
+        register_calls = []
+
+        class FakeStagehand:
+            def __init__(self, **kwargs):
+                self._register_signal_handlers()
+
+            def _register_signal_handlers(self):
+                register_calls.append("called")
+                raise AssertionError("signal registration should be bypassed")
+
+            async def init(self):
+                return None
+
+        fake_module = SimpleNamespace(Stagehand=FakeStagehand)
+        real_import_module = __import__("importlib").import_module
+
+        def fake_import_module(name):
+            if name == "stagehand":
+                return fake_module
+            return real_import_module(name)
+
+        main_thread = object()
+        worker_thread = object()
+        original_register = FakeStagehand._register_signal_handlers
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BROWSERBASE_API_KEY": "test-key",
+                    "BROWSERBASE_PROJECT_ID": "project-id",
+                },
+                clear=True,
+            ),
+            patch("deepclaw.tools.browserbase.import_module", side_effect=fake_import_module),
+            patch("deepclaw.tools.browserbase.threading.main_thread", return_value=main_thread),
+            patch(
+                "deepclaw.tools.browserbase.threading.current_thread", return_value=worker_thread
+            ),
+        ):
+            result = asyncio.run(
+                browserbase_mod._create_stagehand(model_name="anthropic/claude-sonnet-4-6")
+            )
+
+        assert isinstance(result, FakeStagehand)
+        assert register_calls == []
+        assert FakeStagehand._register_signal_handlers is original_register
 
     def test_search_success_uses_browserbase_sdk(self):
         from deepclaw.tools import browserbase as browserbase_mod

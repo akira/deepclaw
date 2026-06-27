@@ -111,6 +111,30 @@ _NUDGE_MESSAGE = (
     "You described an action but did not call any tools. "
     "Please call the appropriate tool now to carry out what you described."
 )
+
+
+def _fatal_exception_message(exc: Exception) -> str:
+    """Return a concise user-visible message for fatal streaming failures."""
+    message = " ".join(str(exc).split())
+    lowered = message.lower()
+    if "signal only works in main thread" in lowered:
+        return (
+            "Run failed: browser automation hit a main-thread signal bug while starting "
+            "Browserbase/Stagehand."
+        )
+    if "rate limit exceeded" in lowered or "error code: 429" in lowered:
+        return "Run failed: the model provider rate-limited this request (429). Please retry shortly."
+    if "flood control exceeded" in lowered:
+        return "Run failed: Telegram rate-limited this request. Please retry shortly."
+    if "message is too long" in lowered:
+        return "Run failed: Telegram rejected an overlong message before delivery completed."
+    if message:
+        if len(message) > 220:
+            message = message[:217] + "..."
+        return f"Run failed: {type(exc).__name__}: {message}"
+    return f"Run failed: {type(exc).__name__}."
+
+
 _MUTATION_REQUEST_WORDS = (
     "update",
     "save",
@@ -1061,9 +1085,10 @@ class Gateway:
             queue_snapshot["status"] = "error"
             queue_snapshot["pending_approval"] = None
             queue_snapshot["updated_at"] = time.time()
-        except Exception:
+        except Exception as exc:
             logger.exception("Agent streaming failed")
-            accumulated = accumulated or "Sorry, something went wrong processing your message."
+            accumulated = _fatal_exception_message(exc)
+            assistant_text = ""
             queue_snapshot["status"] = "error"
             queue_snapshot["pending_approval"] = None
             queue_snapshot["updated_at"] = time.time()
