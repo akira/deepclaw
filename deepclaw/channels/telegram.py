@@ -2963,26 +2963,12 @@ async def post_shutdown(application: Application) -> None:
         await checkpointer_cm.__aexit__(None, None, None)
 
 
-def run_telegram(config) -> None:
-    """Build and run the Telegram bot with long-polling."""
-    from deepclaw.config import CONFIG_DIR
+def register_handlers(application: Application) -> None:
+    """Register all command, callback, and message handlers on an Application.
 
-    token = config.telegram.bot_token
-    if not token:
-        raise SystemExit("TELEGRAM_BOT_TOKEN is required (set via env var, .env, or config.yaml)")
-
-    checkpointer = create_checkpointer()
-
-    application = (
-        Application.builder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
-    )
-    jobs_path = CONFIG_DIR / "cron" / "jobs.json"
-    jobs_path.parent.mkdir(parents=True, exist_ok=True)
-
-    application.bot_data["checkpointer"] = checkpointer
-    application.bot_data[CONFIG_KEY] = config
-    application.bot_data[JOBS_PATH_KEY] = jobs_path
-
+    Shared by run_telegram() and the offline e2e test harness so tests exercise
+    the exact handler routing used in production.
+    """
     application.add_handler(CommandHandler("pair", cmd_pair))
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("clear", cmd_clear))
@@ -3018,6 +3004,29 @@ def run_telegram(config) -> None:
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False)
     )
+
+
+def run_telegram(config) -> None:
+    """Build and run the Telegram bot with long-polling."""
+    from deepclaw.config import CONFIG_DIR
+
+    token = config.telegram.bot_token
+    if not token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is required (set via env var, .env, or config.yaml)")
+
+    checkpointer = create_checkpointer()
+
+    application = (
+        Application.builder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
+    )
+    jobs_path = CONFIG_DIR / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+
+    application.bot_data["checkpointer"] = checkpointer
+    application.bot_data[CONFIG_KEY] = config
+    application.bot_data[JOBS_PATH_KEY] = jobs_path
+
+    register_handlers(application)
 
     logger.info("Starting DeepClaw Telegram bot...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
