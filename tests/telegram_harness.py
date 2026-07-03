@@ -406,6 +406,40 @@ class TelegramHarness:
         await self.app.shutdown()
 
 
+def seed_application(
+    app: Application,
+    agent: ScriptedAgent,
+    *,
+    allowed_users: frozenset[str] | set[str],
+    pairing_code: str,
+    rich_messages: bool = False,
+    edit_interval: float = 0.0,
+    buffer_threshold: int = 1,
+) -> Gateway:
+    """Seed bot_data with config, gateway, and auth state, mirroring post_init()."""
+    config = DeepClawConfig(
+        telegram=TelegramConfig(
+            rich_messages=rich_messages,
+            streaming=TelegramStreamingConfig(
+                edit_interval=edit_interval, buffer_threshold=buffer_threshold
+            ),
+        )
+    )
+    gateway = Gateway(
+        agent=agent,
+        streaming_config=config.telegram.streaming,
+        max_turns=config.max_turns,
+        gateway_timeout=config.gateway_timeout,
+        gateway_timeout_warning=config.gateway_timeout_warning,
+    )
+    app.bot_data[CONFIG_KEY] = config
+    app.bot_data[ALLOWED_USERS_KEY] = set(allowed_users)
+    app.bot_data[THREAD_IDS_KEY] = {}
+    app.bot_data[PAIRING_CODE_KEY] = pairing_code
+    app.bot_data[GATEWAY_KEY] = gateway
+    return gateway
+
+
 async def build_harness(
     *,
     agent: ScriptedAgent,
@@ -425,25 +459,14 @@ async def build_harness(
     )
     register_handlers(app)
 
-    config = DeepClawConfig(
-        telegram=TelegramConfig(
-            rich_messages=rich_messages,
-            # Deterministic streaming: edit after every chunk.
-            streaming=TelegramStreamingConfig(edit_interval=0.0, buffer_threshold=1),
-        )
+    # Deterministic streaming: edit after every chunk.
+    gateway = seed_application(
+        app,
+        agent,
+        allowed_users=allowed_users,
+        pairing_code=pairing_code,
+        rich_messages=rich_messages,
     )
-    gateway = Gateway(
-        agent=agent,
-        streaming_config=config.telegram.streaming,
-        max_turns=config.max_turns,
-        gateway_timeout=config.gateway_timeout,
-        gateway_timeout_warning=config.gateway_timeout_warning,
-    )
-    app.bot_data[CONFIG_KEY] = config
-    app.bot_data[ALLOWED_USERS_KEY] = set(allowed_users)
-    app.bot_data[THREAD_IDS_KEY] = {}
-    app.bot_data[PAIRING_CODE_KEY] = pairing_code
-    app.bot_data[GATEWAY_KEY] = gateway
 
     await app.initialize()
     return TelegramHarness(app, api, agent, gateway)

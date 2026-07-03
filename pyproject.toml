@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 web = ["tavily-python>=0.7.21,<1.0.0"]
 dev = ["pytest>=9.0.3", "pytest-asyncio>=0.23"]
+e2e = ["telethon>=1.36"]
 
 [project.scripts]
 deepclaw = "deepclaw.cli:main"
@@ -74,3 +75,8 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["deepclaw"]
 
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: live Telegram end-to-end tests (require DEEPCLAW_E2E_TELEGRAM=1 and real credentials)",
+]
