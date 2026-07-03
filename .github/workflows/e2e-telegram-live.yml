@@ -1,0 +1,56 @@
+name: Live Telegram E2E
+
+# Manual-trigger only: these tests talk to real Telegram with real credentials
+# (test bot token + Telethon userbot session stored as repo secrets), and
+# Telegram allows only one poller per bot token, so runs must never overlap
+# with each other or with a deployed bot using the same token.
+# One-time credential setup is documented in tests/e2e/README.md.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: telegram-e2e-live
+  cancel-in-progress: false
+
+jobs:
+  live-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: UV_NO_SOURCES=1 uv pip install --system -e ".[dev,e2e]"
+
+      - name: Check secrets are configured
+        env:
+          DEEPCLAW_E2E_BOT_TOKEN: ${{ secrets.DEEPCLAW_E2E_BOT_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELETHON_SESSION: ${{ secrets.TELETHON_SESSION }}
+        run: |
+          missing=""
+          for name in DEEPCLAW_E2E_BOT_TOKEN TELEGRAM_API_ID TELEGRAM_API_HASH TELETHON_SESSION; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repo secrets:$missing — see tests/e2e/README.md"
+            exit 1
+          fi
+
+      - name: Run live e2e tests
+        env:
+          DEEPCLAW_E2E_TELEGRAM: "1"
+          DEEPCLAW_E2E_BOT_TOKEN: ${{ secrets.DEEPCLAW_E2E_BOT_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELETHON_SESSION: ${{ secrets.TELETHON_SESSION }}
+        run: python -m pytest tests/e2e/ -v --tb=short

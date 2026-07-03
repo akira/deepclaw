@@ -58,6 +58,23 @@ The tests send a handful of messages per run and pace streaming edits at
 ~1/second, well under Telegram's flood limits. A full run takes on the order
 of a minute.
 
+## Running in CI
+
+The `Live Telegram E2E` workflow (`.github/workflows/e2e-telegram-live.yml`)
+runs these tests on demand via **Actions → Live Telegram E2E → Run workflow**.
+It is never triggered by pushes or PRs. To enable it, add these repo secrets
+(Settings → Secrets and variables → Actions):
+
+- `DEEPCLAW_E2E_BOT_TOKEN`
+- `TELEGRAM_API_ID`
+- `TELEGRAM_API_HASH`
+- `TELETHON_SESSION`
+
+A concurrency group prevents two runs from polling the bot token at the same
+time. The `TELETHON_SESSION` secret grants full access to the userbot account,
+so use a dedicated secondary account and revoke the session from Telegram's
+"Active Sessions" screen if it ever leaks.
+
 ## Notes
 
 - The userbot account must be able to receive messages from the bot; if a test
