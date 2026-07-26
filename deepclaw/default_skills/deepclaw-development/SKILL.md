@@ -131,6 +131,7 @@ Rule: `available()` checks packages only. Credential errors surface at call time
 def available() -> bool:
     try:
         import some_package  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -382,12 +383,15 @@ The agent is created once at startup via `create_agent(config, checkpointer)`. T
 
 ```python
 from dataclasses import replace
+
 new_config = replace(config, model=new_model)
 context.bot_data[CONFIG_KEY] = new_config
 checkpointer = context.bot_data["checkpointer_resolved"]
 new_agent = create_agent(new_config, checkpointer)
 context.bot_data["agent"] = new_agent
-context.bot_data[GATEWAY_KEY] = Gateway(agent=new_agent, streaming_config=new_config.telegram.streaming)
+context.bot_data[GATEWAY_KEY] = Gateway(
+    agent=new_agent, streaming_config=new_config.telegram.streaming
+)
 ```
 
 **Pitfall:** `DeepClawConfig` is a `@dataclass` — `dataclasses.replace()` only works on real dataclass instances. Test mocks that use `SimpleNamespace(model=...)` will raise `TypeError: replace() should be called on dataclass instances`. Always use `DeepClawConfig(model=...)` in tests that exercise code paths touching the config.

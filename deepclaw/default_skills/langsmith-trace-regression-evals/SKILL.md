@@ -41,7 +41,8 @@ Load env for ad hoc scripts:
 
 ```python
 from dotenv import load_dotenv
-load_dotenv('/home/ubuntu/.deepclaw/.env', override=True)
+
+load_dotenv("/home/ubuntu/.deepclaw/.env", override=True)
 ```
 
 ## Part 1: Find Good New Traces

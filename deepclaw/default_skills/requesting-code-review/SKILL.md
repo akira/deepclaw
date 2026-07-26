@@ -177,7 +177,7 @@ Return ONLY this JSON:
   "summary": "one sentence verdict"
 }""",
     context="Independent code review. Return only JSON verdict.",
-    toolsets=["terminal"]
+    toolsets=["terminal"],
 )
 ```
 
@@ -223,7 +223,7 @@ Current diff for context:
 
 Fix each issue precisely. Describe what you changed and why.""",
     context="Fix only the reported issues. Do not change anything else.",
-    toolsets=["terminal", "file"]
+    toolsets=["terminal", "file"],
 )
 ```
 
