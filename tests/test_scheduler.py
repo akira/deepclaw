@@ -452,3 +452,136 @@ class TestListJobs:
     def test_list_empty(self, tmp_path):
         f = tmp_path / "nonexistent.json"
         assert list_jobs(f) == []
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: threading.Lock race condition fix
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrencySafety:
+    """Tests that the threading.Lock prevents the race condition that
+    previously wiped jobs when parallel add_job calls overwrote each other."""
+
+    def test_parallel_adds_all_persist(self, tmp_path):
+        """Multiple add_job calls from different threads must all persist."""
+        import threading
+
+        f = tmp_path / "jobs.json"
+        errors: list[Exception] = []
+
+        def add_one(i: int):
+            try:
+                add_job(f"job-{i}", "* * * * *", f"prompt {i}", {}, path=f)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=add_one, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Errors in threads: {errors}"
+        jobs = load_jobs(f)
+        assert len(jobs) == 20, f"Expected 20 jobs, got {len(jobs)}"
+
+    def test_parallel_adds_and_removes(self, tmp_path):
+        """Interleaved add/remove from multiple threads must not corrupt state."""
+        import threading
+
+        f = tmp_path / "jobs.json"
+        # Seed with some jobs
+        seeded = [add_job(f"seed-{i}", "* * * * *", "p", {}, path=f) for i in range(5)]
+        errors: list[Exception] = []
+
+        def add_one(i: int):
+            try:
+                add_job(f"add-{i}", "* * * * *", "p", {}, path=f)
+            except Exception as exc:
+                errors.append(exc)
+
+        def remove_one(job_id: str):
+            try:
+                remove_job(job_id, f)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = []
+        for i in range(10):
+            threads.append(threading.Thread(target=add_one, args=(i,)))
+        for j in seeded[:3]:
+            threads.append(threading.Thread(target=remove_one, args=(j.id,)))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Errors in threads: {errors}"
+        # 5 seeded - 3 removed + 10 added = 12
+        jobs = load_jobs(f)
+        assert len(jobs) == 12, f"Expected 12 jobs, got {len(jobs)}"
+
+    @pytest.mark.asyncio
+    async def test_tick_skips_job_removed_during_run(self, tmp_path):
+        """If a job is removed while run_job is executing, tick() should
+        skip the last_run update without error."""
+        f = tmp_path / "jobs.json"
+        past = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+        job = _make_job(cron_expr="* * * * *", last_run=past)
+        save_jobs([job], f)
+
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="ok")]})
+        channel = AsyncMock()
+        channel.name = "telegram"
+
+        scheduler = Scheduler(
+            jobs_path=f, agent=agent, checkpointer=None, channels={"telegram": channel}
+        )
+
+        # Patch run_job to remove the job mid-run, simulating a concurrent removal
+        original_run = scheduler.run_job
+
+        async def removing_run(j):
+            # Remove the job while it's "running"
+            remove_job(j.id, f)
+            await original_run(j)
+
+        scheduler.run_job = removing_run
+        await scheduler.tick()
+
+        # Job should be gone from file (removed by the mock), no crash
+        remaining = load_jobs(f)
+        assert len(remaining) == 0
+
+    @pytest.mark.asyncio
+    async def test_tick_skips_job_disabled_during_tick(self, tmp_path):
+        """If a job is disabled between snapshot and run, tick() should skip it."""
+        f = tmp_path / "jobs.json"
+        past = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+        job = _make_job(cron_expr="* * * * *", last_run=past)
+        save_jobs([job], f)
+
+        agent = AsyncMock()
+        agent.ainvoke = AsyncMock(return_value={"messages": [MagicMock(content="ok")]})
+
+        scheduler = Scheduler(jobs_path=f, agent=agent, checkpointer=None)
+
+        # Override _is_due to disable the job right before the pre-check
+        # would normally pass — simulates a disable between snapshot and run
+        original_is_due = scheduler._is_due
+
+        def disabling_is_due(j, n):
+            result = original_is_due(j, n)
+            if result:
+                # Disable the job in the file before tick() reaches the pre-check
+                save_jobs([_make_job(id=job.id, enabled=False, last_run=past)], f)
+            return result
+
+        scheduler._is_due = disabling_is_due
+        await scheduler.tick()
+
+        # Agent should not have been called (job disabled before run)
+        agent.ainvoke.assert_not_called()
