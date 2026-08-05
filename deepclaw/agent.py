@@ -18,6 +18,7 @@ from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from deepagents.middleware.summarization import create_summarization_tool_middleware
+from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, DeepClawConfig
@@ -673,6 +674,10 @@ def create_agent(config, checkpointer):
     # Skills
     skills_sources = _setup_skills()
     middleware.append(SkillsMiddleware(backend=fs_backend, sources=skills_sources))
+
+    # Todo list — restore the write_todos tool that deepagents 0.7.0 removed
+    # from the default middleware stack.
+    middleware.append(TodoListMiddleware())
 
     # Deepagents CLI-style local context: detected once, cached in thread state,
     # and refreshed after conversation compaction.

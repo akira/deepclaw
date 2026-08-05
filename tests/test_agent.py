@@ -408,6 +408,10 @@ class TestCreateAgent:
             isinstance(middleware, FilesystemMiddleware) for middleware in captured["middleware"]
         )
         assert any(
+            isinstance(middleware, agent_mod.TodoListMiddleware)
+            for middleware in captured["middleware"]
+        )
+        assert any(
             isinstance(middleware, agent_mod.LocalContextMiddleware)
             for middleware in captured["middleware"]
         )
