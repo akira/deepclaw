@@ -267,6 +267,7 @@ locator = page.locator(selector)
 def available() -> bool:
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
+
         return True
     except ImportError:
         return False
