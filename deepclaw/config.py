@@ -226,6 +226,7 @@ DEFAULT_CONFIG_YAML = """\
 # model: "deepinfra:deepseek-ai/DeepSeek-V3"
 # model: "baseten:moonshotai/Kimi-K2-Instruct-0905"
 # model: "baseten:https://model-<id>.api.baseten.co/environments/production/sync/v1"
+# model: "fireworks:accounts/fireworks/models/llama-v3p1-70b-instruct"
 # Experimental/unofficial OpenAI Codex subscription OAuth (private API):
 # model: "openai_codex:gpt-5.3-codex"
 # First run: `deepclaw auth login openai_codex` (or append `--paste` on a
@@ -238,8 +239,8 @@ DEFAULT_CONFIG_YAML = """\
 # retain cached credentials until it restarts.
 # Vision and TTS each use OPENAI_API_KEY, not ChatGPT subscription OAuth.
 
-# Optional generation defaults. DeepInfra and Baseten support map these through
-# to their LangChain adapters when using deepinfra:* or baseten:* models.
+# Optional generation defaults. DeepInfra, Baseten, and Fireworks map these
+# through to their LangChain adapters when using provider-prefixed models.
 # generation:
 #   temperature: 0.2
 #   max_tokens: 4096

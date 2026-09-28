@@ -162,6 +162,7 @@ Supported providers (requires the provider's API key and langchain package):
 | OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` | `langchain-openai` |
 | OpenAI Codex OAuth (experimental/private API) | `openai_codex:gpt-5.3-codex` | ChatGPT subscription login | `langchain-openai==1.3.2` |
 | DeepInfra | `deepinfra:deepseek-ai/DeepSeek-V3` | `DEEPINFRA_API_TOKEN` | `langchain-community` |
+| Fireworks AI | `fireworks:accounts/fireworks/models/llama-v3p1-70b-instruct` | `FIREWORKS_API_KEY` | `langchain-fireworks==1.5.0` |
 | Baseten | `baseten:moonshotai/Kimi-K2-Instruct-0905` or `baseten:https://model-<id>.api.baseten.co/environments/production/sync/v1` | `BASETEN_API_KEY` | `langchain-baseten` |
 | Google | `google-genai:gemini-2.5-pro` | `GOOGLE_API_KEY` | `langchain-google-genai` |
 | Groq | `groq:llama-3.3-70b` | `GROQ_API_KEY` | `langchain-groq` |
