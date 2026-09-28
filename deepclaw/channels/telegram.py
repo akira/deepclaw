@@ -1631,6 +1631,7 @@ KNOWN_PROVIDERS = (
     "nvidia",
     "deepinfra",
     "baseten",
+    "openai_codex",
 )
 
 

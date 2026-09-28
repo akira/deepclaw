@@ -226,6 +226,17 @@ DEFAULT_CONFIG_YAML = """\
 # model: "deepinfra:deepseek-ai/DeepSeek-V3"
 # model: "baseten:moonshotai/Kimi-K2-Instruct-0905"
 # model: "baseten:https://model-<id>.api.baseten.co/environments/production/sync/v1"
+# Experimental/unofficial OpenAI Codex subscription OAuth (private API):
+# model: "openai_codex:gpt-5.3-codex"
+# First run: `deepclaw auth login openai_codex` (or append `--paste` on a
+# remote server; paste the failed localhost redirect URL from your browser).
+# No browser-to-server connection is required. Credentials are stored at
+# ~/.deepclaw/auth/chatgpt-auth.json, separate from the Codex CLI store.
+# On an expired session, run the login command again, then restart with:
+# systemctl --user restart deepclaw
+# After `deepclaw auth logout openai_codex`, restart too: a running service may
+# retain cached credentials until it restarts.
+# Vision and TTS each use OPENAI_API_KEY, not ChatGPT subscription OAuth.
 
 # Optional generation defaults. DeepInfra and Baseten support map these through
 # to their LangChain adapters when using deepinfra:* or baseten:* models.

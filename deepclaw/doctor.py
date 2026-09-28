@@ -1,5 +1,6 @@
 """Diagnostics for DeepClaw — checks system health and reports issues."""
 
+import asyncio
 import os
 import shutil
 from dataclasses import dataclass
@@ -68,8 +69,39 @@ def check_telegram_token(config: DeepClawConfig) -> Check:
     return Check("Telegram token", STATUS_FAIL, "bot_token is not set")
 
 
-def check_llm_api_key() -> Check:
+def check_llm_api_key(config: DeepClawConfig | None = None) -> Check:
     """Check whether one of the supported LLM API credentials is set."""
+    if config and (config.model or "").strip().startswith("openai_codex:"):
+        from deepclaw.integrations.openai_codex import (
+            OpenAICodexAuthError,
+            OpenAICodexDependencyError,
+            get_openai_codex_auth_status,
+        )
+
+        try:
+            status = get_openai_codex_auth_status()
+        except OpenAICodexDependencyError as exc:
+            return Check("OpenAI Codex OAuth", STATUS_FAIL, str(exc))
+        except OpenAICodexAuthError:
+            return Check(
+                "OpenAI Codex OAuth",
+                STATUS_FAIL,
+                "Credentials are expired, corrupt, or could not be refreshed. "
+                "Run `deepclaw auth login openai_codex --paste` on a remote server.",
+            )
+        if not status["logged_in"]:
+            return Check(
+                "OpenAI Codex OAuth",
+                STATUS_FAIL,
+                "No credentials found. Run `deepclaw auth login openai_codex --paste` on a remote server.",
+            )
+        details = [
+            f"{key}={status[key]}"
+            for key in ("account_id", "plan_type", "user_id", "expires_at")
+            if status.get(key) is not None
+        ]
+        suffix = f" ({', '.join(details)})" if details else ""
+        return Check("OpenAI Codex OAuth", STATUS_OK, f"Credentials are valid{suffix}")
     if os.environ.get("ANTHROPIC_API_KEY"):
         return Check("LLM API key", STATUS_OK, "ANTHROPIC_API_KEY is set")
     if os.environ.get("OPENAI_API_KEY"):
@@ -166,12 +198,18 @@ def check_skills_health() -> Check:
 
 async def run_checks(config: DeepClawConfig) -> list[Check]:
     """Run all diagnostic checks and return the results."""
+    is_openai_codex = (config.model or "").strip().startswith("openai_codex:")
+    llm_check = (
+        await asyncio.to_thread(check_llm_api_key, config)
+        if is_openai_codex
+        else check_llm_api_key(config)
+    )
     return [
         check_config_dir(),
         check_config_file(),
         check_env_file(),
         check_telegram_token(config),
-        check_llm_api_key(),
+        llm_check,
         check_workspace(config),
         check_terminal_compression(config),
         check_checkpointer_path(),
