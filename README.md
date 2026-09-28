@@ -171,8 +171,13 @@ Supported providers (requires the provider's API key and langchain package):
 For Fireworks, put `FIREWORKS_API_KEY` in `~/.deepclaw/.env` and select a
 `fireworks:<model>` spec. DeepClaw loads `.env` at startup. If you rely on
 credentials embedded in an installed systemd/launchd service instead, rerun
-`uv run deepclaw service install` after adding the key, then reload/restart
-as instructed by the installer. `deepclaw doctor` checks the Fireworks key.
+`uv run deepclaw service install` after adding the key. For an **already-running**
+Linux service, run `systemctl --user daemon-reload` followed by
+`systemctl --user restart deepclaw.service`; `start` alone does not replace the
+running process. For an already-running macOS service, run
+`launchctl unload ~/Library/LaunchAgents/com.deepclaw.bot.plist` followed by
+`launchctl load ~/Library/LaunchAgents/com.deepclaw.bot.plist`.
+`deepclaw doctor` checks the Fireworks key.
 
 Install additional providers as needed:
 ```bash
