@@ -168,6 +168,12 @@ Supported providers (requires the provider's API key and langchain package):
 | Groq | `groq:llama-3.3-70b` | `GROQ_API_KEY` | `langchain-groq` |
 | OpenRouter | `openrouter:anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` | `langchain-openrouter` |
 
+For Fireworks, put `FIREWORKS_API_KEY` in `~/.deepclaw/.env` and select a
+`fireworks:<model>` spec. DeepClaw loads `.env` at startup. If you rely on
+credentials embedded in an installed systemd/launchd service instead, rerun
+`uv run deepclaw service install` after adding the key, then reload/restart
+as instructed by the installer. `deepclaw doctor` checks the Fireworks key.
+
 Install additional providers as needed:
 ```bash
 uv pip install langchain-openai langchain-baseten  # for OpenAI or Baseten models

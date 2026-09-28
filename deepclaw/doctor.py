@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from deepclaw.config import CHECKPOINTER_DB_PATH, CONFIG_DIR, CONFIG_FILE, ENV_FILE, DeepClawConfig
+from deepclaw.config import (
+    CHECKPOINTER_DB_PATH,
+    CONFIG_DIR,
+    CONFIG_FILE,
+    ENV_FILE,
+    DeepClawConfig,
+    _parse_env_file,
+)
 from deepclaw.service import detect_platform, get_service_path
 from deepclaw.tools.skills import skills_audit, skills_check_resolvable
 
@@ -102,6 +109,15 @@ def check_llm_api_key(config: DeepClawConfig | None = None) -> Check:
         ]
         suffix = f" ({', '.join(details)})" if details else ""
         return Check("OpenAI Codex OAuth", STATUS_OK, f"Credentials are valid{suffix}")
+    if config and (config.model or "").strip().startswith("fireworks:"):
+        key = (
+            os.environ["FIREWORKS_API_KEY"]
+            if "FIREWORKS_API_KEY" in os.environ
+            else _parse_env_file(ENV_FILE).get("FIREWORKS_API_KEY")
+        )
+        if key:
+            return Check("LLM API key", STATUS_OK, "FIREWORKS_API_KEY is set")
+        return Check("LLM API key", STATUS_FAIL, "FIREWORKS_API_KEY is not set")
     if os.environ.get("ANTHROPIC_API_KEY"):
         return Check("LLM API key", STATUS_OK, "ANTHROPIC_API_KEY is set")
     if os.environ.get("OPENAI_API_KEY"):
@@ -112,10 +128,13 @@ def check_llm_api_key(config: DeepClawConfig | None = None) -> Check:
         return Check("LLM API key", STATUS_OK, "DEEPINFRA_API_KEY is set")
     if os.environ.get("BASETEN_API_KEY"):
         return Check("LLM API key", STATUS_OK, "BASETEN_API_KEY is set")
+    if os.environ.get("FIREWORKS_API_KEY"):
+        return Check("LLM API key", STATUS_OK, "FIREWORKS_API_KEY is set")
     return Check(
         "LLM API key",
         STATUS_FAIL,
-        "None of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPINFRA_API_TOKEN, DEEPINFRA_API_KEY, or BASETEN_API_KEY is set",
+        "None of ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPINFRA_API_TOKEN, "
+        "DEEPINFRA_API_KEY, BASETEN_API_KEY, or FIREWORKS_API_KEY is set",
     )
 
 

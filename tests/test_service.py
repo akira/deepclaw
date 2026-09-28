@@ -52,6 +52,21 @@ class TestGetServicePath:
 
 
 class TestGenerateServiceFile:
+    def test_fireworks_key_from_env_file_is_inlined_for_both_platforms(self):
+        with (
+            patch(
+                "deepclaw.service._parse_env_file",
+                return_value={"FIREWORKS_API_KEY": "fw-test-key"},
+            ),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            systemd = generate_service_file("linux")
+            launchd = generate_service_file("macos")
+
+        assert 'Environment=FIREWORKS_API_KEY="fw-test-key"' in systemd
+        assert "<key>FIREWORKS_API_KEY</key>" in launchd
+        assert "<string>fw-test-key</string>" in launchd
+
     def test_macos_plist_content(self):
         content = generate_service_file("macos")
         assert "<?xml" in content

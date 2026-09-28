@@ -113,6 +113,42 @@ class TestCheckTelegramToken:
 
 
 class TestCheckLlmApiKey:
+    def test_fireworks_key_only_is_recognized(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "fw-test-key")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        result = check_llm_api_key()
+        assert result.status == STATUS_OK
+        assert "FIREWORKS_API_KEY" in result.message
+
+    def test_fireworks_model_rejects_unrelated_provider_key(self, monkeypatch):
+        monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "unrelated-test-key")
+        monkeypatch.setattr("deepclaw.doctor._parse_env_file", lambda _path: {})
+        result = check_llm_api_key(DeepClawConfig(model="fireworks:accounts/example/models/chat"))
+        assert result.status == STATUS_FAIL
+        assert "FIREWORKS_API_KEY" in result.message
+
+    def test_fireworks_model_accepts_key_from_env_file(self, monkeypatch):
+        monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "deepclaw.doctor._parse_env_file",
+            lambda _path: {"FIREWORKS_API_KEY": "fw-test-key"},
+        )
+        result = check_llm_api_key(DeepClawConfig(model="fireworks:accounts/example/models/chat"))
+        assert result.status == STATUS_OK
+        assert "FIREWORKS_API_KEY" in result.message
+
+    def test_fireworks_empty_shell_key_overrides_env_file(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "")
+        monkeypatch.setattr(
+            "deepclaw.doctor._parse_env_file",
+            lambda _path: {"FIREWORKS_API_KEY": "fw-test-key"},
+        )
+        result = check_llm_api_key(DeepClawConfig(model="fireworks:accounts/example/models/chat"))
+        assert result.status == STATUS_FAIL
+        assert "FIREWORKS_API_KEY" in result.message
+
     def test_anthropic_key_set(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -163,6 +199,7 @@ class TestCheckLlmApiKey:
         monkeypatch.delenv("DEEPINFRA_API_TOKEN", raising=False)
         monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
         monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+        monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
         result = check_llm_api_key()
         assert result.status == STATUS_FAIL
 
