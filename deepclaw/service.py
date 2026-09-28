@@ -49,6 +49,7 @@ _SERVICE_ENV_KEYS = frozenset(
         "OPENAI_API_KEY",
         "DEEPINFRA_API_TOKEN",
         "DEEPINFRA_API_KEY",
+        "FIREWORKS_API_KEY",
         "TAVILY_API_KEY",
         "DEEPCLAW_MODEL",
         "DEEPCLAW_ALLOWED_USERS",
