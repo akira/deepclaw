@@ -1,9 +1,12 @@
 """Tests for deepclaw.doctor module."""
 
+import asyncio
+import threading
 from unittest.mock import patch
 
 import pytest
 
+from deepclaw import doctor
 from deepclaw.config import DeepClawConfig, TelegramConfig
 from deepclaw.doctor import (
     STATUS_FAIL,
@@ -350,6 +353,48 @@ class TestFormatReport:
 
 
 class TestRunChecks:
+    @pytest.mark.asyncio
+    async def test_codex_llm_check_does_not_block_event_loop(self, monkeypatch):
+        started = threading.Event()
+        release = threading.Event()
+        other_coroutine_ran = asyncio.Event()
+
+        def blocking_check(_config):
+            started.set()
+            assert release.wait(timeout=1)
+            return Check("OpenAI Codex OAuth", STATUS_OK, "Credentials are valid")
+
+        monkeypatch.setattr(doctor, "check_llm_api_key", blocking_check)
+        task = asyncio.create_task(run_checks(DeepClawConfig(model="openai_codex:gpt-5.3-codex")))
+
+        assert await asyncio.to_thread(started.wait, 1)
+
+        async def other_coroutine():
+            await asyncio.sleep(0)
+            other_coroutine_ran.set()
+
+        await other_coroutine()
+        assert other_coroutine_ran.is_set()
+
+        release.set()
+        checks = await task
+        assert checks[4].status == STATUS_OK
+
+    @pytest.mark.asyncio
+    async def test_non_codex_llm_check_stays_synchronous(self, monkeypatch):
+        event_loop_thread = threading.get_ident()
+        call_threads = []
+
+        def check(_config):
+            call_threads.append(threading.get_ident())
+            return Check("LLM API key", STATUS_OK, "set")
+
+        monkeypatch.setattr(doctor, "check_llm_api_key", check)
+        checks = await run_checks(_make_config())
+
+        assert checks[4].status == STATUS_OK
+        assert call_threads == [event_loop_thread]
+
     @pytest.mark.asyncio
     async def test_returns_list_of_checks(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")

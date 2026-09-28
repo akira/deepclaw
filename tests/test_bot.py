@@ -2484,6 +2484,9 @@ class TestValidateModel:
     def test_valid_openai(self):
         assert _validate_model("openai:gpt-5.3-codex") is None
 
+    def test_valid_openai_codex_oauth(self):
+        assert _validate_model("openai_codex:gpt-5.3-codex") is None
+
     def test_valid_deepinfra(self):
         assert _validate_model("deepinfra:deepseek-ai/DeepSeek-V3") is None
 
